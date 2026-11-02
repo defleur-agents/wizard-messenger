@@ -108,8 +108,46 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = logic;
   if (typeof document === 'undefined') return;
 
+  // Opened on Messenger's raw app port (https://<box>:9245/) instead of its Wizard path (/messenger/ on the Wizard
+  // origin): a stale launcher address, a bookmark, or a Wizard window framing the raw port. There the session cookie
+  // (Path=/messenger/) never comes back and a trusted Wizard refuses every owner call (trusted_gateway_required),
+  // so the page could only ever show "Couldn't reach Messenger". Go to the same page on the Wizard origin instead.
+  // This runs before anything else: the raw port does not serve the shell's /wizard-os-home/ client.
+  // Only ever to one of this box's own Wizard origins (the server lists them in meta messenger-gateway), only on the
+  // same host name, at most once a minute per tab (sessionStorage), and never to the address already open.
+  const GATEWAY_FLAG = 'messenger-gateway-redirect';
+  function gatewayTarget(refused = false) {
+    let cfg; try { cfg = JSON.parse(document.querySelector('meta[name="messenger-gateway"]')?.content || 'null'); } catch { return null; }
+    const path = cfg?.path, origins = Array.isArray(cfg?.origins) ? cfg.origins : [];
+    if (typeof path !== 'string' || !/^\/(?:[A-Za-z0-9_-]+\/)+$/.test(path)) return null;   // served at / : nothing to move to
+    let framed = false; try { framed = window.top !== window; } catch { framed = true; }
+    const own = origins.filter(o => { try { const u = new URL(o); return u.origin === o && u.protocol === 'https:' && u.hostname === location.hostname; } catch { return false; } });
+    const onPath = location.pathname === path || location.pathname.startsWith(path);
+    const originOf = s => { try { return new URL(s).origin; } catch { return ''; } };
+    const parent = framed ? (location.ancestorOrigins?.[0] || originOf(document.referrer)) : originOf(document.referrer);
+    let origin = own.includes(parent) ? parent : '';
+    if (!origin && (refused || !onPath) && !framed) origin = own[0] || '';   // no referrer: the box's first Wizard origin
+    if (!origin || (origin === location.origin && onPath)) return null;
+    // A Wizard window framing this page from another origin, a page off the Wizard path, or an owner refusal.
+    if (!(refused || !onPath || (framed && origin !== location.origin))) return null;
+    const target = new URL(path, origin);
+    if (location.hash && !location.hash.startsWith('#ticket=')) target.hash = location.hash;
+    return target.href;
+  }
+  function toGateway(refused = false) {
+    if (location.hash.startsWith('#ticket=')) return false;   // a one-use launch ticket is never carried across
+    const target = gatewayTarget(refused); if (!target) return false;
+    try {
+      const last = +sessionStorage.getItem(GATEWAY_FLAG) || 0;
+      if (Date.now() - last < 60000) return false;          // tried a minute ago and came back here: show the card
+      sessionStorage.setItem(GATEWAY_FLAG, String(Date.now()));
+    } catch { return false; }                               // no storage, no loop guard: never redirect
+    const note = document.getElementById('gate-description'); if (note) note.textContent = 'Opening Messenger in Wizard…';
+    location.replace(target); return true;
+  }
+  if (toGateway()) return;
   if (!window.WizardApp) throw new Error('Messenger requires the shared WizardApp client');
-  window.WizardApp.ready({name: 'messenger', version: '0.2.0-unified.16.5'});
+  window.WizardApp.ready({name: 'messenger', version: '0.2.0-unified.16.6'});
 
   const $ = id => document.getElementById(id);
   const state = {
@@ -1127,49 +1165,12 @@
     if (state.authenticated) { launchTicket = null; run(snapshot); }
     else boot();
   });
-  // Opened on Messenger's raw app port (https://<box>:9245/) instead of its Wizard path (/messenger/ on the Wizard
-  // origin): a stale launcher address, a bookmark, or a Wizard window framing the raw port. There the session cookie
-  // (Path=/messenger/) never comes back and a trusted Wizard refuses every owner call (trusted_gateway_required),
-  // so the page could only ever show "Couldn't reach Messenger". Go to the same page on the Wizard origin instead.
-  // Only ever to one of this box's own Wizard origins (the server lists them in meta messenger-gateway), only on the
-  // same host name, at most once a minute per tab (sessionStorage), and never to the address already open.
-  const GATEWAY_FLAG = 'messenger-gateway-redirect';
-  function gatewayTarget(refused = false) {
-    let cfg; try { cfg = JSON.parse(document.querySelector('meta[name="messenger-gateway"]')?.content || 'null'); } catch { return null; }
-    const path = cfg?.path, origins = Array.isArray(cfg?.origins) ? cfg.origins : [];
-    if (typeof path !== 'string' || !/^\/(?:[A-Za-z0-9_-]+\/)+$/.test(path)) return null;   // served at / : nothing to move to
-    let framed = false; try { framed = window.top !== window; } catch { framed = true; }
-    const own = origins.filter(o => { try { const u = new URL(o); return u.origin === o && u.protocol === 'https:' && u.hostname === location.hostname; } catch { return false; } });
-    const onPath = location.pathname === path || location.pathname.startsWith(path);
-    const originOf = s => { try { return new URL(s).origin; } catch { return ''; } };
-    const parent = framed ? (location.ancestorOrigins?.[0] || originOf(document.referrer)) : originOf(document.referrer);
-    let origin = own.includes(parent) ? parent : '';
-    if (!origin && (refused || !onPath) && !framed) origin = own[0] || '';   // no referrer: the box's first Wizard origin
-    if (!origin || (origin === location.origin && onPath)) return null;
-    // A Wizard window framing this page from another origin, a page off the Wizard path, or an owner refusal.
-    if (!(refused || !onPath || (framed && origin !== location.origin))) return null;
-    const target = new URL(path, origin);
-    if (location.hash && !location.hash.startsWith('#ticket=')) target.hash = location.hash;
-    return target.href;
-  }
-  function toGateway(refused = false) {
-    if (launchTicket) return false;
-    const target = gatewayTarget(refused); if (!target) return false;
-    try {
-      const last = +sessionStorage.getItem(GATEWAY_FLAG) || 0;
-      if (Date.now() - last < 60000) return false;          // tried a minute ago and came back here: show the card
-      sessionStorage.setItem(GATEWAY_FLAG, String(Date.now()));
-    } catch { return false; }                               // no storage, no loop guard: never redirect
-    gate('opening'); $('gate-description').textContent = 'Opening Messenger in Wizard…';
-    location.replace(target); return true;
-  }
   async function boot(redeemTicket = false) {
     // Bound views may preload in a different browser context. A preview must not
     // consume the owner's one-use enrollment before they act in this window.
     if (launchTicket && redeemTicket !== true && document.querySelector?.('meta[name="messenger-enrollment"]')?.content === 'manual') {
       gate('enrollment_ready'); return;
     }
-    if (toGateway()) return;
     gate('opening');
     await run(async signal => {
       try {

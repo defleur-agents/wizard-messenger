@@ -13,6 +13,8 @@ const shell = frame => `<!doctype html><title>Wizard</title><body>${frame ? `<if
   async function scenario(name, fn, {gatewayBouncesBack = false} = {}) {
     const context = await browser.newContext({viewport: {width: 390, height: 844}, ignoreHTTPSErrors: true});
     await context.addInitScript(() => {
+      // Like the real box: the shell's WizardApp client exists on the Wizard origins only, never on the raw port.
+      if (location.port === '9245') return;
       const noop = () => {};
       window.WizardApp = {ready: noop, update: {hold: () => ({release: noop})}, back: {register: noop}, on: noop, nav: {}, toast: noop, titlebar: {set: async () => false}};
     });
@@ -20,7 +22,9 @@ const shell = frame => `<!doctype html><title>Wizard</title><body>${frame ? `<if
     await context.route('**/*', async route => {
       const u = new URL(route.request().url());
       seen.push(u.href);
-      if (u.pathname.startsWith('/wizard-os-home/')) return route.fulfill({status: 200, contentType: 'application/javascript', body: ''});
+      if (u.pathname.startsWith('/wizard-os-home/')) return u.port === '9245'
+        ? route.fulfill({status: 403, contentType: 'application/json', body: '{"ok":false,"error":{"code":"trusted_gateway_required"}}'})
+        : route.fulfill({status: 200, contentType: 'application/javascript', body: ''});
       if (u.hostname === 'evil.test') return route.fulfill({status: 200, contentType: 'text/html', body: shell(u.searchParams.get('frame'))});
       if (u.hostname === '127.0.0.1') return route.continue();
       if (u.hostname !== 'box.test') return route.abort();
@@ -32,7 +36,7 @@ const shell = frame => `<!doctype html><title>Wizard</title><body>${frame ? `<if
       return route.fulfill({status: 200, contentType: 'text/html', body: shell(u.searchParams.get('frame'))});
     });
     const page = await context.newPage();
-    const errors = []; page.on('pageerror', e => errors.push(e.message));
+    const errors = []; page.on('pageerror', e => { if (!/requires the shared WizardApp client/.test(e.message) || !page.url().includes(':9245')) errors.push(e.message); });
     if (process.env.DEBUG_NET) page.on('response', r => { if (r.url().includes('/api/')) r.text().then(t => console.log('DEBUG net', r.status(), r.url(), t.slice(0, 160))).catch(() => {}); });
     try { await fn(page, seen); results.push('ok   ' + name); }
     catch (e) { results.push('FAIL ' + name + ': ' + e.message); process.exitCode = 1; }
