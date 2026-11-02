@@ -119,6 +119,13 @@ class BrowserAuth:
 # Machine keys are untrusted agent capabilities, never owner browser authority.
 from drafts import Drafts
 
+def gateway_origins(origins):
+    """The box's Wizard origins (MESSENGER_ALLOWED_ORIGINS) in a form safe for a CSP source list and app.js.
+    A plain function over the server's `origins`: the owner Unix hop (owner_unix.OwnerUnixServer) copies the
+    ViewServer's attributes, not its methods, and serves this same page."""
+    return sorted(o for o in origins or () if re.fullmatch(r'https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?', o))
+
+
 class ViewServer(MessengerServer):
     def __init__(self,address,engine,token,origins):
         super().__init__(address,engine,token,origins)
@@ -167,10 +174,6 @@ class ViewServer(MessengerServer):
             self.push.start()
         if self.unified:
             self.unified.start()
-
-    def gateway_origins(self):
-        """The box's Wizard origins (MESSENGER_ALLOWED_ORIGINS) in a form safe for a CSP source list and app.js."""
-        return sorted(o for o in self.origins if re.fullmatch(r'https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?', o))
 
     def server_close(self):
         if getattr(self, 'push', None):
@@ -635,7 +638,7 @@ class ViewHandler(Handler):
                 # Where this Messenger lives on the box's Wizard origins (app.js gatewayTarget): a page opened on the
                 # raw app port moves itself there instead of a dead "Couldn't reach Messenger" card. Those origins
                 # may frame the page, so a Wizard window still pointing at the raw port runs that redirect too.
-                origins=self.service.gateway_origins()
+                origins=gateway_origins(getattr(self.service,'origins',()))
                 gateway=html.escape(json.dumps({'path':self.service.public_path,'origins':origins},separators=(',',':')),quote=True)
                 body=body.replace(b'<meta name="referrer"',('<meta name="messenger-gateway" content="'+gateway+'">\n  <meta name="referrer"').encode(),1)
                 ancestors=' '.join(["'self'",*origins])
