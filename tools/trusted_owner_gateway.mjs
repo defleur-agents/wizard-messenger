@@ -5,7 +5,7 @@ import { createHmac, randomBytes } from 'node:crypto'
 
 export function messengerOwnerHeaders({ principal, method, target, headers, key, now = Date.now() }) {
   const forwarded = Object.fromEntries(Object.entries(headers || {}).filter(([name]) =>
-    !['x-messenger-owner-proof', 'x-wizard-owner', 'x-wizard-owner-proof'].includes(name.toLowerCase())))
+    !['x-messenger-owner-proof', 'x-wizard-owner', 'x-wizard-owner-proof', 'x-wizard-app-owner-proof'].includes(name.toLowerCase())))
   const bearer = Object.keys(forwarded).some(name => name.toLowerCase() === 'authorization')
   if (principal?.kind !== 'owner' || !['proxy_proof', 'access_verifier'].includes(principal?.via) || bearer) {
     // Fail closed; agent traffic must take the existing machine-capability route.
