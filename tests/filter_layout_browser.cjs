@@ -1,6 +1,6 @@
 // Inbox filters in two rows (Miguel, 2 Nov 2026: "I don't want to scroll sideways"): All · Unread · Medium · Low as
 // one equal-width segmented control, then one icon per network and Filters (Type, Labels). Networks that do not fit
-// fold into "+N"; nothing scrolls sideways at 360/390/1280 with 9 bridged networks + Wizard + labels.
+// fold into "+N"; nothing scrolls sideways at 360/390 and in the desktop split at 640/760/1280 (chat open too) with 9 bridged networks + Wizard + labels.
 // Medium priority stays in All but never pings: no badge, Unread count/view, push or inbox feed (server side in
 // test_unified.py / test_inbox_feed.py). Synthetic APIs only.
 // node tests/filter_layout_browser.cjs [outdir]   (needs playwright via PLAYWRIGHT_MODULE)
@@ -23,7 +23,10 @@ const SKINS = {
 const CASES = [
   {label: '360', viewport: {width: 360, height: 740}, scheme: 'dark', bar: false},
   {label: '390', viewport: {width: 390, height: 844}, scheme: 'light', bar: true},
-  {label: '1280', viewport: {width: 1280, height: 860}, scheme: 'dark', bar: false, offset: true},
+  {label: '1280', viewport: {width: 1280, height: 860}, scheme: 'dark', bar: false, offset: 1000},
+  // 16.3: the desktop split starts at 640px of Messenger's window; with a chat open the list pane is 260-320px.
+  {label: '640', viewport: {width: 1280, height: 860}, scheme: 'light', bar: false, offset: 640},
+  {label: '760', viewport: {width: 1280, height: 860}, scheme: 'dark', bar: false, offset: 760},
 ];
 (async () => {
   const browser = await chromium.launch(), summary = [];
@@ -95,7 +98,7 @@ const CASES = [
     const rows = async () => (await page.locator('.u-list > .u-person strong').allTextContents()).map(t => t.trim());
     const seg = v => page.locator(`#u-filters .u-seg-btn[data-seg=${v}]`);
     await page.goto('https://messenger.test/');
-    if (offset) await page.addStyleTag({content: '#messenger { position: fixed !important; left: 120px !important; top: 60px !important; width: 1000px !important; height: 760px !important; }'});
+    if (offset) await page.addStyleTag({content: '#messenger { position: fixed !important; left: 120px !important; top: 60px !important; width: ' + offset + 'px !important; height: 760px !important; }'});
     await page.locator('.u-person', {hasText: 'Private Alice'}).waitFor({timeout: 15000});
     await page.locator('#u-filters .u-nets .u-chip.net[data-filter="net:facebook"]').waitFor({state: 'attached'});
     await page.waitForTimeout(300);
@@ -131,6 +134,23 @@ const CASES = [
     } else {
       assert.equal(L1.more, '', 'every network fits at ' + label);
       assert.ok(L1.filters.bottom <= L1.list.top + 1, 'filters on top of the list on desktop');
+    }
+    // ---- 16.3 split from 640px: with a chat open the filter rows still fit the narrow list pane (no sideways scroll,
+    // no clipped segment label), the chat keeps >= 380px and its ✕ returns to the full-width list. ----
+    if (offset) {
+      assert.ok(await page.evaluate(() => document.documentElement.hasAttribute('data-split')), 'split on at ' + label);
+      await page.locator('#u-pane-list .u-person', {hasText: 'Kenji Tanaka'}).click();
+      await page.locator('#u-pane-thread .u-who-text strong', {hasText: 'Kenji Tanaka'}).waitFor(); await page.waitForTimeout(300);
+      const S = await layout(), panes = await page.evaluate(() => ({list: document.querySelector('#u-pane-list').getBoundingClientRect().width, thread: document.querySelector('#u-pane-thread').getBoundingClientRect().width,
+        clipped: [...document.querySelectorAll('#u-filters .u-seg-text')].filter(e => e.scrollWidth > e.clientWidth + 0.5).map(e => e.textContent)}));
+      for (const [sel, [sw, cw]] of Object.entries(S.out)) assert.ok(sw <= cw + 1, `${sel} fits the split list pane (${sw} > ${cw}) at ${label}`);
+      assert.deepEqual(S.outside, [], 'every filter control inside the narrow list pane at ' + label);
+      assert.deepEqual(panes.clipped, [], 'no segment label clipped at ' + label);
+      assert.ok(panes.list >= 259 && panes.thread >= 379, 'list >= 260 and chat >= 380 at ' + label + ': ' + JSON.stringify(panes));
+      console.log(label, 'split pane', JSON.stringify(panes), 'segments', S.segs.map(Math.round).join('/'), 'more', S.more || '-');
+      await shot('split-open');
+      await page.locator('#u-pane-thread').getByRole('button', {name: 'Close chat'}).click(); await page.locator('#unified-inbox[data-detail=none]').waitFor();
+      await page.waitForTimeout(200); L1 = await layout();
     }
     // Network buttons: icon only, greyscale until chosen.
     const grey = await page.locator('#u-filters .u-nets .u-chip.net:not([hidden]) .u-chip-icon').first().evaluate(e => getComputedStyle(e).filter);

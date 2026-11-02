@@ -240,6 +240,41 @@ function fixture() {
       assert.equal(await page.locator('#u-pane-list .u-person.selected').textContent().then(t => t.includes('Kira Novak')), true, 'its row highlighted');
       assert.equal(await page.locator('#u-pane-thread textarea[aria-label="Message"]').inputValue(), 'Draft for Kira');
       assert.equal(drafts.filter(d => d.person_id === 'p10').length, 1, 'no duplicate draft after resizing');
+      // ---- 16.3 (Miguel: "even at the biggest size it only shows the chat"): the split starts at 640px. At 640, 760
+      // and 1280 the list sits beside the open chat (chat >= 380px), the chat has ✕ (no Back) and ✕ / Escape return to
+      // the full-width list with no chat selected; the filter rows never scroll sideways. 599 and 390 stay one pane. ----
+      const overflow = () => page.evaluate(() => [...document.querySelectorAll('#u-filters, #u-filters .u-seg, #u-filters .u-netrow, #u-filters .u-nets, #u-filters .u-seg-text')]
+        .filter(e => e.scrollWidth > e.clientWidth + 1).map(e => e.className || e.id));
+      for (const w of [640, 760, 1280]) {
+        await page.setViewportSize({width: w, height: 860}); await page.waitForTimeout(400);
+        assert.equal(await page.evaluate(() => document.documentElement.hasAttribute('data-split')), true, 'split on at ' + w);
+        await page.locator('#u-pane-list .u-person', {hasText: 'Maya Cohen'}).click(); await page.locator('#u-pane-thread .u-who-text strong', {hasText: 'Maya Cohen'}).waitFor(); await page.waitForTimeout(250);
+        const lb = await box('#u-pane-list'), tb = await box('#u-pane-thread');
+        assert.ok(lb && lb.width >= 259 && tb.width >= 379 && tb.x >= lb.x + lb.width - 1, w + ': list beside the chat (' + lb?.width + ' + ' + tb?.width + ')');
+        assert.equal(await page.locator('#u-pane-thread .u-back').isVisible(), false, w + ': no Back in the split');
+        assert.equal(await page.locator('#u-pane-thread').getByRole('button', {name: 'Close chat'}).isVisible(), true, w + ': ✕ on the open chat');
+        assert.deepEqual(await overflow(), [], w + ': filter rows fit the list pane');
+        assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), w + ': no sideways page scroll');
+        await page.screenshot({path: path.join(out, 'split-open-' + w + '.png')});
+        await page.locator('#u-pane-thread').getByRole('button', {name: 'Close chat'}).click(); await page.locator('#unified-inbox[data-detail=none]').waitFor();
+        assert.ok((await box('#u-pane-list')).width >= w - 10, w + ': ✕ gives the list the whole window');
+        assert.equal(await page.locator('#u-pane-list .u-person[aria-current]').count(), 0, w + ': no chat selected after ✕');
+        await page.locator('#u-pane-list .u-person', {hasText: 'Maya Cohen'}).click(); await page.locator('#u-pane-thread .u-who-text strong', {hasText: 'Maya Cohen'}).waitFor();
+        await page.locator('#u-pane-thread .u-timeline').click({position: {x: 5, y: 5}});
+        await page.keyboard.press('Escape'); await page.locator('#unified-inbox[data-detail=none]').waitFor();
+        assert.equal(await page.locator('#u-pane-list .u-person[aria-current]').count(), 0, w + ': Escape leaves no chat selected');
+      }
+      for (const w of [599, 390]) {
+        await page.setViewportSize({width: w, height: 860}); await page.waitForTimeout(400);
+        assert.equal(await page.evaluate(() => document.documentElement.hasAttribute('data-split')), false, 'split off at ' + w);
+        assert.equal(await page.locator('#u-pane-list').count(), 0, 'single pane at ' + w);
+        await page.locator('#unified-inbox .u-person', {hasText: 'Maya Cohen'}).click(); await page.locator('#unified-inbox .u-who-text strong', {hasText: 'Maya Cohen'}).waitFor();
+        assert.equal(await page.locator('#unified-inbox .u-back').isVisible(), true, 'Back on the chat at ' + w);
+        await page.locator('#unified-inbox .u-back').click(); await page.locator('#unified-inbox > .u-list').waitFor();
+      }
+      await page.locator('#unified-inbox .u-person', {hasText: 'Kira Novak'}).click(); await page.locator('#unified-inbox .u-who-text strong', {hasText: 'Kira Novak'}).waitFor();
+      await page.setViewportSize({width: 1280, height: 860}); await page.waitForTimeout(400);
+      await page.locator('#u-pane-thread .u-who-text strong', {hasText: 'Kira Novak'}).waitFor();
     } else {
       await page.locator('#u-pane-list .u-person', {hasText: 'Kira Novak'}).click(); await page.locator('#u-pane-thread .u-who-text strong', {hasText: 'Kira Novak'}).waitFor();
     }
@@ -258,5 +293,5 @@ function fixture() {
   await browser.close();
   console.log('PASS desktop split: both panes at 1280/1600, list kept (node + scroll), selected row, autosaved drafts across switches,'
     + ' live unread + timeline, search on the left, list-only with nothing open, Escape/✕ close the detail, New chat opens New message beside the list, narrow Back keeps the scroll, compact rows, menus/sheets placed, native Wizard thread on the right,'
-    + ' resize 1280 -> 600 -> 1280 keeps the chat; skins ' + results.join(', ') + '; shots in ' + out);
+    + ' resize 1280 -> 600 -> 1280 keeps the chat, split with ✕/Escape at 640/760/1280 and one pane at 599/390; skins ' + results.join(', ') + '; shots in ' + out);
 })().catch(e => { console.error(e); process.exitCode = 1; });

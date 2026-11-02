@@ -779,13 +779,16 @@ a.u-story-tag:hover .u-story-open { text-decoration: underline; }
 }
 
 /* ---- Desktop split (Miguel, 31 Oct 2026): the chat list on the left, the open chat on the right, like Chats'
-   session list beside its thread. unified.js sets html[data-split] from Messenger's own window width (900px and
-   up, see SPLIT_MIN), never the device; narrower windows keep the one-pane Inbox above unchanged.
+   session list beside its thread. unified.js sets html[data-split] from Messenger's own window width (640px and
+   up since 16.3, see SPLIT_MIN), never the device; narrower windows keep the one-pane Inbox above unchanged.
    The window is the page here: no max-width on the frame. Skin tokens only. */
 html[data-split] #messenger { --u-list-w: clamp(320px, 28cqi, 380px); }
 #unified-inbox[data-split] { flex-direction: row; max-width: none; margin: 0; border-left: 0; border-right: 0; }
 #unified-inbox[data-split] > .u-pane { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 #unified-inbox[data-split] > .u-pane-list { flex: 0 0 min(var(--u-list-w, 360px), 60%); border-right: 1px solid var(--line); }
+/* 16.3: the split starts at 640px (SPLIT_MIN). The list keeps 16.25rem (260px) and the chat at least 23.75rem (380px),
+   whatever width was saved on a bigger window. */
+#unified-inbox[data-split] > .u-pane-list { flex-basis: clamp(16.25rem, min(var(--u-list-w, 22.5rem), 60%), max(16.25rem, calc(100% - 23.75rem))); }
 /* The divider (Miguel, 31 Oct 2026: "drag and resize the divider" like Chats): a 6px grab strip over the list's edge,
    tinted with the accent on hover, focus and while dragging. unified.js divider() saves the width on this device. */
 #unified-inbox[data-split] > .u-pane-split { flex: 0 0 6px; margin: 0 -3px; position: relative; z-index: 2; cursor: col-resize; touch-action: none; }
@@ -819,6 +822,7 @@ html.u-splitting, html.u-splitting * { cursor: col-resize !important; user-selec
 /* A native Wizard thread (app.js #workspace) takes the right side; the list stays on the left. */
 html[data-split][data-private-view] #messenger { flex-direction: row; }
 html[data-split][data-private-view] #unified-inbox { display: flex !important; flex: 0 0 min(var(--u-list-w, 360px), 60%); }
+html[data-split][data-private-view] #unified-inbox { flex-basis: clamp(16.25rem, min(var(--u-list-w, 22.5rem), 60%), max(16.25rem, calc(100% - 23.75rem))); }
 html[data-split][data-private-view] #unified-inbox > .u-pane-list { flex: 1 1 auto; }
 html[data-split][data-private-view] #unified-inbox > .u-pane-thread { display: none; }
 html[data-split][data-private-view] #workspace { order: 2; min-width: 0; }
@@ -918,6 +922,10 @@ html[data-presentation="immersive"] #unified-inbox .u-header, html[data-presenta
 @media (hover: hover) { .u-seg .u-seg-btn:not(:disabled):hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); } }
 .u-seg .u-seg-btn[aria-checked=true], .u-seg .u-seg-btn[aria-checked=true]:not(:disabled):hover { background: var(--chip-on); color: var(--chip-on-ink); }
 .u-seg .u-seg-btn[aria-checked=true] .u-seg-count { color: inherit; opacity: .8; }
+/* 16.3: in the desktop split the list pane can be 16.25rem narrow. Segments stay equal while they fit; a label with a
+   count ("Medium 1") keeps its full width instead of being cut, and the others give up the room. Phones unchanged. */
+#unified-inbox[data-split] .u-seg { grid-template-columns: repeat(4, minmax(min-content, 1fr)); }
+#unified-inbox[data-split] .u-seg .u-seg-btn { gap: .25rem; padding: 0 .3125rem; }
 .u-netrow { display: flex; align-items: center; gap: .375rem; min-width: 0; }
 .u-nets { display: flex; align-items: center; gap: .375rem; min-width: 0; overflow: hidden; }
 .u-netrow .u-chip[hidden] { display: none; }

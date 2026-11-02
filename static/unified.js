@@ -242,7 +242,9 @@
   // Chats' session list beside its thread: the list stays put (scroll, filters, search) while chats open on the
   // right. Sized by Messenger's own window (#messenger), never the device. Narrower windows keep the one-pane
   // Inbox exactly as before (list or thread), including the phone title-bar tools.
-  const SPLIT_MIN = 900;
+  // 16.3 (Miguel, 2 Nov 2026: "even at the biggest size it only shows the chat"): the split starts at 640px of Messenger's
+  // window, the narrowest list (260px) beside the narrowest readable chat (380px), not at 900px.
+  const SPLIT_MIN = 640, THREAD_MIN = 380;
   const split = {on: false, threadGen: 0, listGen: 0};
   const wideNow = () => { const m = $('messenger'); return !!m && (m.clientWidth || innerWidth) >= SPLIT_MIN; };
   function panes() {
@@ -262,7 +264,9 @@
   const LIST_W = {min: 260, max: 640, key: 'messenger.listW'};
   const listW = () => { let v = 0; try { v = +localStorage.getItem(LIST_W.key); } catch { /* blocked */ } return v >= LIST_W.min && v <= LIST_W.max ? v : 0; };
   function setListW(px) {
-    const m = $('messenger'), cap = Math.min(LIST_W.max, Math.round((m?.clientWidth || innerWidth) * 0.6));
+    // The list stays 260-640px and at most 60% of the window, and always leaves the chat THREAD_MIN (unified.css
+    // clamps the painted width the same way, so a width saved on a big window still fits a small one).
+    const mw = $('messenger')?.clientWidth || innerWidth, cap = Math.max(LIST_W.min, Math.min(LIST_W.max, Math.round(mw * 0.6), mw - THREAD_MIN));
     if (px) px = Math.round(Math.max(LIST_W.min, Math.min(cap, px)));
     try { if (px) localStorage.setItem(LIST_W.key, String(px)); else localStorage.removeItem(LIST_W.key); } catch { /* private mode: this visit only */ }
     paintListW(px); return px;
