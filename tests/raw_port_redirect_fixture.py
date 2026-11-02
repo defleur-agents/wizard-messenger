@@ -21,6 +21,8 @@ from web import ViewServer
 from trusted_owner import HEADER, sign_request
 
 ORIGINS = ['https://box.test:8444', 'https://box.test:8796']
+PASS_HEADERS = {k.lower(): k for k in ('Content-Type', 'Content-Length', 'Set-Cookie', 'Cache-Control',
+                                       'Content-Security-Policy', 'Referrer-Policy', 'X-Content-Type-Options')}
 
 
 def run():
@@ -50,8 +52,9 @@ def run():
                 conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=10)
                 conn.request(self.command, path, body, headers); response = conn.getresponse(); payload = response.read()
                 self.send_response(response.status)
-                for key, value in response.getheaders():
-                    if key.lower() not in ('connection', 'server', 'date'): self.send_header(key, value)
+                for key, value in response.getheaders():   # fixed allowlist, no CR/LF: test-only proxy
+                    if key.lower() in PASS_HEADERS and not any(c in value for c in '\r\n'):
+                        self.send_header(PASS_HEADERS[key.lower()], value)
                 self.end_headers()
                 try: self.wfile.write(payload)
                 except (BrokenPipeError, ConnectionResetError): pass
