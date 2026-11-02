@@ -126,6 +126,12 @@ async function stage(browser, {width, height, tokens = DARK}) {
     await openChat('Kira Novak');
     await page.setViewportSize({width: 960, height: 860}); await page.waitForTimeout(300);
     assert.ok(await listWidth(page) <= 960 * 0.6 + 1, '60% cap at 960');
+    // 16.3: the split starts at 640px; a saved width never squeezes the chat under 380px
+    for (const w of [700, 640]) {
+      await page.setViewportSize({width: w, height: 860}); await page.waitForTimeout(300);
+      const lw = await listWidth(page), tw = await page.locator('#u-pane-thread').boundingBox().then(x => x.width);
+      assert.ok(lw >= 259 && lw <= Math.max(260, w - 380) + 1 && tw >= 379, `list ${lw} / chat ${tw} at ${w}`);
+    }
     // phone width: no split, no divider
     await page.setViewportSize({width: 390, height: 844}); await page.waitForTimeout(400);
     assert.equal(await page.evaluate(() => document.documentElement.hasAttribute('data-split')), false, 'no split on a phone');
@@ -160,8 +166,8 @@ async function stage(browser, {width, height, tokens = DARK}) {
     await page.waitForTimeout(2500);
     assert.equal(st.draftPosts.length, posts, 'Send never creates a draft');
     assert.deepEqual(st.drafts, []);
-    // narrow window: back in the Inbox right after Send, the row never says "Draft:"
-    await page.setViewportSize({width: 700, height: 860}); await page.waitForTimeout(400);
+    // narrow window (one pane below 640px since 16.3): back in the Inbox right after Send, the row never says "Draft:"
+    await page.setViewportSize({width: 600, height: 860}); await page.waitForTimeout(400);
     await field.fill('Narrow send'); await page.waitForTimeout(1400); assert.equal(st.drafts.length, 1);
     st.sendHold = 3000;
     await page.locator('#unified-inbox').getByRole('button', {name: 'Send', exact: true}).last().click();
