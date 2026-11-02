@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import hmac
+import html
 from http.cookies import SimpleCookie
 import json
 import mimetypes
@@ -166,6 +167,10 @@ class ViewServer(MessengerServer):
             self.push.start()
         if self.unified:
             self.unified.start()
+
+    def gateway_origins(self):
+        """The box's Wizard origins (MESSENGER_ALLOWED_ORIGINS) in a form safe for a CSP source list and app.js."""
+        return sorted(o for o in self.origins if re.fullmatch(r'https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?', o))
 
     def server_close(self):
         if getattr(self, 'push', None):
@@ -625,7 +630,16 @@ class ViewHandler(Handler):
             body=source.read_bytes()
             mime=mimetypes.guess_type(source.name)[0] or 'application/octet-stream'
             if mime.startswith('text/') or mime in ['application/javascript','application/json']: mime+='; charset=utf-8'
-            csp="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'"
+            ancestors="'self'"
+            if allowed[path]=='index.html':
+                # Where this Messenger lives on the box's Wizard origins (app.js gatewayTarget): a page opened on the
+                # raw app port moves itself there instead of a dead "Couldn't reach Messenger" card. Those origins
+                # may frame the page, so a Wizard window still pointing at the raw port runs that redirect too.
+                origins=self.service.gateway_origins()
+                gateway=html.escape(json.dumps({'path':self.service.public_path,'origins':origins},separators=(',',':')),quote=True)
+                body=body.replace(b'<meta name="referrer"',('<meta name="messenger-gateway" content="'+gateway+'">\n  <meta name="referrer"').encode(),1)
+                ancestors=' '.join(["'self'",*origins])
+            csp="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors "+ancestors
             self._headers(200,body,mime,csp)
         except EngineError as e: self._reply(e.status,{'ok':False,'error':{'code':e.code,'message':e.message}})
         except (BrokenPipeError,ConnectionResetError): pass
