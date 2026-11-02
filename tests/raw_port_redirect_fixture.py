@@ -19,6 +19,16 @@ from trusted_owner_browser_fixture import BrowserEngine, SyntheticInbox
 from test_trusted_owner import TOKEN, PASSWORD
 from web import ViewServer
 from trusted_owner import HEADER, sign_request
+from owner_unix import OwnerUnixServer
+import socket
+
+
+class UnixHTTP(http.client.HTTPConnection):
+    """Like the owner ingress: the Wizard path reaches Messenger over its owner Unix hop, never the TCP port."""
+    def __init__(self, path):
+        super().__init__('localhost', timeout=10); self.unix_path = path
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX); self.sock.settimeout(10); self.sock.connect(self.unix_path)
 
 ORIGINS = ['https://box.test:8444', 'https://box.test:8796']
 PASS_HEADERS = {k.lower(): k for k in ('Content-Type', 'Content-Length', 'Set-Cookie', 'Cache-Control',
@@ -39,7 +49,8 @@ def run():
         server = ViewServer(('127.0.0.1', 0), BrowserEngine(data), TOKEN, ORIGINS)
         server.unified = SyntheticInbox()
         server.auth.remember_password(PASSWORD)
-        threads = [threading.Thread(target=server.serve_forever, daemon=True)]
+        hop = OwnerUnixServer(str(Path(tempfile.mkdtemp(dir='/tmp')) / 'owner.sock'), server)
+        threads = [threading.Thread(target=server.serve_forever, daemon=True), threading.Thread(target=hop.serve_forever, daemon=True)]
 
         class Gateway(BaseHTTPRequestHandler):
             def log_message(self, *args): pass
@@ -49,7 +60,7 @@ def run():
                 headers[HEADER] = sign_request(keys['proof'], self.command, path)
                 length = int(self.headers.get('Content-Length', 0))
                 body = self.rfile.read(length) if length else None
-                conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=10)
+                conn = UnixHTTP(hop.server_address)
                 conn.request(self.command, path, body, headers); response = conn.getresponse(); payload = response.read()
                 self.send_response(response.status)
                 for key, value in response.getheaders():   # fixed allowlist, no CR/LF: test-only proxy
@@ -69,7 +80,8 @@ def run():
                                GATEWAY_BACKEND=f'http://127.0.0.1:{gateway.server_port}')
             subprocess.run(['node', 'tests/raw_port_redirect_browser.cjs'], env=browser_env, check=True)
         finally:
-            gateway.shutdown(); gateway.server_close(); server.shutdown(); server.server_close(); patcher.stop()
+            gateway.shutdown(); gateway.server_close(); hop.shutdown(); hop.server_close()
+            server.shutdown(); server.server_close(); patcher.stop()
 
 
 if __name__ == '__main__':
