@@ -2293,7 +2293,14 @@
     const bytes = new Uint8Array(await blob.arrayBuffer());
     if (bytes[0] === 0x4f && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53) return new Blob([bytes], {type: 'audio/ogg'});
     if (bytes[0] === 0x1a && bytes[1] === 0x45) { try { return new Blob([webmToOgg(bytes)], {type: 'audio/ogg'}); } catch { /* re-encode below */ } }
-    if (!window.AudioEncoder) throw new Error('This device cannot prepare voice notes for Telegram yet');
+    // Telegram also plays M4A (AAC in MP4) as a voice note (Bot API sendVoice: Ogg Opus, MP3 or M4A). Safari before 26,
+    // including the Mac app's web view, records M4A and has no WebCodecs AudioEncoder: send its take as it is rather
+    // than refusing it (Miguel, 3 Nov 2026: a 2:33 voice note to James failed with "cannot prepare voice notes").
+    const m4a = bytes.length > 12 && String.fromCharCode(...bytes.subarray(4, 8)) === 'ftyp';
+    if (!window.AudioEncoder) { if (m4a) return new Blob([bytes], {type: 'audio/mp4'}); throw new Error('This device cannot prepare voice notes for Telegram yet'); }
+    try { return await encodeOggOpus(bytes); } catch (e) { if (m4a) return new Blob([bytes], {type: 'audio/mp4'}); throw e; }
+  }
+  async function encodeOggOpus(bytes) {
     const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
     const decoded = await new AC(1, 48000, 48000).decodeAudioData(bytes.buffer.slice(0));
     // Mix to mono at 48 kHz.

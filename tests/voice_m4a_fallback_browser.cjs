@@ -1,0 +1,41 @@
+// Voice notes from a browser without WebCodecs' AudioEncoder (Safari before 26, the Mac app's web view) are M4A.
+// Telegram plays M4A as a voice note, so the take goes out as it is instead of failing with
+// "This device cannot prepare voice notes for Telegram yet". Anything else without an encoder still fails clearly.
+// Run: M4A=<file.m4a> NODE_PATH=<node_modules> node tests/voice_m4a_fallback_browser.cjs
+const assert = require('assert'), fs = require('fs'), path = require('path');
+const pw = require('playwright'), engine = pw[process.env.BROWSER || 'chromium'];
+(async () => {
+  const m4a = fs.readFileSync(process.env.M4A).toString('base64');
+  const js = fs.readFileSync(path.join(__dirname, '../static/unified.js'), 'utf8');
+  const browser = await engine.launch(), page = await browser.newPage();
+  // A real secure origin: unified.js reads localStorage at load and AudioEncoder needs a secure context.
+  await page.route('https://messenger.test/**', r => r.fulfill(r.request().url().endsWith('.js') ? {contentType: 'text/javascript', body: js}
+    : {contentType: 'text/html', body: '<!doctype html><div id="messenger"></div><script src="/unified.js"></script>'}));
+  await page.goto('https://messenger.test/');
+  assert.equal(await page.evaluate(() => typeof window.MessengerUnified_toOggOpus), 'function', 'test hook loaded');
+  const run = (b64, encoder, type) => page.evaluate(async ([b64, encoder, type]) => {
+    const keep = window.AudioEncoder; if (encoder === 'none') delete window.AudioEncoder;
+    if (encoder === 'broken') window.AudioEncoder = class { constructor() { throw new Error('opus unsupported'); } };
+    try {
+      const b = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      const o = await window.MessengerUnified_toOggOpus(new Blob([b], {type}));
+      const u = new Uint8Array(await o.arrayBuffer());
+      return {type: o.type, size: u.length, same: u.length === b.length && u.every((x, i) => x === b[i]), head: String.fromCharCode(...u.subarray(0, 4))};
+    } catch (e) { return {error: e.message}; } finally { window.AudioEncoder = keep; }
+  }, [b64, encoder, type]);
+  const noEnc = await run(m4a, 'none', 'audio/mp4');
+  assert.deepEqual([noEnc.type, noEnc.same], ['audio/mp4', true], 'M4A without AudioEncoder is sent as is: ' + JSON.stringify(noEnc));
+  const broken = await run(m4a, 'broken', 'audio/mp4');
+  assert.deepEqual([broken.type, broken.same], ['audio/mp4', true], 'M4A whose re-encode fails is sent as is: ' + JSON.stringify(broken));
+  // With a working encoder an M4A this browser can decode still becomes Ogg Opus (Chromium builds without AAC fall back).
+  assert.equal(await page.evaluate(() => typeof AudioEncoder), 'function', 'this browser has WebCodecs AudioEncoder');
+  const decodes = await page.evaluate(async b64 => { try { await new OfflineAudioContext(1, 48000, 48000).decodeAudioData(Uint8Array.from(atob(b64), c => c.charCodeAt(0)).buffer); return true; } catch { return false; } }, m4a);
+  const withEnc = await run(m4a, 'real', 'audio/mp4');
+  if (decodes) assert.equal(withEnc.head, 'OggS', 'with AudioEncoder, M4A still becomes Ogg Opus: ' + JSON.stringify(withEnc));
+  else assert.deepEqual([withEnc.type, withEnc.same], ['audio/mp4', true], 'undecodable M4A is sent as is: ' + JSON.stringify(withEnc));
+  const junk = await run(btoa('not audio at all, no container'), 'none', 'audio/aac');
+  assert.match(junk.error || '', /cannot prepare voice notes/, 'unknown audio without an encoder still fails clearly');
+  console.log(JSON.stringify({noEnc, broken, decodes, withEnc: {type: withEnc.type, head: withEnc.head}, junk}));
+  console.log('pass');
+  await browser.close();
+})().catch(e => { console.error('FAIL', e.message); process.exit(1); });
