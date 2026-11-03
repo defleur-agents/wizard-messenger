@@ -121,12 +121,28 @@ UPLOAD_MAX = 25 * 1024 * 1024
 MEDIA_CACHE_MAX = 300 * 1024 * 1024
 
 
+def wav_to_opus(data):
+    """PCM WAV voice note -> Ogg Opus (32 kbit/s speech, like Telegram's own) with opusenc. Pipes only."""
+    import subprocess
+    try:
+        out = subprocess.run(['opusenc', '--quiet', '--speech', '--bitrate', '32', '-', '-'], input=data,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120, check=True).stdout
+    except FileNotFoundError:
+        fail('media_unsupported', 'This Messenger cannot prepare voice notes yet', 409)
+    except (subprocess.SubprocessError, OSError):
+        fail('invalid_upload', 'That voice note could not be read. Record it again.', 415)
+    if out[:4] != b'OggS':
+        fail('invalid_upload', 'That voice note could not be read. Record it again.', 415)
+    return out
+
+
 def sniff(data):
     """Magic-byte type check for uploads; the client's Content-Type is never trusted."""
     if data[:3] == b'\xff\xd8\xff': return 'image/jpeg'
     if data[:8] == b'\x89PNG\r\n\x1a\n': return 'image/png'
     if data[:6] in (b'GIF87a', b'GIF89a'): return 'image/gif'
     if data[:4] == b'RIFF' and data[8:12] == b'WEBP': return 'image/webp'
+    if data[:4] == b'RIFF' and data[8:12] == b'WAVE': return 'audio/wav'
     if data[:4] == b'OggS': return 'audio/ogg'
     if data[:4] == b'\x1a\x45\xdf\xa3': return 'audio/webm'
     if data[4:8] == b'ftyp': return 'audio/mp4' if data[8:11] in (b'M4A', b'mp4', b'iso') and b'M4A' in data[8:32] else 'video/mp4'
@@ -1834,9 +1850,12 @@ class UnifiedInbox:
         else:
             if kind == 'voice' and mime == 'video/mp4':
                 mime = 'audio/mp4'  # Safari records voice into an mp4 container
-            ok = {'image': ('image/jpeg', 'image/png', 'image/gif', 'image/webp'), 'voice': ('audio/ogg', 'audio/webm', 'audio/mp4')}[kind]
+            ok = {'image': ('image/jpeg', 'image/png', 'image/gif', 'image/webp'), 'voice': ('audio/ogg', 'audio/webm', 'audio/mp4', 'audio/wav')}[kind]
             if mime not in ok:
                 fail('invalid_upload', 'That file type is not supported here', 415)
+            if kind == 'voice' and mime == 'audio/wav':
+                # Browsers without WebCodecs (Safari before 26, the Mac app) record plain PCM; Telegram wants Ogg Opus.
+                data, mime = wav_to_opus(data), 'audio/ogg'
             ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'audio/ogg': 'ogg', 'audio/webm': 'webm', 'audio/mp4': 'm4a'}[mime]
             filename = ('voice-message.' if kind == 'voice' else 'photo.') + ext
         mxc = path = None
