@@ -2114,6 +2114,13 @@
       const url = URL.createObjectURL(take.blob); localAudio.set(url, take.blob);
       queueSend(take.meta.person, {voice: {blob: take.blob, take: take.id, duration: take.durationMs, waveform: [], url}, identity_id: take.meta.identity});
     }
+    // Without WebCodecs (Safari before 26, the Mac app) a WebM take cannot become Ogg Opus, so record M4A, which
+    // Telegram plays as a voice note and which is sent as it is.
+    function voiceMime() {
+      if (window.AudioEncoder) return {};
+      const mime = ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4'].find(m => { try { return window.MediaRecorder?.isTypeSupported?.(m); } catch { return false; } });
+      return mime ? {mime} : {};
+    }
     function recoverVoice() {
       const capture = window.WizardApp?.capture;
       if (!capture || voiceRecoveryWork || view.recording) return;
@@ -2187,7 +2194,7 @@
           own = capture.current?.() || own;
           if (!attached && recoverOnly) { close(); return; } // recovery never falls through to start
           r.person = own?.meta?.person || id; r.identity = own?.meta?.identity || channel.value; r.reply = view.reply;
-          r.session = attached || await capture.start({kind: 'audio', meta: {purpose: 'messenger-voice', person: id, identity: channel.value, micSession: voiceTapSession}, maxMs: 15 * 60e3, maxBytes: 24 * 1048576});
+          r.session = attached || await capture.start({kind: 'audio', ...voiceMime(), meta: {purpose: 'messenger-voice', person: id, identity: channel.value, micSession: voiceTapSession}, maxMs: 15 * 60e3, maxBytes: 24 * 1048576});
           if (r.abandoned) { dropLate(!!attached); return; }
           if (!r.session) throw new Error('That recording has already stopped. Tap the microphone to start again.');
           clearTimeout(r.deadline);
@@ -2240,10 +2247,13 @@
     const vint = keep => { const f = b[at]; let n = 1; while (n <= 8 && !(f & (0x80 >> (n - 1)))) n++; if (n > 8 || at + n > b.length) throw new Error('bad vint');
       let v = keep ? f : f & (0xff >> n), all = (f & (0xff >> n)) === (0xff >> n); for (let i = 1; i < n; i++) { v = v * 256 + b[at + i]; if (b[at + i] !== 0xff) all = false; } at += n; return keep ? v : (all ? -1 : v); };
     const MASTER = new Set([0x18538067, 0x1654AE6B, 0xAE, 0xE1, 0x1F43B675, 0xA0]);
+    // Safari's WebM can end in a cut-off element or carry unknown sizes: keep every whole Opus packet read so far.
     while (at < b.length) {
-      const id = vint(true), size = vint(false);
+      let id, size;
+      try { id = vint(true); size = vint(false); } catch (e) { if (packets.length) break; throw e; }
       if (MASTER.has(id)) continue;
-      if (size < 0 || at + size > b.length) { if (id === 0xA3 || id === 0xA1) break; throw new Error('bad size'); }
+      if (size < 0) { if (packets.length) break; throw new Error('bad size'); }
+      if (at + size > b.length) { if (packets.length) break; throw new Error('bad size'); }
       const body = b.subarray(at, at + size); at += size;
       if (id === 0x86) codec = new TextDecoder().decode(body);
       else if (id === 0x63A2) head = body;
@@ -2297,8 +2307,33 @@
     // including the Mac app's web view, records M4A and has no WebCodecs AudioEncoder: send its take as it is rather
     // than refusing it (Miguel, 3 Nov 2026: a 2:33 voice note to James failed with "cannot prepare voice notes").
     const m4a = bytes.length > 12 && String.fromCharCode(...bytes.subarray(4, 8)) === 'ftyp';
-    if (!window.AudioEncoder) { if (m4a) return new Blob([bytes], {type: 'audio/mp4'}); throw new Error('This device cannot prepare voice notes for Telegram yet'); }
-    try { return await encodeOggOpus(bytes); } catch (e) { if (m4a) return new Blob([bytes], {type: 'audio/mp4'}); throw e; }
+    if (m4a && !window.AudioEncoder) return new Blob([bytes], {type: 'audio/mp4'});
+    if (window.AudioEncoder) { try { return await encodeOggOpus(bytes); } catch (e) { if (m4a) return new Blob([bytes], {type: 'audio/mp4'}); } }
+    // No WebCodecs encoder (Safari before 26, the Mac app): play the recording once into the browser's own M4A
+    // recorder. Takes as long as the note, but works for anything the browser can decode (Miguel, 3 Nov 2026: a
+    // WebM take from the Mac app failed with "cannot prepare voice notes").
+    try { return await rerecordM4a(bytes); }
+    catch (e) { const head = bytes[0] === 0x1a ? 'WebM' : String.fromCharCode(...bytes.subarray(4, 8)).replace(/[^ -~]/g, '?');
+      throw new Error('This device cannot prepare voice notes for Telegram yet (' + head + ': ' + (e?.message || e) + ')'); }
+  }
+  async function rerecordM4a(bytes) {
+    const mime = ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4'].find(m => window.MediaRecorder?.isTypeSupported?.(m));
+    if (!mime) throw new Error('no M4A recorder');
+    const AC = window.AudioContext || window.webkitAudioContext, ctx = new AC();
+    try {
+      const decoded = await ctx.decodeAudioData(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+      if (ctx.state !== 'running') await ctx.resume();
+      const dest = ctx.createMediaStreamDestination(), src = ctx.createBufferSource(); src.buffer = decoded; src.connect(dest);
+      const rec = new MediaRecorder(dest.stream, {mimeType: mime, audioBitsPerSecond: 64000}), parts = [];
+      rec.ondataavailable = e => { if (e.data?.size) parts.push(e.data); };
+      const done = new Promise((resolve, reject) => { rec.onstop = resolve; rec.onerror = e => reject(e.error || new Error('recorder failed')); });
+      src.onended = () => setTimeout(() => rec.state !== 'inactive' && rec.stop(), 250);
+      rec.start(1000); src.start();
+      await done;
+      const out = new Uint8Array(await new Blob(parts).arrayBuffer());
+      if (out.length < 13 || String.fromCharCode(...out.subarray(4, 8)) !== 'ftyp') throw new Error('recorder gave no M4A');
+      return new Blob([out], {type: 'audio/mp4'});
+    } finally { ctx.close().catch(() => {}); }
   }
   async function encodeOggOpus(bytes) {
     const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
