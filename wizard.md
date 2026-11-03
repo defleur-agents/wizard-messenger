@@ -7,7 +7,7 @@ type: service
 category: app
 summary: Encrypted text conversations with your peers, inside Wizard.
 license: MIT
-# Alpha: listed in the Wizard App Store (Alpha channel).
+# Listed in the official public Wizard App Index; private Alpha is a separate source.
 source: https://github.com/humanitylabs-org/wizard-messenger
 icon: icon.png
 runtime:
@@ -42,4 +42,4 @@ This candidate implements text DMs with dedicated messaging identities, invitati
 
 The API requires a generated capability for trusted integrations; browser access uses a scoped HttpOnly session, exact-origin checks and CSRF. Initial owner setup uses a single-use install capability. Without a key the MCP exposes public identity/status only. Each agent can get its own Messenger key with an owner-chosen level (Draft-only recommended) that adds chat listing, thread reading and draft tools; only the owner sends.
 
-Private beta installation and versioned image-download instructions are in PRIVATE-BETA.md. Public indexing and recipient contact are not included.
+For the current public Store installation, see README.md. The recipe uses public digest-pinned GHCR images; no developer computer or Alpha membership is required. PRIVATE-BETA.md preserves historical 0.1.2-beta.1 instructions only. Recipient contact and access grants are separate actions.
