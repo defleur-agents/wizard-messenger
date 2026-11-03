@@ -2309,31 +2309,10 @@
     const m4a = bytes.length > 12 && String.fromCharCode(...bytes.subarray(4, 8)) === 'ftyp';
     if (m4a && !window.AudioEncoder) return new Blob([bytes], {type: 'audio/mp4'});
     if (window.AudioEncoder) { try { return await encodeOggOpus(bytes); } catch (e) { if (m4a) return new Blob([bytes], {type: 'audio/mp4'}); } }
-    // No WebCodecs encoder (Safari before 26, the Mac app): play the recording once into the browser's own M4A
-    // recorder. Takes as long as the note, but works for anything the browser can decode (Miguel, 3 Nov 2026: a
-    // WebM take from the Mac app failed with "cannot prepare voice notes").
-    try { return await rerecordM4a(bytes); }
-    catch (e) { const head = bytes[0] === 0x1a ? 'WebM' : String.fromCharCode(...bytes.subarray(4, 8)).replace(/[^ -~]/g, '?');
-      throw new Error('This device cannot prepare voice notes for Telegram yet (' + head + ': ' + (e?.message || e) + ')'); }
-  }
-  async function rerecordM4a(bytes) {
-    const mime = ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4'].find(m => window.MediaRecorder?.isTypeSupported?.(m));
-    if (!mime) throw new Error('no M4A recorder');
-    const AC = window.AudioContext || window.webkitAudioContext, ctx = new AC();
-    try {
-      const decoded = await ctx.decodeAudioData(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-      if (ctx.state !== 'running') await ctx.resume();
-      const dest = ctx.createMediaStreamDestination(), src = ctx.createBufferSource(); src.buffer = decoded; src.connect(dest);
-      const rec = new MediaRecorder(dest.stream, {mimeType: mime, audioBitsPerSecond: 64000}), parts = [];
-      rec.ondataavailable = e => { if (e.data?.size) parts.push(e.data); };
-      const done = new Promise((resolve, reject) => { rec.onstop = resolve; rec.onerror = e => reject(e.error || new Error('recorder failed')); });
-      src.onended = () => setTimeout(() => rec.state !== 'inactive' && rec.stop(), 250);
-      rec.start(1000); src.start();
-      await done;
-      const out = new Uint8Array(await new Blob(parts).arrayBuffer());
-      if (out.length < 13 || String.fromCharCode(...out.subarray(4, 8)) !== 'ftyp') throw new Error('recorder gave no M4A');
-      return new Blob([out], {type: 'audio/mp4'});
-    } finally { ctx.close().catch(() => {}); }
+    // No WebCodecs encoder (Safari before 26, the Mac app): new takes are recorded as M4A (voiceMime), so only an
+    // older take that is neither Ogg, rewrappable WebM nor M4A ends here. Name its format so a report is actionable.
+    const head = bytes[0] === 0x1a ? 'WebM' : String.fromCharCode(...bytes.subarray(4, 8)).replace(/[^ -~]/g, '?');
+    throw new Error('This device cannot prepare voice notes for Telegram yet (' + head + ')');
   }
   async function encodeOggOpus(bytes) {
     const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;

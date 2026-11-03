@@ -1,7 +1,7 @@
 // Voice notes from a browser without WebCodecs' AudioEncoder (Safari before 26, the Mac app's web view) are M4A.
 // Telegram plays M4A as a voice note, so the take goes out as it is instead of failing with
 // "This device cannot prepare voice notes for Telegram yet". Anything else without an encoder still fails clearly.
-// Run: M4A=<file.m4a> AAC=<file.aac> WEBM=<file.webm> NODE_PATH=<node_modules> node tests/voice_m4a_fallback_browser.cjs
+// Run: M4A=<file.m4a> WEBM=<file.webm> NODE_PATH=<node_modules> node tests/voice_m4a_fallback_browser.cjs
 const assert = require('assert'), fs = require('fs'), path = require('path');
 const pw = require('playwright'), engine = pw[process.env.BROWSER || 'chromium'];
 (async () => {
@@ -35,15 +35,11 @@ const pw = require('playwright'), engine = pw[process.env.BROWSER || 'chromium']
   else assert.deepEqual([withEnc.type, withEnc.same], ['audio/mp4', true], 'undecodable M4A is sent as is: ' + JSON.stringify(withEnc));
   const junk = await run(btoa('not audio at all, no container'), 'none', 'audio/aac');
   assert.match(junk.error || '', /cannot prepare voice notes/, 'unknown audio without an encoder still fails clearly');
-  // Not M4A and no encoder (the Mac app's WebM, raw AAC): played once into the browser's M4A recorder.
-  const aac = await run(fs.readFileSync(process.env.AAC).toString('base64'), 'none', 'audio/aac');
-  assert.equal(aac.type, 'audio/mp4', 'AAC without an encoder is re-recorded as M4A: ' + JSON.stringify(aac));
-  assert.equal(String.fromCharCode(...Buffer.from(aac.b64 || '', 'base64').subarray(4, 8)) || aac.ftyp, 'ftyp');
   // A WebM cut off mid-cluster still rewraps to Ogg Opus with the packets it has.
   const webm = fs.readFileSync(process.env.WEBM); const cut = webm.subarray(0, webm.length - 37);
   const trunc = await run(cut.toString('base64'), 'none', 'audio/webm');
   assert.equal(trunc.head, 'OggS', 'truncated WebM still rewraps: ' + JSON.stringify(trunc));
-  console.log(JSON.stringify({aac: {type: aac.type, size: aac.size}, trunc: {head: trunc.head, size: trunc.size}, noEnc, broken, decodes, withEnc: {type: withEnc.type, head: withEnc.head}, junk}));
+  console.log(JSON.stringify({trunc: {head: trunc.head, size: trunc.size}, noEnc, broken, decodes, withEnc: {type: withEnc.type, head: withEnc.head}, junk}));
   console.log('pass');
   await browser.close();
 })().catch(e => { console.error('FAIL', e.message); process.exit(1); });
