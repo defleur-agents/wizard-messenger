@@ -1,7 +1,7 @@
 // Voice notes from a browser without WebCodecs' AudioEncoder (Safari before 26, the Mac app's web view) are M4A.
 // Telegram plays M4A as a voice note, so the take goes out as it is instead of failing with
 // "This device cannot prepare voice notes for Telegram yet". Anything else without an encoder still fails clearly.
-// Run: M4A=<file.m4a> WEBM=<file.webm> NODE_PATH=<node_modules> node tests/voice_m4a_fallback_browser.cjs
+// Run: M4A=<file.m4a> WEBM=<file.webm> WAV=<file.wav> NODE_PATH=<node_modules> node tests/voice_m4a_fallback_browser.cjs
 const assert = require('assert'), fs = require('fs'), path = require('path');
 const pw = require('playwright'), engine = pw[process.env.BROWSER || 'chromium'];
 (async () => {
@@ -35,6 +35,9 @@ const pw = require('playwright'), engine = pw[process.env.BROWSER || 'chromium']
   else assert.deepEqual([withEnc.type, withEnc.same], ['audio/mp4', true], 'undecodable M4A is sent as is: ' + JSON.stringify(withEnc));
   const junk = await run(btoa('not audio at all, no container'), 'none', 'audio/aac');
   assert.match(junk.error || '', /cannot prepare voice notes/, 'unknown audio without an encoder still fails clearly');
+  // PCM WAV (the shared recorder's pcm mode on the Mac app) goes up as is; the server makes Ogg Opus of it.
+  const wav = await run(fs.readFileSync(process.env.WAV).toString('base64'), 'none', 'audio/wav');
+  assert.deepEqual([wav.type, wav.same], ['audio/wav', true], 'WAV is sent as is: ' + JSON.stringify(wav));
   // A WebM cut off mid-cluster still rewraps to Ogg Opus with the packets it has.
   const webm = fs.readFileSync(process.env.WEBM); const cut = webm.subarray(0, webm.length - 37);
   const trunc = await run(cut.toString('base64'), 'none', 'audio/webm');

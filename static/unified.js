@@ -2114,10 +2114,13 @@
       const url = URL.createObjectURL(take.blob); localAudio.set(url, take.blob);
       queueSend(take.meta.person, {voice: {blob: take.blob, take: take.id, duration: take.durationMs, waveform: [], url}, identity_id: take.meta.identity});
     }
-    // Without WebCodecs (Safari before 26, the Mac app) a WebM take cannot become Ogg Opus, so record M4A, which
-    // Telegram plays as a voice note and which is sent as it is.
+    // Without WebCodecs (Safari before 26, the Mac app) record plain PCM WAV through the shared recorder: Messenger's
+    // server turns it into Ogg Opus. Safari's fragmented MP4 lost its header on long takes (Miguel, 3 Nov 2026:
+    // a 1:40 note failed with "(moof)"), and its WebM did not rewrap either.
     function voiceMime() {
       if (window.AudioEncoder) return {};
+      let pcm = false; try { pcm = !!window.WizardApp?.capture?.capabilities?.({kind: 'audio', pcm: true})?.pcm; } catch { pcm = false; }
+      if (pcm) return {pcm: true};
       const mime = ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4'].find(m => { try { return window.MediaRecorder?.isTypeSupported?.(m); } catch { return false; } });
       return mime ? {mime} : {};
     }
@@ -2306,6 +2309,8 @@
     // Telegram also plays M4A (AAC in MP4) as a voice note (Bot API sendVoice: Ogg Opus, MP3 or M4A). Safari before 26,
     // including the Mac app's web view, records M4A and has no WebCodecs AudioEncoder: send its take as it is rather
     // than refusing it (Miguel, 3 Nov 2026: a 2:33 voice note to James failed with "cannot prepare voice notes").
+    // PCM WAV (the shared recorder's pcm mode) goes up as is; Messenger's server encodes it to Ogg Opus.
+    if (bytes.length > 44 && String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.subarray(8, 12)) === 'WAVE') return new Blob([bytes], {type: 'audio/wav'});
     const m4a = bytes.length > 12 && String.fromCharCode(...bytes.subarray(4, 8)) === 'ftyp';
     if (m4a && !window.AudioEncoder) return new Blob([bytes], {type: 'audio/mp4'});
     if (window.AudioEncoder) { try { return await encodeOggOpus(bytes); } catch (e) { if (m4a) return new Blob([bytes], {type: 'audio/mp4'}); } }
