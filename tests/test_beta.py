@@ -28,6 +28,12 @@ class InstallationDocumentationTests(unittest.TestCase):
         self.assertNotIn('Public indexing and recipient contact are not included.', manifest)
         self.assertIn('official public Wizard App Index', manifest)
 
+    def test_store_classification_is_user_facing_not_packaging(self):
+        readme = (self.root / 'README.md').read_text()
+        self.assertIn('**Apps**', readme)
+        self.assertIn('Agent apps have no user interface', readme)
+        self.assertNotIn('places Messenger under **Agent apps**', readme)
+
     def test_private_beta_is_explicitly_historical(self):
         banner = (self.root / 'PRIVATE-BETA.md').read_text().split('## Required access')[0]
         self.assertIn('Historical instructions', banner)
