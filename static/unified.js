@@ -2117,6 +2117,30 @@
     // Without WebCodecs (Safari before 26, the Mac app) record plain PCM WAV through the shared recorder: Messenger's
     // server turns it into Ogg Opus. Safari's fragmented MP4 lost its header on long takes (Miguel, 3 Nov 2026:
     // a 1:40 note failed with "(moof)"), and its WebM did not rewrap either.
+    // How much audio a take really holds: PCM WAV is 32 bytes per ms after its 44-byte header. Other formats carry
+    // the recorder's own clock, which cannot show lost audio, so they are not checked.
+    function captured(take) {
+      const wav = take?.mime === 'audio/wav' || take?.blob?.type === 'audio/wav';
+      return wav && take.blob?.size > 44 ? Math.round((take.blob.size - 44) / 32) : null;
+    }
+    // While recording, compare captured audio with the clock and note when the window was hidden or unfocused,
+    // so a stalled microphone is shown at once and the notice can name the likely cause.
+    function watchCapture(r) {
+      const now = Date.now(), step = now - (r.seen || now); r.seen = now;
+      if (document.visibilityState === 'hidden') r.hiddenMs = (r.hiddenMs || 0) + step;
+      else if (!document.hasFocus()) r.blurMs = (r.blurMs || 0) + step;
+      if (!r.pcm || r.stallShown || now - (r.checked || 0) < 1000) return;
+      r.checked = now;
+      let got; try { got = r.session?.getInfo?.()?.durationMs; } catch { got = null; }
+      if (typeof got !== 'number') return;
+      const wall = now - r.started;
+      if (wall - got > 3000) { r.stallShown = true; voiceNotice('The microphone stopped reaching Wizard ' + fmtDur(got) + ' in.' + captureCause(r) + ' Keep Wizard in front while you record.'); }
+    }
+    function captureCause(r) {
+      if ((r.hiddenMs || 0) > 2000) return ' Wizard was out of sight for ' + fmtDur(r.hiddenMs) + '.';
+      if ((r.blurMs || 0) > 2000) return ' Another app was in front for ' + fmtDur(r.blurMs) + '.';
+      return '';
+    }
     function voiceMime() {
       if (window.AudioEncoder) return {};
       let pcm = false; try { pcm = !!window.WizardApp?.capture?.capabilities?.({kind: 'audio', pcm: true})?.pcm; } catch { pcm = false; }
@@ -2176,12 +2200,21 @@
       r.stop = async () => {
         if (r.phase !== 'recording') return;
         r.phase = 'stopping'; view.paintRecording?.();
+        const wall = Date.now() - r.started;
         let take;
         try { take = await r.session.stop(); }
         catch (e) { r.phase = 'recording'; failed(new Error('Recording kept on this device. Try Send or Discard again. ' + e.message)); return; }
         close();
         const duration = take.durationMs || Date.now() - r.started;
         if (duration < 600 || !take.blob?.size) { voiceNotice('Hold on a little longer to record'); capture.ack(take.id).catch(() => {}); return; }
+        // Never send a clipped note (Miguel, 3 Nov 2026: a 2-minute note from the Mac app reached James as its last
+        // 7 seconds). Keep it as an unsent voice note and say how much was captured; Send there still sends it.
+        const got = captured(take);
+        if (got != null && wall - got > 3000 && got < wall * 0.9) {
+          voiceKept.set(take.id, {...take, meta: {...take.meta, purpose: 'messenger-voice', person: r.person, identity: r.identity}});
+          voiceNotice('Only ' + fmtDur(got) + ' of your ' + fmtDur(wall) + ' recording reached Wizard, so it was not sent.' + captureCause(r) + ' It is kept below if you still want to send it.');
+          view.paintBar?.(); return;
+        }
         const step = Math.max(1, r.levels.length / 64), waveform = Array.from({length: Math.min(64, r.levels.length)}, (_, i) => r.levels[Math.floor(i * step)]);
         const url = URL.createObjectURL(take.blob); localAudio.set(url, take.blob);
         queueSend(r.person, {voice: {blob: take.blob, take: take.id, duration, waveform, url}, reply: r.reply, identity_id: r.identity});
@@ -2197,7 +2230,8 @@
           own = capture.current?.() || own;
           if (!attached && recoverOnly) { close(); return; } // recovery never falls through to start
           r.person = own?.meta?.person || id; r.identity = own?.meta?.identity || channel.value; r.reply = view.reply;
-          r.session = attached || await capture.start({kind: 'audio', ...voiceMime(), meta: {purpose: 'messenger-voice', person: id, identity: channel.value, micSession: voiceTapSession}, maxMs: 15 * 60e3, maxBytes: 24 * 1048576});
+          const mode = attached ? {} : voiceMime(); r.pcm = !!mode.pcm;
+          r.session = attached || await capture.start({kind: 'audio', ...mode, meta: {purpose: 'messenger-voice', person: id, identity: channel.value, micSession: voiceTapSession}, maxMs: 15 * 60e3, maxBytes: 24 * 1048576});
           if (r.abandoned) { dropLate(!!attached); return; }
           if (!r.session) throw new Error('That recording has already stopped. Tap the microphone to start again.');
           clearTimeout(r.deadline);
@@ -2211,6 +2245,7 @@
             const level = Math.round(Math.min(1, last * 1.6) * 1024); r.levels.push(level);
             if (r.levels.length > 9600) r.levels.splice(0, 3200);
             view.paintRecordingTick?.(r, level);
+            watchCapture(r);
           }, 100);
           view.paintRecording?.();
         } catch (e) {
