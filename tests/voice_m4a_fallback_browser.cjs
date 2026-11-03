@@ -38,6 +38,10 @@ const pw = require('playwright'), engine = pw[process.env.BROWSER || 'chromium']
   // PCM WAV (the shared recorder's pcm mode on the Mac app) goes up as is; the server makes Ogg Opus of it.
   const wav = await run(fs.readFileSync(process.env.WAV).toString('base64'), 'none', 'audio/wav');
   assert.deepEqual([wav.type, wav.same], ['audio/wav', true], 'WAV is sent as is: ' + JSON.stringify(wav));
+  // WebM the browser cannot rewrap, with no encoder, goes up as WebM: Messenger's server rewraps it.
+  const badWebm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x01]), Buffer.alloc(64, 0xff)]);
+  const raw = await run(badWebm.toString('base64'), 'none', 'audio/webm');
+  assert.deepEqual([raw.type, raw.same], ['audio/webm', true], 'unrewrappable WebM is sent for the server to rewrap: ' + JSON.stringify(raw));
   // A WebM cut off mid-cluster still rewraps to Ogg Opus with the packets it has.
   const webm = fs.readFileSync(process.env.WEBM); const cut = webm.subarray(0, webm.length - 37);
   const trunc = await run(cut.toString('base64'), 'none', 'audio/webm');

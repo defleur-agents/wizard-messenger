@@ -2143,9 +2143,13 @@
     }
     function voiceMime() {
       if (window.AudioEncoder) return {};
+      // Safari's WebM recorder keeps recording while Wizard is hidden; its Web Audio (the shared recorder's PCM mode)
+      // stops then (WebKit bug 231105), which clipped a 2-minute note to 7 s. Messenger's server rewraps WebM.
+      const has = m => { try { return !!window.MediaRecorder?.isTypeSupported?.(m); } catch { return false; } };
+      if (has('audio/webm;codecs=opus') || has('audio/webm')) return {};
       let pcm = false; try { pcm = !!window.WizardApp?.capture?.capabilities?.({kind: 'audio', pcm: true})?.pcm; } catch { pcm = false; }
       if (pcm) return {pcm: true};
-      const mime = ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4'].find(m => { try { return window.MediaRecorder?.isTypeSupported?.(m); } catch { return false; } });
+      const mime = ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4'].find(has);
       return mime ? {mime} : {};
     }
     function recoverVoice() {
@@ -2340,7 +2344,10 @@
   async function toOggOpus(blob) {
     const bytes = new Uint8Array(await blob.arrayBuffer());
     if (bytes[0] === 0x4f && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53) return new Blob([bytes], {type: 'audio/ogg'});
-    if (bytes[0] === 0x1a && bytes[1] === 0x45) { try { return new Blob([webmToOgg(bytes)], {type: 'audio/ogg'}); } catch { /* re-encode below */ } }
+    if (bytes[0] === 0x1a && bytes[1] === 0x45) {
+      try { return new Blob([webmToOgg(bytes)], {type: 'audio/ogg'}); }
+      catch { if (!window.AudioEncoder) return new Blob([bytes], {type: 'audio/webm'}); } // Messenger's server rewraps it
+    }
     // Telegram also plays M4A (AAC in MP4) as a voice note (Bot API sendVoice: Ogg Opus, MP3 or M4A). Safari before 26,
     // including the Mac app's web view, records M4A and has no WebCodecs AudioEncoder: send its take as it is rather
     // than refusing it (Miguel, 3 Nov 2026: a 2:33 voice note to James failed with "cannot prepare voice notes").

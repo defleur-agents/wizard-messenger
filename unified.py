@@ -121,6 +121,41 @@ UPLOAD_MAX = 25 * 1024 * 1024
 MEDIA_CACHE_MAX = 300 * 1024 * 1024
 
 
+def webm_to_ogg(data):
+    """WebM Opus voice note (Safari, the Mac app) -> Ogg Opus, packet for packet, with mkvextract. Tolerates the
+    unknown sizes and cut-off tails Safari's recorder writes. Works in the /tmp tmpfs only."""
+    import subprocess, tempfile
+    with tempfile.TemporaryDirectory(prefix='voice-') as d:
+        src, out = os.path.join(d, 'in.webm'), os.path.join(d, 'out.ogg')
+        with open(src, 'wb') as f:
+            f.write(data)
+        try:
+            subprocess.run(['mkvextract', src, 'tracks', '0:' + out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=120, check=False)
+            with open(out, 'rb') as f:
+                ogg = f.read()
+        except FileNotFoundError:
+            fail('media_unsupported', 'This Messenger cannot prepare voice notes yet', 409)
+        except (subprocess.SubprocessError, OSError):
+            ogg = b''
+    if ogg[:4] != b'OggS' or b'OpusHead' not in ogg[:200]:
+        fail('invalid_upload', 'That voice note could not be read. Record it again.', 415)
+    return ogg
+
+
+def ogg_ms(data):
+    """Playable length of an Ogg Opus file in ms (last page granule minus pre-skip), or None."""
+    at = data.rfind(b'OggS')
+    head = data.find(b'OpusHead')
+    if at < 0 or head < 0 or len(data) < at + 14 or len(data) < head + 12:
+        return None
+    granule = int.from_bytes(data[at + 6:at + 14], 'little')
+    pre = int.from_bytes(data[head + 10:head + 12], 'little')
+    if granule >= 2 ** 62 or granule <= pre:
+        return None
+    return (granule - pre) // 48
+
+
 def wav_to_opus(data):
     """PCM WAV voice note -> Ogg Opus (32 kbit/s speech, like Telegram's own) with opusenc. Pipes only."""
     import subprocess
@@ -1812,6 +1847,14 @@ class UnifiedInbox:
         for key in ('w', 'h', 'duration'):
             if isinstance(meta.get(key), int) and 0 < meta[key] < 10 ** 8:
                 info[key] = meta[key]
+        real = upload.get('ms')
+        if upload['kind'] == 'voice' and real:
+            # Never send a clipped voice note (Miguel, 3 Nov 2026: a 2-minute note reached James as 7 seconds).
+            said = info.get('duration')
+            if said and said - real > 3000 and real < said * 0.9:
+                fail('voice_clipped', 'Only %d:%02d of %d:%02d was recorded, so it was not sent. Record again.'
+                     % (real // 60000, real // 1000 % 60, said // 60000, said // 1000 % 60), 422)
+            info['duration'] = real
         media = {'mxc': upload['mxc'], 'mime': upload['mime'], 'size': upload['size'], 'w': info.get('w'), 'h': info.get('h'), 'duration': info.get('duration')}
         if upload['kind'] == 'voice':
             wave = [int(x) for x in (meta.get('waveform') or []) if isinstance(x, (int, float))][:128]
@@ -1856,6 +1899,9 @@ class UnifiedInbox:
             if kind == 'voice' and mime == 'audio/wav':
                 # Browsers without WebCodecs (Safari before 26, the Mac app) record plain PCM; Telegram wants Ogg Opus.
                 data, mime = wav_to_opus(data), 'audio/ogg'
+            if kind == 'voice' and mime == 'audio/webm':
+                # Safari's WebM is not rewrapped in the browser without WebCodecs: Telegram wants Ogg Opus.
+                data, mime = webm_to_ogg(data), 'audio/ogg'
             ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'audio/ogg': 'ogg', 'audio/webm': 'webm', 'audio/mp4': 'm4a'}[mime]
             filename = ('voice-message.' if kind == 'voice' else 'photo.') + ext
         mxc = path = None
@@ -1875,7 +1921,8 @@ class UnifiedInbox:
             with os.fdopen(fd, 'wb') as out:
                 out.write(data)
             path = str(path)
-        self.uploads[upload_id] = {'mxc': mxc, 'path': path, 'mime': mime, 'size': len(data), 'kind': kind, 'filename': filename, 'person_id': person_id, 'expires': now + 3600}
+        self.uploads[upload_id] = {'mxc': mxc, 'path': path, 'mime': mime, 'size': len(data), 'kind': kind, 'filename': filename, 'person_id': person_id, 'expires': now + 3600,
+                                   'ms': ogg_ms(data) if kind == 'voice' and mime == 'audio/ogg' else None}
         result = {'upload_id': upload_id, 'mime': mime, 'size': len(data)}
         if kind == 'file':
             result['name'] = filename

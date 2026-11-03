@@ -23,7 +23,7 @@ const p=await browser.newPage({viewport:{width:390,height:844}});const errors=[]
 // recorder really saved; the clock keeps running regardless.
 async function setup(capturedMs, wallMs){
  await p.setContent('<div id="root"></div><p id="hidden-error" hidden></p>');
- await p.evaluate(([capturedMs,wallMs])=>{delete window.AudioEncoder;window.calls={start:0,ack:0,opts:null};window.sent=null;window.active=null;const t0=Date.now()-wallMs;
+ await p.evaluate(([capturedMs,wallMs])=>{delete window.AudioEncoder;const real=window.MediaRecorder?.isTypeSupported?.bind(MediaRecorder);MediaRecorder.isTypeSupported=m=>!/webm/.test(m)&&!!real?.(m);window.calls={start:0,ack:0,opts:null};window.sent=null;window.active=null;const t0=Date.now()-wallMs;
   const wav=ms=>new Blob([new Uint8Array(44+ms*32)],{type:'audio/wav'});
   window.session={id:'take-1',onLevel:()=>()=>{},onWarn:()=>()=>{},getInfo:()=>({startedAt:t0,durationMs:capturedMs}),cancel:async()=>{active=null;},
    stop:async()=>{active=null;return{id:'take-1',mime:'audio/wav',durationMs:capturedMs,meta:{purpose:'messenger-voice',person:'synthetic'},blob:wav(capturedMs)};}};
@@ -52,5 +52,10 @@ assert.equal(await p.locator('.u-voice-notice').isVisible(),false,'no stall noti
 await p.getByRole('button',{name:'Send voice message'}).click();
 await p.waitForFunction(()=>window.sent);
 console.log('PASS complete take sent');
+// 3. A browser that records WebM (the Mac app) uses its own recorder, not the plain-audio path that stops when hidden.
+await setup(5000,5000);await p.evaluate(()=>{MediaRecorder.isTypeSupported=m=>/webm/.test(m);});
+await p.getByRole('button',{name:'Record voice message'}).click();await p.getByRole('button',{name:'Send voice message'}).waitFor();
+assert.equal(await p.evaluate(()=>calls.opts.pcm),undefined,'WebM-capable browser does not use plain audio');
+console.log('PASS WebM browser keeps its own recorder');
 assert.deepEqual(errors,[]);console.log('ALL PASS voice_capture_guard_browser');
 }finally{await browser.close();}})().catch(e=>{console.error('FAIL',e.message);process.exit(1);});

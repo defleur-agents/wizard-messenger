@@ -29,5 +29,36 @@ class VoiceWav(unittest.TestCase):
             unified.wav_to_opus(b'RIFF\x00\x00\x00\x00WAVEjunk')
 
 
+class VoiceWebm(unittest.TestCase):
+    """Safari/Mac app WebM is rewrapped to Ogg Opus on the server; the real length is checked against the claim."""
+
+    @staticmethod
+    def webm(seconds):
+        import subprocess, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            out = d + '/v.webm'
+            subprocess.run(['ffmpeg', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=300:duration=%d' % seconds,
+                            '-c:a', 'libopus', '-b:a', '32k', '-live', '1', '-f', 'webm', out], check=True)
+            with open(out, 'rb') as f:
+                return f.read()
+
+    @unittest.skipUnless(shutil.which('mkvextract') and shutil.which('ffmpeg'), 'mkvextract/ffmpeg not installed')
+    def test_webm_rewrap_and_length(self):
+        data = self.webm(120)
+        ogg = unified.webm_to_ogg(data)
+        self.assertEqual(ogg[:4], b'OggS')
+        self.assertAlmostEqual(unified.ogg_ms(ogg), 120000, delta=200)
+        cut = unified.webm_to_ogg(data[:len(data) // 2])  # Safari can hand over a cut-off tail
+        self.assertGreater(unified.ogg_ms(cut), 50000)
+
+    def test_clipped_note_is_refused(self):
+        upload = {'kind': 'voice', 'mime': 'audio/ogg', 'size': 29634, 'mxc': 'mxc://x/y', 'filename': 'voice-message.ogg', 'ms': 6931}
+        with self.assertRaises(Exception) as e:
+            unified.UnifiedInbox.media_content(None, upload, '', {'media': {'duration': 120000}})
+        self.assertIn('0:06 of 2:00', str(e.exception))
+        kind, content, media = unified.UnifiedInbox.media_content(None, {**upload, 'ms': 119500}, '', {'media': {'duration': 120000}})
+        self.assertEqual(content['info']['duration'], 119500)
+
+
 if __name__ == '__main__':
     unittest.main()
