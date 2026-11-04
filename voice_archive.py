@@ -40,9 +40,11 @@ def _directory(root, create=False):
 def _read(fd, name, limit):
     if not re.fullmatch(r'[a-f0-9]{64}\.(?:blob|json)', name):
         raise EngineError('not_found', 'No such recording', 404)
-    # Validation rejects malformed identifiers; basename is additionally explicit for static data-flow analysis.
-    name = os.path.basename(name)
-    f = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    # Resolve the identifier against local archive entries; never pass request-derived text as a path.
+    entry = next((entry for entry in os.listdir(fd) if entry == name), None)
+    if entry is None:
+        raise FileNotFoundError()
+    f = os.open(entry, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
     with os.fdopen(f, 'rb') as source:
         info = os.fstat(f)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
