@@ -977,3 +977,7 @@ html[data-presentation="immersive"] #unified-inbox .u-header, html[data-presenta
 .u-more-agents > .u-more-agent .u-more-level { field-sizing: content; flex: 0 1 auto; min-width: 0; }
 /* Amber text on a light sheet was hard to read: keep the warning hue, darkened toward the ink (lightened on dark). */
 .u-more-note.warn { color: color-mix(in srgb, var(--warn) 45%, var(--ink)); }
+/* 16.15 keyboard (Wizard app-key contract): j/k/r and a spare / are real buttons with a box, so the shared client
+   (and the fallback in unified.js) can click them, but they take no space and draw nothing. */
+.u-keys { position: absolute; inset-block-start: 0; inset-inline-start: 0; inline-size: 0.0625rem; block-size: 0.0625rem; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.u-keys .u-key { all: unset; display: inline-block; inline-size: 0.0625rem; block-size: 0.0625rem; overflow: hidden; }
