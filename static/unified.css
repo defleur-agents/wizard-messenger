@@ -950,3 +950,30 @@ html[data-presentation="immersive"] #unified-inbox .u-header, html[data-presenta
   html:not([data-in-chat]) .u-toast { bottom: calc(10.75rem + env(safe-area-inset-bottom)); }
   html[data-bar-tools]:not([data-in-chat]) .u-toast { bottom: calc(7.75rem + env(safe-area-inset-bottom)); }
 }
+/* 16.14 friendliness pass (Miguel: "extremely friendly, easy to use, intuitive, and also mobile friendly").
+   Touch: every Inbox filter control is a full 44px target (segments, network icons, +N, Filters, filter menu rows).
+   The rows grow by 1.25rem together, so the compose button and toasts move up by the same amount. Mouse unchanged. */
+@media (pointer: coarse) {
+  .u-seg .u-seg-btn { min-height: 2.75rem; }
+  .u-netrow, .u-nets { gap: .25rem; }
+  .u-netrow .u-chip.net { width: 2.75rem; min-width: 2.75rem; height: 2.75rem; min-height: 2.75rem; }
+  .u-netrow .u-filter-btn { height: 2.75rem; min-height: 2.75rem; padding: 0 .75rem; }
+  .u-filter-menu .u-act { min-height: 2.75rem; }
+}
+@container messenger (max-width: 599px) {
+  @media (pointer: coarse) {
+    #unified-inbox[data-view=list] > .u-fab { bottom: calc(11.75rem + env(safe-area-inset-bottom)); }
+    html[data-bar-tools] #unified-inbox[data-view=list] > .u-fab { bottom: calc(8.25rem + env(safe-area-inset-bottom)); }
+    html:not([data-in-chat]) .u-toast { bottom: calc(12rem + env(safe-area-inset-bottom)); }
+    html[data-bar-tools]:not([data-in-chat]) .u-toast { bottom: calc(9rem + env(safe-area-inset-bottom)); }
+  }
+}
+/* Empty folders say what they are for and how to fill them; a filter that hides everything offers one-tap Clear. */
+.u-empty .u-empty-hint { margin: -.5rem 0 0; font-size: .875rem; line-height: 1.45; color: var(--ink-3); }
+.u-empty .u-empty-clear { min-height: 2.75rem; padding: 0 1.25rem; }
+/* Settings → Agent access: the picker is as wide as the chosen level (where supported), so the agent's name stays
+   on one line instead of wrapping word by word next to the widest option ("Draft-only (recommended)"). */
+.u-more-agents > .u-more-agent .u-agent-name { min-width: 0; text-wrap: balance; }
+.u-more-agents > .u-more-agent .u-more-level { field-sizing: content; flex: 0 1 auto; min-width: 0; }
+/* Amber text on a light sheet was hard to read: keep the warning hue, darkened toward the ink (lightened on dark). */
+.u-more-note.warn { color: color-mix(in srgb, var(--warn) 45%, var(--ink)); }

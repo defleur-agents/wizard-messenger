@@ -83,6 +83,7 @@
     down: ['M12 5v14', 'm5 12 7 7 7-7'], up: ['M12 19V5', 'm5 12 7-7 7 7'], plus: ['M12 5v14', 'M5 12h14'],
     mic: ['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M19 11a7 7 0 0 1-14 0', 'M12 18v3'],
     play: ['M7 4.5v15l12-7.5z'], reply: ['M9 14 4 9l5-5', 'M4 9h10a6 6 0 0 1 6 6v4'],
+    forward: ['M15 14l5-5-5-5', 'M20 9H10a6 6 0 0 0-6 6v4'], textsel: ['M5 6h14', 'M5 11h14', 'M5 16h8', 'M17 14v7', 'M15 14h4', 'M15 21h4'],
     copy: ['M9 9h11v11H9z', 'M5 15H4V4h11v1'], trash: ['M4 7h16', 'M10 11v6', 'M14 11v6', 'M6 7l1 13h10l1-13', 'M9 7V4h6v3'],
     download: ['M12 4v11', 'm7 10 5 5 5-5', 'M5 20h14'], check: ['m5 12.5 4.5 4.5L19 7'], none: [],
     bell: ['M6 9a6 6 0 0 1 12 0c0 6 2.5 7.5 2.5 7.5h-17S6 15 6 9z', 'M10 20a2 2 0 0 0 4 0'],
@@ -396,7 +397,7 @@
     if (split.on) { const r = $('unified-inbox'); r.dataset.split = ''; if (!s.person) r.dataset.view = root.dataset.view; }
     const head = node('header', 'u-header');
     if (s.search != null) {
-      const field = node('input', 'u-search'); field.type = 'search'; field.placeholder = 'Search'; field.setAttribute('aria-label', 'Search ' + title.toLowerCase()); field.value = s.search;
+      const field = node('input', 'u-search'); field.type = 'search'; field.placeholder = 'Search messages'; field.setAttribute('aria-label', 'Search ' + title.toLowerCase()); field.value = s.search;
       field.oninput = () => { s.search = field.value; scheduleSearch(); };
       head.append(iconButton('back', 'Close search', back), field);
       requestAnimationFrame(() => field.focus());
@@ -846,7 +847,7 @@
       row.append(info); list.append(row);
     }
     if (searchView.loading) list.append(node('p', 'u-empty', 'Searching stored messages…'));
-    else if (!searchView.rows.length) list.append(node('p', 'u-empty', s.search.trim() ? 'No stored messages match' : 'Search all stored message text'));
+    else if (!searchView.rows.length) list.append(node('p', 'u-empty', s.search.trim() ? 'No stored messages match' : 'Type any words from a message. Every network is searched at once.'));
     if (searchView.cursor) {
       const more = button('More results', () => { more.disabled = true; loadSearch(searchGeneration, searchView.cursor); }); list.append(more);
     }
@@ -918,10 +919,17 @@
     if (!frag.children.length) {
       const empty = node('div', 'u-empty');
       const narrow = !!(filterState.net || filterState.type !== 'all' || filterState.label);
-      if (s.seg === 'low' && !narrow) empty.append(node('p', '', 'No low priority chats here'));
-      else if (s.seg === 'medium' && !narrow) empty.append(node('p', '', 'No medium priority chats here'));
-      else if (s.seg === 'unread' && !narrow && !q) empty.append(node('p', '', 'No unread chats'));
-      else if (q || narrow || s.seg !== 'all') empty.append(node('p', '', q ? 'No matches' : 'Nothing here with this filter'));
+      // 16.14: an empty folder says what it is for and how a chat gets there (hold on touch, right-click with a mouse);
+      // a filter that hides every chat offers one tap back to all chats.
+      const how = matchMedia('(hover: none)').matches ? 'Hold a chat' : 'Right-click a chat';
+      const hint = text => node('p', 'u-empty-hint', text);
+      if (s.seg === 'low' && !narrow) empty.append(node('p', '', 'No low priority chats here'), hint('Low chats stay out of All and never notify you. ' + how + ', then Priority → Low.'));
+      else if (s.seg === 'medium' && !narrow) empty.append(node('p', '', 'No medium priority chats here'), hint('Medium chats stay in All but never notify you. ' + how + ', then Priority → Medium.'));
+      else if (s.seg === 'unread' && !narrow && !q) empty.append(node('p', '', 'No unread chats'), hint('You are all caught up.'));
+      else if (q || narrow || s.seg !== 'all') {
+        empty.append(node('p', '', q ? 'No matches' : 'Nothing here with this filter'));
+        if (narrow) empty.append(button('Clear filters', () => { setNarrowQuiet('net', ''); setNarrowQuiet('type', 'all'); setNarrowQuiet('label', ''); drawList(); }, 'u-chip u-empty-clear'));
+      }
       else {
         empty.append(node('p', '', 'No chats yet. Connect WhatsApp, Telegram, Slack, LINE or Instagram and their chats land here.'));
         empty.append(button('Connect an account', () => accounts('accounts'), 'primary'));
@@ -1669,12 +1677,12 @@
     }
     const list = node('div', 'u-actions');
     const item = (label, ic, fn, cls = '') => { const it = button('', () => { closeOverlay(); fn(); }, 'u-act ' + cls); it.setAttribute('role', 'menuitem'); it.append(icon(ic), node('span', '', label)); list.append(it); };
-    if (!m.deleted) item('Forward to Wizard', 'reply', () => view.selection.forward([m.id]));
+    if (!m.deleted) item('Forward to Wizard', 'forward', () => view.selection.forward([m.id]));
     if (!m.deleted) item('Reply', 'reply', () => startReply(m));
     if (m.original && !m.deleted) item('Copy', 'copy', () => navigator.clipboard?.writeText(m.translated && shown[m.id] === 'translated' ? m.translated : m.original)?.then(() => toast('Copied')).catch(() => toast('Copy is not available here')));
     if (m.media && !m.deleted) item(m.photos?.length > 1 ? 'Save photos' : 'Save', 'download', () => { for (const photo of m.photos || [m]) if (!photo.deleted) { const a = node('a'); a.href = mediaURL(photo.id); a.download = photo.media?.filename || ''; a.click(); } });
     if (m.outgoing && telegram && m.msgtype === 'm.text' && !m.deleted) item('Edit', 'compose', () => startEdit(m));
-    if (opts.selectText && m.original && !m.deleted) item('Select text', 'copy', opts.selectText);
+    if (opts.selectText && m.original && !m.deleted) item('Select text', 'textsel', opts.selectText);
     if (opts.select && !m.deleted && !m.pending) item('Select', 'check', opts.select);
     item('Delete for me', 'trash', () => del(m, false), 'danger');
     if (m.outgoing && telegram && !m.deleted) item('Delete for everyone', 'trash', () => del(m, true), 'danger');
