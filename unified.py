@@ -541,7 +541,7 @@ class PeopleStore:
                     if media.get('sticker'):
                         p['last']['sticker'] = True
                 elif not r['deleted']:
-                    gone = unavailable_media(r['original'])
+                    gone = unavailable_media(r['original'], r['timestamp'])
                     if gone:
                         p['last'].update(text=gone[1][:140], unavailable=gone[0])
                 p['unread'] = unread.get(pid, 0)
@@ -864,10 +864,10 @@ class PeopleStore:
                     entry['mine'] = entry['mine'] or bool(r[2])
             quoted = {}
             if replies:
-                for r in db.execute('SELECT id,sender,outgoing,original,msgtype,deleted,media FROM message WHERE id IN (%s)' % ','.join('?' * len(replies)), replies):
+                for r in db.execute('SELECT id,sender,outgoing,original,msgtype,deleted,media,timestamp FROM message WHERE id IN (%s)' % ','.join('?' * len(replies)), replies):
                     media = json.loads(r['media']) if r['media'] else {}
                     text = '' if r['deleted'] else r['original'][:200]
-                    gone = r['msgtype'] == 'm.text' and unavailable_media(r['original'])
+                    gone = r['msgtype'] == 'm.text' and unavailable_media(r['original'], r['timestamp'])
                     if gone:
                         text = unavailable_label(gone[0]) + (' · ' + gone[1][:160] if gone[1] else '')
                     quoted[r['id']] = {'id': r['id'], 'sender': OWN_SENDER if r['outgoing'] else r['sender'], 'outgoing': bool(r['outgoing']), 'text': text,
@@ -890,7 +890,7 @@ class PeopleStore:
             else:
                 r['media'] = None
             if r.get('msgtype') == 'm.text' and not r['deleted']:
-                gone = unavailable_media(r.get('original'))
+                gone = unavailable_media(r.get('original'), r.get('timestamp'))
                 if gone:
                     # Media the bridge could not deliver: the view shows a quiet placeholder plus any caption.
                     r['unavailable'], r['original'], r['translated'] = gone[0], gone[1], None
@@ -1045,15 +1045,20 @@ UNAVAILABLE_KIND = {'photo': 'photo', 'image': 'photo', 'gif': 'gif', 'voice mes
 UNAVAILABLE_LABELS = {'photo': '📷 Photo', 'gif': 'GIF', 'voice': '🎤 Voice message', 'video': '🎬 Video', 'file': '📎 File',
                       'sticker': 'Sticker', 'audio': '🎵 Audio', 'media': '📎 Media'}
 WAITING_PREFIX = 'Decrypting message from WhatsApp failed'
+# WhatsApp re-sends an undecryptable message within moments when the sender's phone is online; the bridge then edits
+# the notice into the real message. Past this age it is not coming: say so instead of "waiting" forever.
+WAITING_MAX_MS = 3600 * 1000
 
 
-def unavailable_media(original):
+def unavailable_media(original, stamp=None):
     """('photo'|'video'|..., caption) for a bridge's "Failed to bridge ..." line, ('waiting', '') for a WhatsApp
-    message the bridge is still waiting to decrypt, else None."""
+    message the bridge is still waiting to decrypt ('undecryptable' once it is older than WAITING_MAX_MS, when the
+    message time is given), else None."""
     if not isinstance(original, str) or not original.startswith(('Failed to bridge ', WAITING_PREFIX)):
         return None
     if original.startswith(WAITING_PREFIX):
-        return 'waiting', ''
+        old = isinstance(stamp, (int, float)) and stamp > 0 and stamp < time.time() * 1000 - WAITING_MAX_MS
+        return ('undecryptable' if old else 'waiting'), ''
     match = UNAVAILABLE.match(original)
     if not match:
         return None
@@ -1063,6 +1068,8 @@ def unavailable_media(original):
 def unavailable_label(kind):
     if kind == 'waiting':
         return '⏳ Waiting for this message'
+    if kind == 'undecryptable':
+        return "🔒 Message couldn't be decrypted"
     return UNAVAILABLE_LABELS.get(kind, '📎 Media') + ' not available'
 
 
@@ -1492,9 +1499,9 @@ class UnifiedInbox:
             return False
         names = meta.get('names') or {}
         with self.store.db() as db:
-            row = db.execute('SELECT msgtype,media,original FROM message WHERE id=? AND identity_id=? AND deleted=0 AND (sender IN (?,?) OR (outgoing=1 AND ?))',
-                             (target, identity['id'], names.get(sender) or sender, sender, outgoing)).fetchone()
-        if not row:
+            row = db.execute('SELECT msgtype,media,original,sender,outgoing FROM message WHERE id=? AND identity_id=? AND deleted=0',
+                             (target, identity['id'])).fetchone()
+        if not row or not self.same_author(identity, target, row, sender, outgoing, names):
             return False
         kind = new.get('msgtype')
         dump = lambda m: json.dumps(m, ensure_ascii=False) if m else None
@@ -1520,6 +1527,25 @@ class UnifiedInbox:
         old.pop('mentions', None)
         body, media = self.with_mentions(identity, meta, new, body, old)
         return self.store.bump(target, ',original=?,media=?,translated=NULL,translation_error=NULL' + flag, (body, dump(media)))
+
+    def same_author(self, identity, target, row, sender, outgoing, names):
+        """Only the author may edit a message. Rows store the sender's display name at the time, and bridges rename
+        ghosts later (WhatsApp's "Name (WA)" becomes "Name", contact names change), so a stored-name mismatch is
+        settled by the original event's sender mxid, never by a looser name match."""
+        if outgoing and row['outgoing']:
+            return True
+        if row['outgoing'] or not isinstance(sender, str) or not sender:
+            return False
+        if row['sender'] == sender:
+            return True
+        # Fast path: the stored name is this sender's current name and nobody else in the room wears it.
+        if row['sender'] == names.get(sender) and sum(1 for v in names.values() if v == row['sender']) == 1:
+            return True
+        try:
+            event = self.mx(self.room(identity['address']) + '/event/' + quote(target, safe=''))
+        except (EngineError, KeyError, TypeError):
+            return False
+        return isinstance(event, dict) and event.get('sender') == sender
 
     # ---------- mentions ----------
     def with_mentions(self, identity, meta, content, body, media):
@@ -1592,7 +1618,7 @@ class UnifiedInbox:
 
     def repair_rows(self):
         """Small batches per sync pass, each kind once (kv marker): never blocks live delivery."""
-        for name, fn in (('repair_waiting_v1', self.repair_waiting), ('repair_reparse_v1', self.repair_reparse)):
+        for name, fn in (('repair_waiting_v2', self.repair_waiting), ('repair_reparse_v1', self.repair_reparse)):
             if self.store.get(name):
                 continue
             try:

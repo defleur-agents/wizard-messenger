@@ -79,6 +79,7 @@ const playing = loc => loc.evaluate(async v => { const a = v.currentTime; await 
     assert.match(await gone.innerText(), /📷 Photo not available\s*\(expired on WhatsApp\)/);
     assert.equal(await page.locator('.u-row[data-id="$expired"] .u-text').innerText(), 'our trip to the lake');
     assert.match(await page.locator('.u-row[data-id="$expired2"] .u-unavailable').innerText(), /Voice message not available/);
+    assert.match(await page.locator('.u-row[data-id="$lost"] .u-unavailable').innerText(), /Message couldn't be decrypted\s*\(on WhatsApp\)/);
     // Decrypt-retry edit became a real photo.
     const sunset = page.locator('.u-row[data-id="$wait"] .u-media img');
     await sunset.waitFor(); await page.waitForFunction(id => { const i = document.querySelector(`.u-row[data-id="${id}"] .u-media img`); return i && i.naturalWidth > 0; }, '$wait');
@@ -155,5 +156,5 @@ const playing = loc => loc.evaluate(async v => { const a = v.currentTime; await 
     console.log('ok reduced-motion');
   }
   await browser.close();
-  console.log('PASS incoming_media_browser: GIF autoplay/offscreen pause/reduced motion, animated sticker, static GIF, mention chips, expired placeholder, markdown; 3 skins x 390/1280');
+  console.log('PASS incoming_media_browser: GIF autoplay/offscreen pause/reduced motion, animated sticker, static GIF, mention chips, expired + undecryptable placeholders, markdown; 3 skins x 390/1280');
 })().catch(e => { console.error('FAIL', e); process.exit(1); });
