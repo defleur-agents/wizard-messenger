@@ -38,6 +38,10 @@ def _directory(root, create=False):
 
 
 def _read(fd, name, limit):
+    if not re.fullmatch(r'[a-f0-9]{64}\.(?:blob|json)', name):
+        raise EngineError('not_found', 'No such recording', 404)
+    # Validation rejects malformed identifiers; basename is additionally explicit for static data-flow analysis.
+    name = os.path.basename(name)
     f = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
     with os.fdopen(f, 'rb') as source:
         info = os.fstat(f)

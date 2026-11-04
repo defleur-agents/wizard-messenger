@@ -21,7 +21,7 @@ This is diagnostic custody and raw export, **not a fix or diagnosis of the Mac r
   - Archive HTTP test runs on TCP and OwnerUnixServer; missing auth/CSRF and bearers refused, owner-only readback, traversal rejected.
   - Exact25MiB and oversized input, quota, symlink root/entry confinement,0600/0700, corruption, interrupted manifest publication and exact-budget retry exercised.
 - `node tests/voice_capture_guard_browser.cjs`: all pass.
-- Full Python discovery: candidate372/base370 before the added storage test, both same2 failures (stale Rust Dockerfile literal and search fixture missing crypto),2 import errors (pytest unavailable),3 skips. No new failure set.
+- Full Python discovery: final committed candidate373/base370, both same2 failures (stale Rust Dockerfile literal and search fixture missing crypto),2 import errors (pytest unavailable),3 skips. No new failure set.
 - `wam check`: same inherited system-function findings as base (existing media playback, push SW, Messenger chat markup and old test-fixture sources). Not claimed green.
 - Independent read-only Codex review found symlink confinement and interrupted-commit quota issues; both corrected, regression-tested, re-reviewed. Final reviewed range verdict: blocker resolved.
 
