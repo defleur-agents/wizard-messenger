@@ -406,6 +406,28 @@ class ViewHandler(Handler):
         if path=='/api/view/trusted-owner' and method=='GET':
             self._trusted_owner()
             return 200,{'ok':True,'result':{'enabled':True,'remembered':self.service.trusted_owner.path.exists()}}
+        if path == '/api/view/voice-original' or path.startswith('/api/view/voice-original/'):
+            # Not an agent tool or bearer capability. Keep the normal owner session, proof and CSRF boundary.
+            if self.headers.get('Authorization'):
+                raise EngineError('owner_only', 'Recording recovery is owner-only', 403)
+            self._authorize()
+            data_root = getattr(self.service.engine, 'data', None)
+            if not data_root:
+                raise EngineError('not_configured', 'Recording archive unavailable', 503)
+            import voice_archive
+            root = Path(data_root) / 'voice-originals'
+            if path == '/api/view/voice-original' and method == 'PUT':
+                query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if len(urlsplit(self.path).query) > 2048 or any(len(v) != 1 for v in query.values()):
+                    raise EngineError('invalid_input', 'Invalid recording metadata', 400)
+                metadata = {k: v[0] for k, v in query.items()}
+                result = voice_archive.archive(root, self._raw_body(), metadata)
+                return 200, {'ok': True, 'result': result}
+            if method == 'GET' and path.startswith('/api/view/voice-original/'):
+                payload = voice_archive.readback(root, path[len('/api/view/voice-original/'):])
+                self._headers(200, payload, 'application/octet-stream')
+                return None
+            raise EngineError('not_found', 'No such recording route', 404)
         if path.startswith('/api/view/push'):
             # Bearers (including Full access) never possess notification authority.
             if self.headers.get('Authorization'):

@@ -1416,7 +1416,10 @@
     if (m.outgoing) meta.append(m.failed ? node('span', 'u-status-ic fail', '!') : m.pending ? node('span', 'u-status-ic clock', '◷') : node('span', 'u-status-ic' + (ctx.read ? ' read' : ''), ctx.read ? '✓✓' : '✓'));
     b.append(meta);
     row.append(b);
-    if (m.failed) row.append(button(m.failed === true ? 'Not sent · Tap to retry' : 'Not sent · ' + m.failed + ' · Retry', () => m.retry ? m.retry() : null, 'u-retry link'));
+    if (m.failed) {
+      row.append(button(m.failed === true ? 'Not sent · Tap to retry' : 'Not sent · ' + m.failed + ' · Retry', () => m.retry ? m.retry() : null, 'u-retry link'));
+      if (m.saveRecording) row.append(button('Save recording', () => m.saveRecording(), 'u-voice-save link'));
+    }
     if (m.reactions?.length) {
       const strip = node('div', 'u-reactions');
       for (const r of m.reactions) strip.append(button(r.key + (r.count > 1 ? ' ' + r.count : ''), () => react(m, r.key), 'u-react' + (r.mine ? ' mine' : '')));
@@ -2018,6 +2021,7 @@
         bar.hidden = false;
         const chip = node('div', 'u-unsent-voice');
         chip.append(node('span', '', 'Unsent voice note'),
+          button('Save recording', () => saveVoiceRecording(take.blob, take.id), 'u-voice-keep-save'),
           button('Send', () => sendKeptVoice(take), 'u-voice-keep-send'),
           button('Discard', async () => {
             try { await window.WizardApp.capture.ack(take.id); voiceKept.delete(take.id); view.paintBar?.(); }
@@ -2408,6 +2412,28 @@
     const original = f.type === 'image/gif' ? f : blob;
     return {blob: original, albumBlob: blob, url: URL.createObjectURL(original), w, h};
   }
+  async function saveVoiceRecording(blob, take) {
+    // Start sharing inside the tap: no fetch/conversion before shared gesture handling.
+    try {
+      const ext = /webm/i.test(blob.type) ? 'webm' : /mp4/i.test(blob.type) ? 'm4a' : /wav/i.test(blob.type) ? 'wav' : /ogg/i.test(blob.type) ? 'ogg' : 'bin';
+      const file = new File([blob], 'recording-' + String(take || 'unsent').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60) + '.' + ext, {type: blob.type || 'application/octet-stream'});
+      const outcome = await WizardApp.share.file(file, {title: 'Save recording'});
+      toast(outcome === 'shared' ? 'Recording shared. The unsent note is still kept.' : outcome === 'cancelled' ? 'Save cancelled. Recording kept.' : 'File sharing unavailable. Recording kept.');
+    } catch (_) { toast('Could not save recording. Recording kept.'); }
+  }
+  async function archiveVoiceOriginal(voice) {
+    const blob = voice.blob;
+    const query = new URLSearchParams({take: voice.take || 'unsent', duration: String(voice.duration || 0), mime: blob.type || '', size: String(blob.size)});
+    const response = await fetch('api/view/voice-original?' + query, {method: 'PUT', credentials: 'same-origin', cache: 'no-store', headers: {'Content-Type': 'application/octet-stream', 'X-Messenger-CSRF': csrf()}, body: blob});
+    let env = {}; try { env = await response.json(); } catch (_) { /* keep original on every failure */ }
+    if (!response.ok || !env.ok) throw new Error(env.error?.message || 'Original recording not saved. Use Save recording.');
+    const proof = await fetch('api/view/voice-original/' + encodeURIComponent(env.result.id), {credentials: 'same-origin', cache: 'no-store'});
+    if (!proof.ok) throw new Error('Original recording readback failed. Use Save recording.');
+    const original = new Uint8Array(await blob.arrayBuffer()), saved = new Uint8Array(await proof.arrayBuffer());
+    if (original.length !== saved.length || original.some((v, i) => v !== saved[i])) throw new Error('Original recording readback differs. Use Save recording.');
+    // Custody is diagnostic only: do not ack, clear the bubble, or infer delivery.
+    return env.result;
+  }
   async function upload(id, kind, blob, name = '') {
     // Telegram takes voice notes only as Ogg Opus. Retries convert again from the kept original.
     if (kind === 'voice') blob = await toOggOpus(blob);
@@ -2428,7 +2454,7 @@
     if (job.photos) { m.album = 'pending:' + client_id; m.photos = job.photos.map((photo, i) => ({...m, photos: undefined, id: m.id + ':' + i, original: i ? '' : m.original, local: photo.url, media: {w: photo.w, h: photo.h, mime: 'image/jpeg'}})); m.media = m.photos[0].media; }
     if (job.photo) { m.local = job.photo.url; m.media = {w: job.photo.w, h: job.photo.h, mime: 'image/jpeg'}; }
     if (job.file) m.media = {filename: job.file.name, size: job.file.bytes, mime: job.file.blob.type || 'application/octet-stream'};
-    if (job.voice) { m.local = job.voice.url; m.media = {voice: true, duration: job.voice.duration, waveform: job.voice.waveform.map(v => Math.round(v / 10.24))}; }
+    if (job.voice) { m.saveRecording = () => saveVoiceRecording(job.voice.blob, job.voice.take); m.local = job.voice.url; m.media = {voice: true, duration: job.voice.duration, waveform: job.voice.waveform.map(v => Math.round(v / 10.24))}; }
     t.messages.push(m); store.pending++; hold();
     if (s.person === id) paintThread(true);
     const run = async () => {
@@ -2441,7 +2467,7 @@
         }
         if (job.photo) { upload_id = (await upload(id, 'image', job.photo.blob)).upload_id; media = {w: job.photo.w, h: job.photo.h}; }
         if (job.file) upload_id = (await upload(id, 'file', job.file.blob, job.file.name)).upload_id;
-        if (job.voice) { upload_id = (await upload(id, 'voice', job.voice.blob)).upload_id; media = {duration: job.voice.duration, waveform: job.voice.waveform}; }
+        if (job.voice) { await archiveVoiceOriginal(job.voice); upload_id = (await upload(id, 'voice', job.voice.blob)).upload_id; media = {duration: job.voice.duration, waveform: job.voice.waveform}; }
         const r = await call('people/' + id + '/send', {text: job.text || '', client_id, reply_to: job.reply?.id || null, identity_id: job.identity_id || null, upload_id, upload_ids, media});
         if (r.message) mergeMessages(id, r.messages || [r.message]);
         job.onDelivered?.();

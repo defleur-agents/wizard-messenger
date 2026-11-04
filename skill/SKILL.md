@@ -19,6 +19,16 @@ The original release is encrypted text DMs with dedicated Messenger accounts, pu
 - Sent means relay publication, not peer read. Preserve original request/event IDs on retry. An ambiguous send must be reconciled, not blindly resent.
 - Source/API/view files and build provenance ship together. The published API contract is `API-contract.json`; screen source is `static/`.
 
+## Recover an unsent voice recording
+
+Recovery/diagnostics is an owner-screen job, not an agent tool. Do not ask for another take, discard, acknowledge, reload, or send to a recipient to investigate. The underlying Mac recording failure is not diagnosed by this path.
+
+On this version, every voice Send/Retry privately archives the exact original Blob **before conversion**, then reads back and compares its bytes through authenticated owner routes. Archive success is not delivery and never acknowledges shared capture. A failed bubble and an existing Unsent voice note chip offer **Save recording**, using `WizardApp.share.file` on the raw existing Blob; cancellation/unsupported sharing leaves it kept. Only confirmed send or explicit Discard acknowledges it. No archive or export is exposed through MCP, agent bearers, public links, or tools.
+
+The archive has a 25 MB per-take limit and 250 MB aggregate budget (full means refuse, never silently delete). Original bytes and the local manifest live privately in `/data/voice-originals/`, files 0600, directory 0700. Metadata is bounded: take id, reported duration, reported MIME, byte size, server-computed SHA256 and first 32 bytes hex. Unsupported/corrupt audio is deliberately retained unchanged. `PUT api/view/voice-original` requires owner cookie, allowed Origin and CSRF; `GET api/view/voice-original/<opaque-id>` requires owner authentication and ingress proof on trusted installs. It returns raw bytes, not a path.
+
+An **already-open older failed bubble still runs older code**: Retry cannot gain the archive hook from a server update. Never promise otherwise. Pending shared capture survives reload in the Chromium/live-resource fixture, and the production composer displays its Unsent voice note chip there, but that is not proof the owner's Mac has persisted his existing take. Do not tell him to reload/reopen unless custody of that particular take is established; preserve his open bubble and report the client-version/custody blocker. There is no supported remote device extraction action in this app. New-code Retry archives first; Save recording does not send.
+
 ## First open: trusted owner enrollment
 
 Bearer `/api/view/ticket` is launcher-only in this candidate. It cannot create an owner account or open an existing owner session. Do not use the legacy bearer-bootstrap recipe.

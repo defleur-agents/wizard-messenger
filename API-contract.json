@@ -48,6 +48,19 @@
   "setup_semantics": "No identity is created automatically. A dedicated vault passphrase of at least 16 characters is needed to create/unlock. Keyring remains encrypted at rest. Restart always relocks. account_configured reports whether an identity exists; ready may have identity=null when a new vault has only been unlocked. The one messaging key is separate from Wizard root signing.",
   "routes": [
     {
+      "method": "PUT",
+      "path": "/api/view/voice-original?take=<id>&duration=<ms>&mime=<reported>&size=<bytes>",
+      "auth": "owner cookie + allowed Origin + CSRF; trusted ingress proof when enabled; all bearers refused",
+      "body": "exact original raw bytes, 1..25 MiB; bounded metadata; aggregate private archive budget 250 MiB; never a send or capture ack",
+      "result": "opaque id, take, duration, mime, size, server-computed sha256 and first 32 bytes head_hex; unsupported audio retained unchanged"
+    },
+    {
+      "method": "GET",
+      "path": "/api/view/voice-original/<opaque-id>",
+      "auth": "owner cookie and trusted ingress proof when enabled; all bearers refused; no public or agent tool",
+      "result": "byte-exact application/octet-stream with no-store; opaque-id must be 64 lowercase hexadecimal characters, never a path"
+    },
+    {
       "method": "GET",
       "path": "/api/view/trusted-owner",
       "auth": "explicit local opt-in + authenticated gateway HMAC proof, never a bearer",
