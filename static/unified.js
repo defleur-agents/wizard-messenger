@@ -161,9 +161,9 @@
     if (reason && !updateHold) updateHold = {reason, h: window.WizardApp.update.hold(reason)};
   }
   function inChat(on) { if (on) document.documentElement.dataset.inChat = ''; else delete document.documentElement.dataset.inChat; syncKeys(); }
-  // ---------- keyboard (Wizard app-key contract, 16.15) ----------
-  // Gmail-style keys: j/k = next/previous chat in the order the list shows, r = reply (focus the open chat's
-  // composer), / = search chats, n = new chat (on the compose button). Each key is a real control marked
+  // ---------- keyboard (Wizard app-key contract, 16.15; ⌥ anchor 16.18) ----------
+  // Gmail-style keys, each held with left ⌥ (16.18: Wizard's one anchor): j/k = next/previous chat in the order the
+  // list shows, r = reply (focus the open chat's composer), / = search chats, n = new chat (on the compose button). Each key is a real control marked
   // data-wz-key; the shared Wizard client (WizardApp.keys) clicks the first visible, enabled match and draws
   // keycaps while ⌥ is held. j/k/r and a spare / live in one visually quiet row so they work from the list and
   // from an open chat alike (phone-width Messenger shows only one of them). Escape stays Back.
@@ -226,27 +226,25 @@
     const find = [...document.querySelectorAll('[data-wz-key="/"]')].find(el => el !== sl && seen(el));
     if (find) delete sl.dataset.wzKey; else sl.dataset.wzKey = '/';
   }
-  // Fallback for hosts whose WizardApp client has no keys service yet (older Wizard, a plain browser tab): the same
-  // rules as the shared client, and it stands down the moment WizardApp.keys exists.
-  const WZ_KEY_TEXT = 'input:not([type=button],[type=checkbox],[type=radio],[type=range],[type=submit],[type=reset],[type=color],[type=file]),textarea,select,[contenteditable]:not([contenteditable=false])';
+  // Fallback for a plain browser tab only (16.18, one anchor: left ⌥ for every Wizard key). data-wz-key="j" means ⌥J.
+  // Inside Wizard the shell routes ⌥+key to the marked control, so a framed Messenger never acts here, and it stands
+  // down whenever the shared client brings WizardApp.keys. Plain keys never act. The key comes from e.code (⌥J on a
+  // Mac types ∆), so only KeyA..KeyZ and / , . ; map; a held key does not repeat; ⌥ in the composer still acts.
   const wzVisible = el => !!el.getClientRects().length && (el.checkVisibility ? el.checkVisibility({visibilityProperty: true}) : getComputedStyle(el).visibility !== 'hidden');
   const wzEnabled = el => !el.disabled && el.getAttribute('aria-disabled') !== 'true' && !el.closest('[inert],[hidden],fieldset[disabled]');
-  function wzKeyName(e) {
-    if (e.key === ' ' || e.key === 'Spacebar') return 'Space';
-    if (e.key === 'Enter' || /^Arrow(Up|Down|Left|Right)$/.test(e.key)) return e.key;
-    return e.key.length === 1 && e.key !== ' ' ? e.key : '';
-  }
+  const WZ_CODE_KEYS = {Slash: '/', Comma: ',', Period: '.', Semicolon: ';'};
+  const wzKeyName = e => /^Key[A-Z]$/.test(e.code || '') ? e.code.slice(3).toLowerCase() : WZ_CODE_KEYS[e.code] || '';
   function wzKeyFallback(e) {
-    if (window.WizardApp?.keys || e.defaultPrevented || e.isComposing || e.altKey || e.ctrlKey || e.metaKey) return;
-    const t = e.target, a = document.activeElement;
-    if ([t, a].some(el => el?.closest?.(WZ_KEY_TEXT) || el?.isContentEditable)) return; // typing
+    if (window.parent !== window || window.WizardApp?.keys) return;   // in Wizard (or a client with keys): the shell's
+    if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.defaultPrevented || e.isComposing) return;
     const key = wzKeyName(e); if (!key) return;
     const modals = [...document.querySelectorAll('dialog[open],[aria-modal="true"]')].filter(wzVisible);
     const scope = modals.at(-1) || document;
     const hit = [...scope.querySelectorAll('[data-wz-key]')].find(el => el.dataset.wzKey === key && wzVisible(el) && wzEnabled(el));
     if (!hit) return;
-    e.preventDefault(); e.stopPropagation();
-    if (hit.matches(WZ_KEY_TEXT)) { replyKey(); return; } // the reply box as the target: focus it (a click alone doesn't)
+    e.preventDefault(); e.stopPropagation();   // ⌥ in a field would type ∆ / ˚ on a Mac
+    if (e.repeat) return;
+    if (hit.matches('textarea,input,select,[contenteditable]:not([contenteditable=false])')) { replyKey(); return; } // the reply box: focus it
     hit.click();
   }
   document.addEventListener('keydown', wzKeyFallback);
