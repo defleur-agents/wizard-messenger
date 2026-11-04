@@ -106,13 +106,29 @@ def archive(root, data, metadata):
                     orphan = None
                 if orphan is not None and orphan != data:
                     raise EngineError('archive_corrupt', 'Recording readback failed', 500)
-                used = 0
+                used, entries = 0, {}
                 for name in os.listdir(fd):
                     info = os.stat(name, dir_fd=fd, follow_symlinks=False)
                     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                         raise EngineError('archive_corrupt', 'Recording archive unavailable. Use Save recording.', 500)
                     used += info.st_size
-                if used + (len(data) if orphan is None else 0) + len(encoded) > BUDGET:
+                    match = re.fullmatch(r'([a-f0-9]{64})\.(?:blob|json)', name)
+                    if match and match.group(1) != key:
+                        entry = entries.setdefault(match.group(1), [info.st_mtime, 0, []])
+                        entry[0] = min(entry[0], info.st_mtime)
+                        entry[1] += info.st_size
+                        entry[2].append(name)
+                needed = (len(data) if orphan is None else 0) + len(encoded)
+                # A bounded rolling buffer: the newest take matters most, so the
+                # oldest takes give way instead of every later voice note failing.
+                for _, size, names in sorted(entries.values()):
+                    if used + needed <= BUDGET:
+                        break
+                    for name in sorted(names, key=lambda n: not n.endswith('.json')):  # commit marker first
+                        os.unlink(name, dir_fd=fd)
+                    os.fsync(fd)
+                    used -= size
+                if used + needed > BUDGET:
                     raise EngineError('archive_full', 'Recording archive is full. Save recording instead.', 507)
                 if orphan is None:
                     _write(fd, key + '.blob', data)

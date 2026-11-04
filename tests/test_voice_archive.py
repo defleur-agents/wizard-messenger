@@ -87,6 +87,28 @@ class VoiceArchiveStorage(unittest.TestCase):
             receipt = voice_archive.archive(root, exact, dict(metadata, size=len(exact)))
             self.assertEqual(voice_archive.readback(root, receipt['id']), exact)
 
+    def test_full_archive_rolls_oldest_takes_instead_of_failing_sends(self):
+        import os, tempfile, time
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'archive'
+            take = lambda n: (bytes([n]) * 1000, dict(take='t%d' % n, duration=1000, mime='audio/webm', size=1000))
+            ids = []
+            with patch.object(voice_archive, 'BUDGET', 2600):
+                for n in range(5):
+                    data, meta = take(n)
+                    ids.append(voice_archive.archive(root, data, meta)['id'])
+                    stamp = time.time() - 100 + n
+                    for suffix in ('.blob', '.json'):
+                        os.utime(root / (ids[-1] + suffix), (stamp, stamp))
+            self.assertEqual(voice_archive.readback(root, ids[-1]), take(4)[0])
+            self.assertEqual(voice_archive.readback(root, ids[-2]), take(3)[0])
+            for old in ids[:3]:
+                with self.assertRaises(EngineError) as caught: voice_archive.readback(root, old)
+                self.assertEqual(caught.exception.code, 'not_found')
+            self.assertLessEqual(sum(p.stat().st_size for p in root.iterdir()), 2600)
+            self.assertEqual(sorted(p.name for p in root.iterdir()), sorted(i + s for i in ids[-2:] for s in ('.blob', '.json')))
+
 
 class VoiceArchiveUnixBoundary(VoiceArchiveBoundary):
     def setUp(self):
