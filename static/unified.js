@@ -605,16 +605,23 @@
     return null;
   }
   // Plain words for previews: Markdown links show their text (or the site), bare links show the site.
-  const plainText = text => (text || '').replace(MD_LINK, (_, label, url) => /^https?:\/\//.test(label) ? siteOf(url) : label)
+  const plainText = text => (text || '').replace(MD_LINK, (_, label, url) => /^https?:\/\//.test(label) ? siteOf(url) : label).replace(/\*\*([^*\n]+)\*\*/g, '$1')
     .replace(/https?:\/\/[^\s)]+/g, url => siteOf(url)).replace(/^>\s?/gm, '').replace(/\s*\n+\s*/g, ' ').trim();
   function siteOf(url) { try { return new URL(url).hostname.replace(/^www\./, '') + (new URL(url).pathname.length > 1 ? '/…' : ''); } catch { return url; } }
+  // Media a bridge could not deliver (WhatsApp keeps old media only on the sender's phone for a while) and
+  // messages it is still decrypting: a quiet placeholder instead of the bridge's own sentence. Same words as unified.unavailable_label.
+  function unavailableLabel(kind) {
+    if (kind === 'waiting') return '⏳ Waiting for this message';
+    return ({photo: '📷 Photo', gif: 'GIF', voice: '🎤 Voice message', video: '🎬 Video', file: '📎 File', sticker: 'Sticker', audio: '🎵 Audio'}[kind] || '📎 Media') + ' not available';
+  }
   function snippet(last) {
     if (!last) return '';
     if (last.deleted) return 'This message was deleted';
     const story = storyOf(last.text, false);
     if (story) return (story.verb === 'reacted' ? '❤️ ' : story.verb === 'replied' ? '↩︎ ' : '📖 ') + story.label;
     last = {...last, text: plainText(last.text)};
-    const label = last.voice ? '🎤 Voice message' : {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.audio': '🎵 Audio', 'm.file': '📎 File', 'm.sticker': 'Sticker', 'm.location': '📍 Location'}[last.msgtype];
+    const label = last.unavailable ? unavailableLabel(last.unavailable) : last.voice ? '🎤 Voice message' : last.sticker ? 'Sticker' : last.gif ? 'GIF'
+      : {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.audio': '🎵 Audio', 'm.file': '📎 File', 'm.sticker': 'Sticker', 'm.location': '📍 Location'}[last.msgtype];
     return label ? label + (last.text ? ' · ' + last.text : '') : last.text;
   }
   function mergeList(people) {
@@ -1420,16 +1427,57 @@
     call('people/' + view.id + '/read', {timestamp: last.timestamp}).catch(() => {});
   }
   const URL_RE = /\bhttps?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]]/g;
-  function richText(cls, text) {
-    const p = node('p', cls); let at = 0;
-    // Markdown links from bridges ("[label](url)"): show the label as the link text.
-    if (MD_LINK.test(text)) {
-      MD_LINK.lastIndex = 0;
-      for (const m of text.matchAll(MD_LINK)) { p.append(text.slice(at, m.index)); const a = node('a', '', /^https?:\/\//.test(m[1]) ? siteOf(m[2]) : m[1]); a.href = m[2]; a.target = '_blank'; a.rel = 'noopener noreferrer'; p.append(a); at = m.index + m[0].length; }
-      p.append(text.slice(at)); return p;
+  // Bubble text, built as nodes (never innerHTML): @mention chips, links, and the light formatting the networks
+  // write as plain text (**bold** / *bold*, _italic_, ~strike~, `code`, ```blocks```).
+  const INLINE = /```([\s\S]+?)```|`([^`\n]+)`|\[([^\]\n]{1,300})\]\((https?:\/\/[^)\s]+)\)|(\bhttps?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]])|\*\*([^*\n]+?)\*\*|(^|[^\w*])\*([^\s*][^*\n]*?)\*(?![\w*])|(^|[^\w_])_([^\s_][^_\n]*?)_(?![\w_])|~~([^~\n]+?)~~|(^|[^\w~])~([^\s~][^~\n]*?)~(?![\w~])/g;
+  const TG_USER = /(^|[\s(])(@[A-Za-z][A-Za-z0-9_]{3,31})(?![\w@])/g;
+  function contactName(net, acc) { try { return contacts.map.get(accKey(net, acc))?.name || ''; } catch { return ''; } }
+  function mentionMarks(text, m) {
+    const marks = []; let at = 0;
+    for (const x of m?.mentions || []) {
+      if (!x?.text) continue;
+      const i = text.indexOf(x.text, at); if (i < 0) continue;
+      const saved = x.acc && !x.me && contactName(x.net, x.acc);
+      marks.push({start: i, end: i + x.text.length, label: saved && !x.text.startsWith('@' + saved) && !/^@[A-Za-z0-9_]+$/.test(x.text) ? '@' + saved : x.text, me: !!x.me});
+      at = i + x.text.length;
     }
-    for (const m of text.matchAll(URL_RE)) { p.append(text.slice(at, m.index)); const a = node('a', '', m[0]); a.href = m[0]; a.target = '_blank'; a.rel = 'noopener noreferrer'; p.append(a); at = m.index + m[0].length; }
-    p.append(text.slice(at)); return p;
+    if (m?.network === 'telegram') for (const x of text.matchAll(TG_USER)) {
+      const start = x.index + x[1].length, end = start + x[2].length;
+      if (!marks.some(k => start < k.end && end > k.start)) marks.push({start, end, label: x[2], me: false});
+    }
+    return marks.sort((a, b) => a.start - b.start);
+  }
+  function inline(parent, text, depth) {
+    let at = 0;
+    for (const x of text.matchAll(INLINE)) {
+      const pre = x[8] != null ? x[7] : x[10] != null ? x[9] : x[13] != null ? x[12] : '';
+      const inner = x[8] ?? x[10] ?? x[13] ?? x[6] ?? x[11];
+      if (inner != null && /\s$/.test(inner)) continue;
+      parent.append(text.slice(at, x.index) + pre); at = x.index + x[0].length;
+      let el;
+      if (x[1] != null) el = node('code', 'u-code-block', x[1].replace(/^\n/, ''));
+      else if (x[2] != null) el = node('code', 'u-code', x[2]);
+      else if (x[4] != null) { el = node('a', '', /^https?:\/\//.test(x[3]) ? siteOf(x[4]) : x[3]); el.href = x[4]; }
+      else if (x[5] != null) { el = node('a', '', x[5]); el.href = x[5]; }
+      else {
+        el = node(x[6] != null || x[8] != null ? 'strong' : x[10] != null ? 'em' : 's');
+        if (depth < 2) inline(el, inner, depth + 1); else el.textContent = inner;
+      }
+      if (el.tagName === 'A') { el.target = '_blank'; el.rel = 'noopener noreferrer'; }
+      parent.append(el);
+    }
+    parent.append(text.slice(at));
+  }
+  function richText(cls, text, m) {
+    const p = node('p', cls); let at = 0;
+    for (const k of mentionMarks(text || '', m)) {
+      if (k.start < at) continue;
+      inline(p, text.slice(at, k.start), 0);
+      const chip = node('span', 'u-mention' + (k.me ? ' me' : ''), k.label); if (k.me) chip.title = 'Mentions you';
+      p.append(chip); at = k.end;
+    }
+    inline(p, (text || '').slice(at), 0);
+    return p;
   }
   // The sender's own link preview (what WhatsApp/Telegram/Signal showed them), as a tidy card.
   function linkCard(m, l, i) {
@@ -1449,13 +1497,19 @@
     const b = node('article', 'u-message' + (m.outgoing ? ' outgoing' : '') + (m.deleted ? ' deleted' : '') + (m.pending ? ' pending' : '') + (m.failed ? ' failed' : ''));
     const visual = !m.deleted && ['m.image', 'm.sticker', 'm.video'].includes(m.msgtype);
     if (visual && !m.original) b.classList.add('bare');
+    if (visual && isSticker(m) && !m.original) b.classList.add('sticker-only');
     if (ctx.group && !m.outgoing && m.sender && (pos === 'first' || pos === 'single')) b.append(node('p', 'u-sender tone-text-' + toneOf(m.sender), nameOf(m.sender)));
     if (m.reply) {
       const q = button('', () => jumpTo(m.reply.id), 'u-quote' + (m.reply.outgoing ? ' mine' : ''));
-      q.append(node('strong', '', m.reply.outgoing ? 'You' : nameOf(m.reply.sender) || 'Them'), node('span', '', m.reply.deleted ? 'Deleted message' : m.reply.voice ? '🎤 Voice message' : m.reply.text || {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.file': '📎 File', 'm.sticker': 'Sticker'}[m.reply.msgtype] || ''));
+      q.append(node('strong', '', m.reply.outgoing ? 'You' : nameOf(m.reply.sender) || 'Them'), node('span', '', m.reply.deleted ? 'Deleted message' : m.reply.voice ? '🎤 Voice message' : m.reply.text || (m.reply.gif ? 'GIF' : {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.file': '📎 File', 'm.sticker': 'Sticker'}[m.reply.msgtype]) || ''));
       b.append(q);
     }
     if (m.deleted) b.append(node('p', 'u-deleted', m.outgoing ? 'You deleted this message' : 'This message was deleted'));
+    else if (m.unavailable) {
+      const gone = node('p', 'u-unavailable'); gone.append(node('span', '', unavailableLabel(m.unavailable)));
+      gone.append(node('small', '', m.unavailable === 'waiting' ? '(' + netLabel(m.network) + ' is still sending it)' : '(expired on ' + netLabel(m.network) + ')'));
+      b.append(gone);
+    }
     else if (visual && m.photos?.length > 1) {
       b.classList.add('has-album'); row.dataset.album = m.album;
       const photos = m.photos.filter(p => !p.deleted);
@@ -1476,12 +1530,12 @@
     }
     if (!story && !m.deleted && m.original && m.msgtype !== 'm.location') {
       if (ctx.auto || m.outgoing) {
-        b.append(richText('u-text', m.translated || m.original));
+        b.append(richText('u-text', m.translated || m.original, m));
         if (m.translated && m.translated !== m.original) b.append(node('p', 'u-original', m.original));
         if (m.translation_error) b.append(node('p', 'u-original error', m.translation_error));
       } else {
         const translated = shown[m.id] === 'translated' && m.translated;
-        b.append(richText('u-text', translated ? m.translated : m.original));
+        b.append(richText('u-text', translated ? m.translated : m.original, m));
         if (foreignScript(m.original)) b.append(button(translated ? 'Show original' : 'Translate', () => translate(m), 'u-translate link'));
       }
     }
@@ -1595,28 +1649,58 @@
   }
 
   function toneOf(name) { let h = 0; for (const ch of name || '?') h = (h * 31 + ch.codePointAt(0)) >>> 0; return h % TONES; }
+  // Bridged GIFs (WhatsApp/Telegram send them as short looping videos) and animated stickers play by themselves,
+  // muted and inline, only while on screen; with reduced motion they hold the first frame until tapped.
+  const isSticker = m => m.msgtype === 'm.sticker' || (m.msgtype === 'm.video' && !!m.media?.sticker);
+  const stillMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const loopSeen = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+    for (const e of entries) {
+      const v = e.target.querySelector('video'); if (!v) continue;
+      if (e.isIntersecting && !e.target.dataset.still) v.play().catch(() => {}); else v.pause();
+    }
+  }, {threshold: 0.15}) : null;
   function visualMedia(m) {
-    const box = node('button', 'u-media'); box.type = 'button'; box.setAttribute('aria-label', m.msgtype === 'm.video' ? 'Play video' : 'Open photo');
+    const box = node('button', 'u-media'); box.type = 'button';
+    const sticker = isSticker(m), loop = m.msgtype === 'm.video' && (m.media?.gif || m.media?.sticker);
+    box.setAttribute('aria-label', sticker ? 'Sticker' : m.media?.gif ? 'GIF' : m.msgtype === 'm.video' ? 'Play video' : 'Open photo');
     const w = m.media?.w, h = m.media?.h;
     if (w && h) box.style.aspectRatio = w + ' / ' + h; else box.classList.add('unsized');
+    let v = null;
     if (m.msgtype === 'm.video') {
-      const v = node('video'); v.preload = 'metadata'; v.playsInline = true; v.src = m.local || mediaURL(m.id); v.muted = true; box.append(v, node('span', 'u-play', '▶'));
-      if (m.media?.duration) box.append(node('span', 'u-vdur', fmtDur(m.media.duration)));
+      v = node('video'); v.playsInline = true; v.muted = true; v.setAttribute('muted', ''); v.setAttribute('playsinline', '');
+      if (m.media?.thumb && !m.local) v.poster = mediaURL(m.id, 'thumb');
+      if (loop) {
+        const still = stillMotion();
+        v.loop = true; v.preload = 'auto'; v.disablePictureInPicture = true; v.autoplay = !still;
+        v.src = m.local || mediaURL(m.id) + (still && !m.media?.thumb ? '#t=0.001' : '');
+        box.classList.add(sticker ? 'sticker' : 'gif'); box.append(v);
+        if (!sticker) box.append(node('span', 'u-gif-tag', 'GIF'));
+        if (still) { box.dataset.still = '1'; box.append(node('span', 'u-play', '▶')); }
+        if (sticker && m.media?.thumb) v.onerror = () => { const img = node('img', 'in'); img.alt = 'Sticker'; img.src = mediaURL(m.id, 'thumb'); v.replaceWith(img); };
+        loopSeen?.observe(box);
+      } else {
+        v.preload = 'metadata'; v.src = m.local || mediaURL(m.id) + (m.media?.thumb ? '' : '#t=0.1'); box.append(v, node('span', 'u-play', '▶'));
+        if (m.media?.duration) box.append(node('span', 'u-vdur', fmtDur(m.media.duration)));
+      }
     } else {
-      const img = node('img'); img.alt = m.original || 'Photo'; img.decoding = 'async'; img.loading = 'lazy';
+      const img = node('img'); img.alt = m.original || (sticker ? 'Sticker' : 'Photo'); img.decoding = 'async'; img.loading = 'lazy';
       img.onload = () => { img.classList.add('in'); if (!w && view.scroll && nearBottom()) view.scroll.scrollTop = view.scroll.scrollHeight; };
       img.onerror = () => { box.classList.add('broken'); box.append(node('span', 'u-broken', 'Photo unavailable')); };
       img.src = m.local || mediaURL(m.id, 'thumb'); box.append(img);
-      if (m.msgtype === 'm.sticker') box.classList.add('sticker');
+      if (sticker) box.classList.add('sticker');
+      else if (m.media?.mime === 'image/gif') { box.classList.add('gif'); box.append(node('span', 'u-gif-tag', 'GIF')); }
     }
     box.message = m;
-    if (!m.pending) box.onclick = () => viewer(m, box); else box.append(node('span', 'u-spin'));
+    if (!m.pending) box.onclick = () => {
+      if (box.dataset.still && v) { delete box.dataset.still; box.querySelector('.u-play')?.remove(); v.play().catch(() => {}); return; }
+      if (!sticker) viewer(m, box); // stickers are part of the conversation, not photos to open
+    }; else box.append(node('span', 'u-spin'));
     return box;
   }
   // Tapping a photo or video opens Wizard's own media viewer, the one Chats uses: pinch and double-tap zoom, pan,
   // swipe through every photo in this chat, Save/Share, Back closes (James, 26 Oct 2026). Messenger keeps no viewer.
   function viewer(m, box) {
-    const boxes = [...(box.closest('.u-thread-body') || document).querySelectorAll('.u-media')].filter(b => b.message && !b.message.pending && b.message.msgtype !== 'm.sticker');
+    const boxes = [...(box.closest('.u-thread-body') || document).querySelectorAll('.u-media')].filter(b => b.message && !b.message.pending && !isSticker(b.message));
     const list = boxes.map(b => b.message), at = Math.max(0, list.indexOf(m));
     const who = x => (x.outgoing ? 'You' : nameOf(x.sender) || 'Photo') + (x.original ? ' · ' + x.original : '');
     window.WizardApp?.media?.view(list.map(x => ({url: mediaURL(x.id), kind: x.msgtype === 'm.video' ? 'video' : 'image', name: who(x)})), at);

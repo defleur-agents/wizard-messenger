@@ -403,6 +403,7 @@ class ConnectorInbox(UnifiedInbox):
             self.store.put('sync_error', '')
             self.rescan_dropped()
             self.refresh_pictures()
+            self.repair_rows()
             return {'state': 'ready'}
         except EngineError as error:
             self.store.put('sync_error', error.message)
