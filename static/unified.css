@@ -981,3 +981,19 @@ html[data-presentation="immersive"] #unified-inbox .u-header, html[data-presenta
    (and the fallback in unified.js) can click them, but they take no space and draw nothing. */
 .u-keys { position: absolute; inset-block-start: 0; inset-inline-start: 0; inline-size: 0.0625rem; block-size: 0.0625rem; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .u-keys .u-key { all: unset; display: inline-block; inline-size: 0.0625rem; block-size: 0.0625rem; overflow: hidden; }
+
+/* Incoming media and text details (16.16): GIFs, animated stickers, mentions, media a bridge could not deliver. */
+.u-media.gif video, .u-media.sticker video { opacity: 1; }
+.u-media.sticker video { object-fit: contain; background: transparent; }
+.u-gif-tag { position: absolute; left: 0.5rem; top: 0.5rem; padding: 0.0625rem 0.375rem; border-radius: 0.375rem; font-size: 0.6875rem; font-weight: 700; letter-spacing: 0.04em; line-height: 1.4; background: var(--accent); color: var(--on-accent); pointer-events: none; }
+.u-row .u-message.sticker-only { background: transparent; box-shadow: none; padding: 0; }
+.u-message.sticker-only .u-media { background: transparent; }
+.u-unavailable { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.4rem; color: var(--ink-3); font-style: italic; }
+.u-unavailable small { font-size: 0.8125rem; }
+.u-message.outgoing .u-unavailable { color: inherit; opacity: 0.8; }
+.u-mention { padding: 0 0.2em; border-radius: 0.35em; font-weight: 600; -webkit-box-decoration-break: clone; box-decoration-break: clone; color: var(--link); background: var(--accent-soft); }
+.u-mention.me { color: var(--on-accent); background: var(--accent); }
+.u-message.outgoing .u-mention { color: inherit; background: color-mix(in srgb, currentColor 18%, transparent); }
+.u-message.outgoing .u-mention.me { background: color-mix(in srgb, currentColor 30%, transparent); }
+.u-text code { padding: 0 0.25em; border-radius: 0.3em; font-family: var(--wz-font-mono, monospace); font-size: 0.9em; background: color-mix(in srgb, currentColor 12%, transparent); }
+.u-text .u-code-block { display: block; margin: 0.2em 0; padding: 0.4em 0.5em; white-space: pre-wrap; overflow-wrap: anywhere; }

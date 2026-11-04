@@ -227,6 +227,9 @@ def read_thread(handler, caller, args):
             item['deleted'] = True
         else:
             item['text'] = m.get('original') or ''
+            if m.get('unavailable'):
+                # The bridge could not deliver this media (e.g. expired on WhatsApp); the text is only its caption.
+                item['unavailable_media'] = m['unavailable']
             if m.get('translated') and not m['outgoing']:
                 item['translation'] = m['translated']
             if m.get('edited'):

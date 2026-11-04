@@ -68,8 +68,12 @@ def preview(row):
         media = json.loads(row['media']) if row['media'] else {}
     except ValueError:
         media = {}
+    from unified import media_label, unavailable_label, unavailable_media
+    gone = row['msgtype'] == 'm.text' and unavailable_media(original)
+    if gone:
+        original = gone[1]
     body = _plain(original)
-    label = '🎤 Voice message' if isinstance(media, dict) and media.get('voice') else LABELS.get(row['msgtype'])
+    label = unavailable_label(gone[0]) if gone else media_label(row['msgtype'], media)
     if label:
         body = label + (' · ' + body if body and body != label else '')
     if row['kind'] == 'group' and row['sender']:
