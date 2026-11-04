@@ -6,15 +6,18 @@
 // - r focuses the open chat's composer; j typed there is text, not a shortcut; Alt+j does nothing;
 // - / opens chat search; n opens New message; Escape stays Back (never marked);
 // - the fallback ignores keys while WizardApp.keys exists.
+// 16.17 keycaps sit on what the key does: j on the next chat's row, k on the previous one, r on the reply box, / on
+// the visible Search; at phone width on a keyboard device the chat header has ↑/↓ (.u-step, data-step k/j) that
+// carry k/j; the hidden .u-keys row keeps a key only while its target is off screen (touch phone: no ↑/↓).
 const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
 const dir = process.env.AGENT_STAGE_DIR || '/home/oscar/.hermes/cache/scratch/agentkeys';
 const st = JSON.parse(fs.readFileSync(path.join(dir, 'state.json')));
 (async () => {
   const browser = await chromium.launch();
-  for (const phone of [false, true]) {
-    const tag = phone ? '390' : '1280';
-    const ctx = await browser.newContext(phone ? {viewport: {width: 390, height: 844}} : {viewport: {width: 1280, height: 860}});
+  for (const [phone, touch] of [[false, false], [true, false], [true, true]]) {
+    const tag = phone ? (touch ? '390touch' : '390') : '1280';
+    const ctx = await browser.newContext(phone ? {viewport: {width: 390, height: 844}, ...(touch ? {hasTouch: true, isMobile: true} : {})} : {viewport: {width: 1280, height: 860}});
     await ctx.addCookies([{name: 'wizard_messenger_session', value: st.cookie, url: st.origin}]);
     await ctx.route('**/wizard-os-home/**', r => {
       const u = new URL(r.request().url()), WEB = process.env.WIZARD_WEB_DIR || '';
@@ -34,9 +37,40 @@ const st = JSON.parse(fs.readFileSync(path.join(dir, 'state.json')));
     assert.ok(order.length >= 2, tag + ': at least two chats staged');
     const openName = () => page.evaluate(() => document.querySelector('.u-thread-head .u-who-text strong')?.textContent || '');
     const press = async k => { await page.keyboard.press(k); await page.waitForTimeout(350); };
+    // Where each key's keycap sits: 'quiet' (the hidden .u-keys row), 'row:<name>', 'step:<j|k>', 'textarea', 'search'.
+    const keyAt = k => page.evaluate(k => [...document.querySelectorAll('[data-wz-key]')].filter(e => e.dataset.wzKey === k).map(e =>
+      e.closest('.u-keys') ? 'quiet' : e.matches('.u-person') ? 'row:' + e.querySelector('strong').textContent : e.matches('.u-step') ? 'step:' + e.dataset.step
+        : e.matches('textarea') ? 'textarea' : e.matches('button') && /search/i.test(e.getAttribute('aria-label') || e.title || '') ? 'search' : e.tagName.toLowerCase()).sort(), k);
+    const steps = () => page.locator('.u-step:visible').count();
     await page.evaluate(() => document.activeElement?.blur());
+    assert.deepEqual(await keyAt('j'), ['row:' + order[0]], tag + ': nothing open, j sits on the first row');
+    assert.deepEqual(await keyAt('/'), ['search'], tag + ': / sits on the visible Search, not the quiet row');
     await press('j'); assert.equal(await openName(), order[0], tag + ': j opens the first chat');
+    assert.deepEqual(await keyAt('r'), ['textarea'], tag + ': r sits on the reply box');
+    if (!phone) {
+      assert.deepEqual(await keyAt('j'), ['row:' + order[1]], tag + ': j sits on the next row');
+      assert.deepEqual(await keyAt('k'), ['quiet'], tag + ': first chat open, k has no row and stays quiet');
+      assert.equal(await steps(), 0, tag + ': no ↑/↓ while the list is beside the chat');
+    } else if (!touch) {
+      assert.equal(await steps(), 2, tag + ': ↑/↓ in the chat header at phone width with a keyboard');
+      assert.deepEqual(await keyAt('j'), ['step:j'], tag + ': j sits on ↓');
+      assert.deepEqual(await keyAt('k'), ['quiet'], tag + ': first chat open, k stays quiet');
+    } else {
+      assert.equal(await steps(), 0, tag + ': no ↑/↓ on a touch-only phone');
+      assert.deepEqual(await keyAt('j'), ['quiet'], tag + ': list off screen, j stays on the quiet row');
+    }
     await press('j'); assert.equal(await openName(), order[1], tag + ': j again opens the second chat (from an open chat)');
+    if (!phone) assert.deepEqual(await keyAt('k'), ['row:' + order[0]], tag + ': k sits on the previous row');
+    else if (!touch) {
+      assert.deepEqual(await keyAt('k'), ['step:k'], tag + ': k sits on ↑');
+      assert.deepEqual(await keyAt('j'), ['quiet'], tag + ': last chat open, j stays quiet');
+    } else assert.deepEqual(await keyAt('k'), ['quiet'], tag + ': list off screen, k stays on the quiet row');
+    if (phone && !touch) {   // ↓/↑ themselves step, like j/k
+      await page.locator('.u-step[data-step="k"]:visible').click(); await page.waitForTimeout(350);
+      assert.equal(await openName(), order[0], tag + ': ↑ opens the previous chat');
+      await page.locator('.u-step[data-step="j"]:visible').click(); await page.waitForTimeout(350);
+      assert.equal(await openName(), order[1], tag + ': ↓ opens the next chat');
+    }
     await press('k'); assert.equal(await openName(), order[0], tag + ': k goes back to the first chat');
     await press('Alt+j'); assert.equal(await openName(), order[0], tag + ': Alt+j is not a shortcut');
     await press('r');
@@ -65,5 +99,5 @@ const st = JSON.parse(fs.readFileSync(path.join(dir, 'state.json')));
     await ctx.close();
   }
   await browser.close();
-  console.log('PASS app_keys_browser: j/k/r / n via data-wz-key, fallback rules');
+  console.log('PASS app_keys_browser: j/k/r / n via data-wz-key, keycaps on their targets, ↑/↓ at phone width, fallback rules');
 })().catch(e => { console.error(e); process.exit(1); });
