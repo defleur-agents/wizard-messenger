@@ -147,7 +147,7 @@
   }
   if (toGateway()) return;
   if (!window.WizardApp) throw new Error('Messenger requires the shared WizardApp client');
-  window.WizardApp.ready({name: 'messenger', version: '0.2.0-unified.16.13'});
+  window.WizardApp.ready({name: 'messenger', version: '0.2.0-unified.16.14'});
 
   const $ = id => document.getElementById(id);
   const state = {
@@ -648,8 +648,8 @@
     U.actionMenu(node, 'Message', [
       ...(busy ? [] : [{label: 'Reply', icon: 'reply', run: () => startReply(m)}]),
       {label: 'Copy', icon: 'copy', run: () => copy(m.text)},
-      ...(opts.selectText && m.text ? [{label: 'Select text', icon: 'copy', run: opts.selectText}] : []),
-      {label: 'Forward to Wizard', icon: 'reply', run: () => state.selection?.forward([m.message_id])},
+      ...(opts.selectText && m.text ? [{label: 'Select text', icon: 'textsel', run: opts.selectText}] : []),
+      {label: 'Forward to Wizard', icon: 'forward', run: () => state.selection?.forward([m.message_id])},
       ...(outgoing && !busy ? [{label: 'Edit', icon: 'compose', run: () => startEdit(m)}] : []),
       ...(opts.select ? [{label: 'Select', icon: 'check', run: opts.select}] : []),
       ...(outgoing && !busy ? [{label: 'Delete for everyone', icon: 'trash', danger: true, run: () => deleteForEveryone(group, m)}] : [])
