@@ -167,7 +167,7 @@
   // data-wz-key; the shared Wizard client (WizardApp.keys) clicks the first visible, enabled match and draws
   // keycaps while ⌥ is held. j/k/r and a spare / live in one visually quiet row so they work from the list and
   // from an open chat alike (phone-width Messenger shows only one of them). Escape stays Back.
-  const hotkeys = {nav: null, order: []};
+  const hotkeys = {nav: null, order: []}, KEYBOARD = matchMedia('(any-hover: hover) and (any-pointer: fine)');
   function keyButton(key, label, fn) { const b = button(label, fn, 'u-key'); b.dataset.wzKey = key; b.dataset.wzKeyLabel = label; b.tabIndex = -1; return b; }
   const openKey = () => s.native && s.nativeGroup ? 'native:' + s.nativeGroup : s.person;
   function stepChat(dir) {
@@ -198,11 +198,33 @@
       hotkeys.nav.append(keyButton('j', 'Next chat', () => stepChat(1)), keyButton('k', 'Previous chat', () => stepChat(-1)),
         keyButton('r', 'Reply', replyKey), keyButton('/', 'Search chats', searchKey));
       host.append(hotkeys.nav);
+      new MutationObserver(keysSoon).observe(host, {childList: true, subtree: true});   // a chat or the list redrawn
     }
     hotkeys.nav.hidden = !s.ready || s.tab === 'messenger';
     const [j, k, r] = hotkeys.nav.children;
     j.disabled = k.disabled = !hotkeys.order.length;
     r.disabled = !(s.person || s.native);
+    keysSoon();
+  }
+  // 16.17 (Miguel: no hints while holding ⌥): the keycaps sit ON what the key does, like the shell's ↓ / ↑ on Ready
+  // rows: j on the next chat's row, k on the previous one, r on the reply box, / on the visible Search. The quiet
+  // row's own j/k/r/'/' carry the key only while that target is not on screen (phone width with a chat open).
+  function keysSoon() { if (!hotkeys.pend) { hotkeys.pend = true; requestAnimationFrame(() => { hotkeys.pend = false; placeKeys(); }); } }
+  function placeKeys() {
+    if (!hotkeys.nav) return;
+    const [j, k, r, sl] = hotkeys.nav.children, seen = el => !!el && wzVisible(el) && wzEnabled(el) && el.getBoundingClientRect().width > 8;
+    for (const el of document.querySelectorAll('.u-person[data-wz-key], .u-step[data-wz-key]')) { delete el.dataset.wzKey; delete el.dataset.wzKeyLabel; }
+    const rows = [...document.querySelectorAll('.u-person[data-pid]')].filter(seen), order = hotkeys.order.map(o => o.key);
+    const at = order.indexOf(openKey()), rowOf = key => key != null && rows.find(el => el.dataset.pid === key);
+    const step = k => [...document.querySelectorAll(`.u-step[data-step="${k}"]`)].find(seen);
+    const nx = rowOf(order[at < 0 ? 0 : at + 1]) || (at < order.length - 1 && step('j')), pv = (at > 0 && rowOf(order[at - 1])) || (at > 0 && step('k'));
+    const put = (row, key, label, own) => { if (row) { row.dataset.wzKey = key; row.dataset.wzKeyLabel = label; delete own.dataset.wzKey; } else own.dataset.wzKey = key; };
+    put(nx, 'j', 'Next chat', j); put(pv, 'k', 'Previous chat', k);
+    const field = s.native ? $('draft') : document.querySelector('#unified-inbox .u-composer textarea');
+    for (const el of document.querySelectorAll('textarea[data-wz-key="r"], input[data-wz-key="r"]')) if (el !== field) delete el.dataset.wzKey;
+    if (seen(field) && (s.person || s.native)) { field.dataset.wzKey = 'r'; field.dataset.wzKeyLabel = 'Reply'; delete r.dataset.wzKey; } else r.dataset.wzKey = 'r';
+    const find = [...document.querySelectorAll('[data-wz-key="/"]')].find(el => el !== sl && seen(el));
+    if (find) delete sl.dataset.wzKey; else sl.dataset.wzKey = '/';
   }
   // Fallback for hosts whose WizardApp client has no keys service yet (older Wizard, a plain browser tab): the same
   // rules as the shared client, and it stands down the moment WizardApp.keys exists.
@@ -223,7 +245,9 @@
     const scope = modals.at(-1) || document;
     const hit = [...scope.querySelectorAll('[data-wz-key]')].find(el => el.dataset.wzKey === key && wzVisible(el) && wzEnabled(el));
     if (!hit) return;
-    e.preventDefault(); e.stopPropagation(); hit.click();
+    e.preventDefault(); e.stopPropagation();
+    if (hit.matches(WZ_KEY_TEXT)) { replyKey(); return; } // the reply box as the target: focus it (a click alone doesn't)
+    hit.click();
   }
   document.addEventListener('keydown', wzKeyFallback);
   window.__messengerKeys = {fallback: wzKeyFallback, sync: () => syncKeys()}; // test hook
@@ -486,6 +510,11 @@
     const face = node('span', 'u-av-wrap small'); face.append(withPicture(avatar(name, 'small'), picture));
     if (network) { const b = netBadge(network, 'u-net'); b.setAttribute('aria-hidden', 'true'); face.append(b); }
     who.append(face, text); head.append(who);
+    // 16.17: with a keyboard and no list beside the chat, ↑ / ↓ step to the previous / next chat (j / k sit on them)
+    if (!split.on && KEYBOARD.matches && hotkeys.order.length > 1) {
+      const up = iconButton('up', 'Previous chat', () => stepChat(-1), 'u-step'), dn = iconButton('down', 'Next chat', () => stepChat(1), 'u-step');
+      up.dataset.step = 'k'; dn.dataset.step = 'j'; head.append(up, dn);
+    }
     if (onInfo) { const more = iconButton('more', 'Chat options', () => (view.menu || onInfo)(more)); head.append(more); }
     if (split.on) { $('unified-inbox').dataset.detail = 'open'; head.append(iconButton('close', 'Close chat', closeDetail, 'u-close')); }
     root.append(head); const notice = node('p', 'error'); notice.id = 'u-error'; notice.setAttribute('role', 'status'); root.append(notice); return root;
