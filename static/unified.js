@@ -639,6 +639,7 @@
   // messages it is still decrypting: a quiet placeholder instead of the bridge's own sentence. Same words as unified.unavailable_label.
   function unavailableLabel(kind) {
     if (kind === 'waiting') return '⏳ Waiting for this message';
+    if (kind === 'undecryptable') return "🔒 Message couldn't be decrypted";
     return ({photo: '📷 Photo', gif: 'GIF', voice: '🎤 Voice message', video: '🎬 Video', file: '📎 File', sticker: 'Sticker', audio: '🎵 Audio'}[kind] || '📎 Media') + ' not available';
   }
   function snippet(last) {
@@ -1534,7 +1535,7 @@
     if (m.deleted) b.append(node('p', 'u-deleted', m.outgoing ? 'You deleted this message' : 'This message was deleted'));
     else if (m.unavailable) {
       const gone = node('p', 'u-unavailable'); gone.append(node('span', '', unavailableLabel(m.unavailable)));
-      gone.append(node('small', '', m.unavailable === 'waiting' ? '(' + netLabel(m.network) + ' is still sending it)' : '(expired on ' + netLabel(m.network) + ')'));
+      gone.append(node('small', '', m.unavailable === 'waiting' ? '(' + netLabel(m.network) + ' is still sending it)' : m.unavailable === 'undecryptable' ? '(on ' + netLabel(m.network) + ')' : '(expired on ' + netLabel(m.network) + ')'));
       b.append(gone);
     }
     else if (visual && m.photos?.length > 1) {

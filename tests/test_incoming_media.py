@@ -2,6 +2,7 @@
 @mention pills and media the bridge could not deliver (expired on WhatsApp)."""
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -45,7 +46,7 @@ class Base(unittest.TestCase):
 
 class EditToMediaTests(Base):
     def test_decrypt_retry_edit_turns_placeholder_into_photo(self):
-        self.ingest(self.event('$n', {'msgtype': 'm.notice', 'body': WAITING, 'fi.mau.whatsapp.undecryptable': True}))
+        self.ingest(self.event('$n', {'msgtype': 'm.notice', 'body': WAITING, 'fi.mau.whatsapp.undecryptable': True}, ts=int(time.time() * 1000)))
         self.assertEqual(self.rows()['$n']['unavailable'], 'waiting')
         self.ingest(self.event('$e', {'msgtype': 'm.image', 'body': '* look', 'm.new_content': photo(body='look', filename='image.jpg'),
                                       'm.relates_to': {'rel_type': 'm.replace', 'event_id': '$n'}}))
@@ -65,9 +66,52 @@ class EditToMediaTests(Base):
 
     def test_edit_from_someone_else_is_ignored(self):
         self.ingest(self.event('$n', {'msgtype': 'm.notice', 'body': WAITING}))
-        self.ingest(self.event('$e', {'msgtype': 'm.image', 'body': '* x', 'm.new_content': photo(),
-                                      'm.relates_to': {'rel_type': 'm.replace', 'event_id': '$n'}}, sender=OTHER))
+        with patch.object(self.inbox, 'mx', return_value={'event_id': '$n', 'sender': GHOST}) as mx:
+            self.ingest(self.event('$e', {'msgtype': 'm.image', 'body': '* x', 'm.new_content': photo(),
+                                          'm.relates_to': {'rel_type': 'm.replace', 'event_id': '$n'}}, sender=OTHER))
         self.assertEqual(self.rows()['$n']['msgtype'], 'm.text')
+        self.assertIn('/rooms/%21g/event/%24n', mx.call_args.args[0])  # settled by the original's mxid, not names
+
+    def test_edit_after_ghost_rename_applies(self):
+        # Stored as "Ana (WA)"; the bridge later renames the ghost to "Ana Lopez". The author is the same mxid.
+        self.ingest(self.event('$n', {'msgtype': 'm.notice', 'body': WAITING}))
+        self.meta['names'][GHOST] = 'Ana Lopez'
+        with patch.object(self.inbox, 'mx', return_value={'event_id': '$n', 'sender': GHOST}) as mx:
+            self.ingest(self.event('$e', {'msgtype': 'm.image', 'body': '* look', 'm.new_content': photo(body='look', filename='image.jpg'),
+                                          'm.relates_to': {'rel_type': 'm.replace', 'event_id': '$n'}}))
+        self.assertEqual(mx.call_count, 1)
+        self.assertEqual((self.rows()['$n']['msgtype'], self.rows()['$n']['original']), ('m.image', 'look'))
+        # A text edit after a rename takes the same path.
+        self.ingest(self.event('$t', {'msgtype': 'm.text', 'body': 'helo'}))
+        self.meta['names'][GHOST] = 'Ana'
+        with patch.object(self.inbox, 'mx', return_value={'event_id': '$t', 'sender': GHOST}):
+            self.ingest(self.event('$te', {'msgtype': 'm.text', 'body': '* hello', 'm.new_content': {'msgtype': 'm.text', 'body': 'hello'},
+                                           'm.relates_to': {'rel_type': 'm.replace', 'event_id': '$t'}}))
+        self.assertEqual((self.rows()['$t']['original'], self.rows()['$t']['edited']), ('hello', True))
+
+    def test_edit_rejected_when_original_unreadable_or_other_author(self):
+        self.ingest(self.event('$n', {'msgtype': 'm.notice', 'body': WAITING}))
+        self.meta['names'][GHOST] = 'Ana'
+        with patch.object(self.inbox, 'mx', side_effect=unified.EngineError('matrix_unavailable', 'down', 502)):
+            self.ingest(self.event('$e', {'msgtype': 'm.image', 'body': '* x', 'm.new_content': photo(),
+                                          'm.relates_to': {'rel_type': 'm.replace', 'event_id': '$n'}}))
+        self.assertEqual(self.rows()['$n']['msgtype'], 'm.text')
+        # Two members wearing the stored name: the original's mxid decides, and it is not this sender.
+        self.meta['names'][GHOST] = self.meta['names'][OTHER] = 'Ana (WA)'
+        with patch.object(self.inbox, 'mx', return_value={'event_id': '$n', 'sender': GHOST}):
+            self.ingest(self.event('$e2', {'msgtype': 'm.image', 'body': '* x', 'm.new_content': photo(),
+                                           'm.relates_to': {'rel_type': 'm.replace', 'event_id': '$n'}}, sender=OTHER))
+        self.assertEqual(self.rows()['$n']['msgtype'], 'm.text')
+
+    def test_old_never_resent_row_reads_could_not_decrypt(self):
+        self.ingest(self.event('$n', {'msgtype': 'm.notice', 'body': WAITING}, ts=1000))
+        self.assertEqual((self.rows()['$n']['unavailable'], self.rows()['$n']['original']), ('undecryptable', ''))
+        self.assertEqual(self.inbox.store.people('group')[0]['last']['unavailable'], 'undecryptable')
+        self.assertEqual(unified.unavailable_label('undecryptable'), "🔒 Message couldn't be decrypted")
+        row = {'original': WAITING, 'media': None, 'msgtype': 'm.text', 'kind': 'person', 'sender': 'Ana', 'timestamp': 1000}
+        self.assertEqual(inbox_feed.preview(row), "🔒 Message couldn't be decrypted")
+        row['timestamp'] = int(time.time() * 1000)
+        self.assertEqual(inbox_feed.preview(row), '⏳ Waiting for this message')
 
     def test_gif_and_file_edits_and_caption_edit(self):
         self.ingest(self.event('$n', {'msgtype': 'm.notice', 'body': WAITING}))
@@ -109,7 +153,18 @@ class EditToMediaTests(Base):
         self.assertIn('/_matrix/client/v1/rooms/%21g/relations/%24n/m.replace', http.call_args.args[1])
         row = self.rows()['$n']
         self.assertEqual((row['msgtype'], row['original']), ('m.image', 'caption'))
-        self.assertEqual(self.inbox.store.get('repair_waiting_v1'), '1')
+        self.assertEqual(self.inbox.store.get('repair_waiting_v2'), '1')
+
+    def test_repair_v2_applies_edits_after_ghost_rename_even_when_v1_ran(self):
+        self.ingest(self.event('$n', {'msgtype': 'm.notice', 'body': WAITING}))
+        self.inbox.store.put('repair_waiting_v1', '1')  # 16.16 ran its repair and dropped this row's edit
+        self.meta['names'][GHOST] = 'Ana'
+        chunk = {'chunk': [{'event_id': '$new', 'sender': GHOST, 'origin_server_ts': 3000, 'content': {'m.new_content': photo(body='', filename='image.jpg')}}]}
+        with patch('unified.http', return_value=chunk), patch.object(self.inbox, 'mx', return_value={'event_id': '$n', 'sender': GHOST}), \
+             patch.object(self.inbox, 'room_meta', return_value=self.meta):
+            self.inbox.repair_rows()
+        self.assertEqual(self.rows()['$n']['msgtype'], 'm.image')
+        self.assertEqual(self.inbox.store.get('repair_waiting_v2'), '1')
 
 
 class GifTests(Base):

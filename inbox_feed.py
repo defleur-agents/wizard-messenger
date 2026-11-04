@@ -69,7 +69,7 @@ def preview(row):
     except ValueError:
         media = {}
     from unified import media_label, unavailable_label, unavailable_media
-    gone = row['msgtype'] == 'm.text' and unavailable_media(original)
+    gone = row['msgtype'] == 'm.text' and unavailable_media(original, row['timestamp'] if 'timestamp' in row.keys() else None)
     if gone:
         original = gone[1]
     body = _plain(original)

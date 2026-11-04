@@ -99,6 +99,9 @@ put(group, '!family',
 put(group, '!family', ev('$wait-edit', {'msgtype': 'm.image', 'body': '* sunset', 'm.new_content': {'msgtype': 'm.image', 'body': 'sunset', 'filename': 'IMG.png', 'url': 'mxc://messenger.internal/photo',
                                                                                          'info': {'mimetype': 'image/png', 'w': 640, 'h': 480, 'size': 9000}},
                                          'm.relates_to': {'rel_type': 'm.replace', 'event_id': '$wait'}}, sender=BRAM))
+# A decrypt failure WhatsApp never re-sent (two days old): "couldn't be decrypted", not "waiting" forever.
+put(group, '!family', dict(ev('$lost', {'msgtype': 'm.notice', 'body': 'Decrypting message from WhatsApp failed, waiting for sender to re-send... ([learn more](https://faq.whatsapp.com/))'}, sender=BRAM),
+                           origin_server_ts=now - 2 * 86400000))
 put(group, '!family', ev('$expired2', {'msgtype': 'm.notice', 'body': 'Failed to bridge voice message, please view it on the WhatsApp app'}, sender=BRAM))
 put(tg, '!devs',
     ev('$sticker', {'msgtype': 'm.video', 'body': 'sticker.webm', 'url': 'mxc://messenger.internal/sticker',
