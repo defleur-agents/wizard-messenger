@@ -160,7 +160,73 @@
     if (updateHold && updateHold.reason !== reason) { updateHold.h.release(); updateHold = null; }
     if (reason && !updateHold) updateHold = {reason, h: window.WizardApp.update.hold(reason)};
   }
-  function inChat(on) { if (on) document.documentElement.dataset.inChat = ''; else delete document.documentElement.dataset.inChat; }
+  function inChat(on) { if (on) document.documentElement.dataset.inChat = ''; else delete document.documentElement.dataset.inChat; syncKeys(); }
+  // ---------- keyboard (Wizard app-key contract, 16.15) ----------
+  // Gmail-style keys: j/k = next/previous chat in the order the list shows, r = reply (focus the open chat's
+  // composer), / = search chats, n = new chat (on the compose button). Each key is a real control marked
+  // data-wz-key; the shared Wizard client (WizardApp.keys) clicks the first visible, enabled match and draws
+  // keycaps while ⌥ is held. j/k/r and a spare / live in one visually quiet row so they work from the list and
+  // from an open chat alike (phone-width Messenger shows only one of them). Escape stays Back.
+  const hotkeys = {nav: null, order: []};
+  function keyButton(key, label, fn) { const b = button(label, fn, 'u-key'); b.dataset.wzKey = key; b.dataset.wzKeyLabel = label; b.tabIndex = -1; return b; }
+  const openKey = () => s.native && s.nativeGroup ? 'native:' + s.nativeGroup : s.person;
+  function stepChat(dir) {
+    const order = hotkeys.order; if (!order.length || s.overlay) return;
+    const at = order.findIndex(r => r.key === openKey());
+    const next = order[at < 0 ? (dir > 0 ? 0 : order.length - 1) : Math.max(0, Math.min(order.length - 1, at + dir))];
+    if (!next || next.key === openKey()) return;
+    // The row itself when it is on screen (same tap path), else open it from memory (phone width, chat open).
+    const row = [...document.querySelectorAll('.u-person[data-pid]')].find(el => el.dataset.pid === next.key);
+    if (row) { row.click(); row.scrollIntoView?.({block: 'nearest'}); return; }
+    if (next.p.native) openNative(next.p.group_id); else openPerson(next.p.id, next.p);
+  }
+  function replyKey() {
+    const field = s.native ? $('draft') : document.querySelector('#unified-inbox .u-composer textarea');
+    if (!field || field.disabled) return;
+    field.focus(); const end = field.value.length; try { field.setSelectionRange(end, end); } catch { /* not a text field */ }
+  }
+  function searchKey() {
+    if (s.overlay) return;
+    if (s.native) returnNative();
+    if (s.person && !split.on) { s.person = null; view.id = null; inChat(false); }
+    s.search = ''; s.epoch++; renderList();
+  }
+  function syncKeys() {
+    if (!hotkeys.nav) {
+      const host = $('messenger'); if (!host) return;
+      hotkeys.nav = node('div', 'u-keys'); hotkeys.nav.setAttribute('aria-label', 'Keyboard shortcuts');
+      hotkeys.nav.append(keyButton('j', 'Next chat', () => stepChat(1)), keyButton('k', 'Previous chat', () => stepChat(-1)),
+        keyButton('r', 'Reply', replyKey), keyButton('/', 'Search chats', searchKey));
+      host.append(hotkeys.nav);
+    }
+    hotkeys.nav.hidden = !s.ready || s.tab === 'messenger';
+    const [j, k, r] = hotkeys.nav.children;
+    j.disabled = k.disabled = !hotkeys.order.length;
+    r.disabled = !(s.person || s.native);
+  }
+  // Fallback for hosts whose WizardApp client has no keys service yet (older Wizard, a plain browser tab): the same
+  // rules as the shared client, and it stands down the moment WizardApp.keys exists.
+  const WZ_KEY_TEXT = 'input:not([type=button],[type=checkbox],[type=radio],[type=range],[type=submit],[type=reset],[type=color],[type=file]),textarea,select,[contenteditable]:not([contenteditable=false])';
+  const wzVisible = el => !!el.getClientRects().length && (el.checkVisibility ? el.checkVisibility({visibilityProperty: true}) : getComputedStyle(el).visibility !== 'hidden');
+  const wzEnabled = el => !el.disabled && el.getAttribute('aria-disabled') !== 'true' && !el.closest('[inert],[hidden],fieldset[disabled]');
+  function wzKeyName(e) {
+    if (e.key === ' ' || e.key === 'Spacebar') return 'Space';
+    if (e.key === 'Enter' || /^Arrow(Up|Down|Left|Right)$/.test(e.key)) return e.key;
+    return e.key.length === 1 && e.key !== ' ' ? e.key : '';
+  }
+  function wzKeyFallback(e) {
+    if (window.WizardApp?.keys || e.defaultPrevented || e.isComposing || e.altKey || e.ctrlKey || e.metaKey) return;
+    const t = e.target, a = document.activeElement;
+    if ([t, a].some(el => el?.closest?.(WZ_KEY_TEXT) || el?.isContentEditable)) return; // typing
+    const key = wzKeyName(e); if (!key) return;
+    const modals = [...document.querySelectorAll('dialog[open],[aria-modal="true"]')].filter(wzVisible);
+    const scope = modals.at(-1) || document;
+    const hit = [...scope.querySelectorAll('[data-wz-key]')].find(el => el.dataset.wzKey === key && wzVisible(el) && wzEnabled(el));
+    if (!hit) return;
+    e.preventDefault(); e.stopPropagation(); hit.click();
+  }
+  document.addEventListener('keydown', wzKeyFallback);
+  window.__messengerKeys = {fallback: wzKeyFallback, sync: () => syncKeys()}; // test hook
   // Phone-width Inbox inside Wizard: QR, Search and Settings ride the window's own title bar
   // (WizardApp.titlebar.set), so the Inbox drops its bottom toolbar and the filter chips sit right on the
   // Wizard dock. Published only on the plain list (no chat, search or sheet open); a host without title-bar
@@ -404,7 +470,8 @@
     } else {
       // On a phone-width window these controls sit at the bottom, in thumb reach (unified.css @container messenger).
       const actions = node('div', 'u-head-actions');
-      actions.append(iconButton('qr', 'My QR codes', () => myCodes()), iconButton('search', 'Search', () => { s.search = ''; renderList(); }), iconButton('settings', 'Settings', () => accounts(), 'u-settings-btn'));
+      const find = iconButton('search', 'Search', () => { s.search = ''; renderList(); }); find.dataset.wzKey = '/'; find.dataset.wzKeyLabel = 'Search chats';
+      actions.append(iconButton('qr', 'My QR codes', () => myCodes()), find, iconButton('settings', 'Settings', () => accounts(), 'u-settings-btn'));
       head.append(node('h1', '', title), actions);
     }
     root.append(head); const notice = node('p', 'error'); notice.id = 'u-error'; notice.setAttribute('role', 'status'); root.append(notice); return root;
@@ -624,7 +691,7 @@
     if (split.on && !s.person && !s.native && !detailOpen()) closePane();
     if (s.search == null) root.append(filterChips()); // account status lives in Settings, not on top of the Inbox
     const list = node('div', 'u-list'); list.addEventListener('filter', drawList); root.append(list);
-    if (s.search == null) root.append(iconButton('compose', 'New chat', () => split.on ? newMessagePane() : newChat(), 'u-fab'));
+    if (s.search == null) { const fab = iconButton('compose', 'New chat', () => split.on ? newMessagePane() : newChat(), 'u-fab'); fab.dataset.wzKey = 'n'; fab.dataset.wzKeyLabel = 'New chat'; root.append(fab); }
     refreshAccounts();
     if (store.lists.people && store.lists.groups) { drawList(); if (!store.seq && s.ready) freshen(null, epoch); return; }
     if (store.lists.people) drawList(); else list.append(skeleton(8, 'list'));
@@ -870,7 +937,9 @@
     const people = paintFilters(everyone);
     const q = (s.search || '').trim().toLowerCase(), frag = document.createDocumentFragment(), compact = !previewsOn();
     $('messenger')?.classList.toggle('u-compact', compact);
-    for (const p of people.filter(p => (!q || p.display_name.toLowerCase().includes(q) || (p.last?.text || '').toLowerCase().includes(q)))) {
+    const shown = people.filter(p => (!q || p.display_name.toLowerCase().includes(q) || (p.last?.text || '').toLowerCase().includes(q)));
+    hotkeys.order = shown.map(p => ({key: p.native ? 'native:' + p.group_id : p.id, p})); syncKeys(); // j/k walk exactly these rows
+    for (const p of shown) {
       const groups = listKey(p) === 'groups';
       const card = button('', () => { if (card.dataset.held) { delete card.dataset.held; return; } p.native ? openNative(p.group_id, card) : openPerson(p.id, p); }, 'u-person' + (p.unread ? ' unread' : '') + (p.muted ? ' muted' : ''));
       holdToMenu(card, () => chatMenu(p, card));
