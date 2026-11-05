@@ -26,7 +26,14 @@ const until = async (fn, label) => { for (let i = 0; i < 120; i++) { if (await f
     assert.ok(p.startsWith(path.resolve(process.env.SHELL_DIR) + path.sep));
     return route.fulfill({status: fs.existsSync(p) ? 200 : 404, contentType: p.endsWith('.js') ? 'text/javascript' : 'text/css', body: fs.existsSync(p) ? fs.readFileSync(p) : ''});
   });
-  await ctx.route('**/hosted-draft-qa', r => r.fulfill({contentType: 'text/html', body: `<!doctype html><html data-skin="nebula"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><script>window.setFixtureSkin=id=>{const s=${JSON.stringify(palettes)}.find(s=>s.id===id);if(!s)throw Error('Unknown palette');for(const [k,v] of Object.entries(s.t))document.documentElement.style.setProperty('--'+k,v);document.documentElement.dataset.skin=id;window.WizAppearance?.sync()};setFixtureSkin('nebula')</script><script src="/wizard-os-home/core/appearance-host.js" defer></script><style>html,body{margin:0;width:100%;height:100%;background:var(--bg,#05030c)}.st-embed,iframe{display:block;width:100%;height:100%;border:0}</style></head><body><div class="st-embed"><iframe title="Synthetic Messenger" src="/"></iframe></div></body></html>`}));
+  // Real Appearance host admission requires a .win iframe and a registered non-root app prefix.
+  // Mount only this disposable ViewServer under /app/; no owner app or endpoint is contacted.
+  await ctx.route(st.origin + '/app/**', async route => {
+    const u = new URL(route.request().url());
+    const response = await route.fetch({url: st.origin + u.pathname.slice('/app'.length) + u.search});
+    return route.fulfill({response});
+  });
+  await ctx.route('**/hosted-draft-qa', r => r.fulfill({contentType: 'text/html', body: `<!doctype html><html data-skin="nebula"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><script>window.WizCore={apps:()=>({APPS:[{url:'/app/'}]})};window.setFixtureSkin=id=>{const s=${JSON.stringify(palettes)}.find(s=>s.id===id);if(!s)throw Error('Unknown palette');for(const [k,v] of Object.entries(s.t))document.documentElement.style.setProperty('--'+k,v);document.documentElement.dataset.skin=id;window.WizAppearance?.sync()};setFixtureSkin('nebula')</script><script src="/wizard-os-home/core/appearance-host.js" defer></script><style>html,body{margin:0;width:100%;height:100%;background:var(--bg,#05030c)}.st-embed,iframe{display:block;width:100%;height:100%;border:0}</style></head><body><div class="st-embed win"><iframe title="Synthetic Messenger" src="/app/"></iframe></div></body></html>`}));
   await ctx.route(/\/api\/drafts\/[^/]+\/attachments(?:\/[^/?]+)?(?:\?.*)?$/, async route => {
     const req = route.request(), u = new URL(req.url()); network.push({event:'attachment-route', method:req.method(), path:u.pathname});
     if (req.method() === 'PUT') {
@@ -34,9 +41,9 @@ const until = async (fn, label) => { for (let i = 0; i < 120; i++) { if (await f
       if (failNames.has(u.searchParams.get('name'))) return route.fulfill({status: 507, contentType: 'application/json', body: JSON.stringify({ok: false, error: {code: 'storage_failed', message: 'Synthetic storage failure'}})});
     }
     if (req.method() === 'GET' && failId && u.pathname.endsWith('/' + failId)) return route.fulfill({status: 502, body: 'Synthetic open failure'});
-    return route.continue();
+    return route.fallback();
   });
-  await ctx.route(/\/api\/unified\/people\/[^/]+\/send$/, async route => { sends.push(route.request().postDataJSON()); await pause(200); return route.continue(); });
+  await ctx.route(/\/api\/unified\/people\/[^/]+\/send$/, async route => { sends.push(route.request().postDataJSON()); await pause(200); return route.fallback(); });
   const page = await ctx.newPage(); page.on('pageerror', e => errors.push(safeText(e.message))); page.on('console', m => consoleMessages.push({type:m.type(), text:safeText(m.text())})); page.on('request', r => network.push({event:'request',method:r.method(),path:safeURL(r.url())})); page.on('response', r => network.push({event:'response',method:r.request().method(),path:safeURL(r.url()),status:r.status()})); page.on('requestfailed', r => network.push({event:'requestfailed',method:r.method(),path:safeURL(r.url()),error:safeText(r.failure()?.errorText)}));
   try {
     await page.goto(st.origin + '/hosted-draft-qa');
@@ -71,7 +78,7 @@ const until = async (fn, label) => { for (let i = 0; i < 120; i++) { if (await f
     checks.push('two live skins retained same draft');
     // Real failed opens remain visible as removable chips, alongside healthy files, and block send.
     const d = (await drafts())[0]; failId = d.attachments[1].id;
-    await page.frames()[1].goto(st.origin + '/');
+    await page.frames()[1].goto(st.origin + '/app/');
     await frame.locator('textarea[aria-label="Message"]').waitFor(); await frame.locator('.u-draft-note.conflict').waitFor();
     assert.equal(await frame.locator('.u-attach-strip .ch-att').count(), 3);
     await frame.locator('.u-compose-row > .u-send').click(); await page.waitForTimeout(400); assert.equal(sends.length, 0);
