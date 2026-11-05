@@ -1781,8 +1781,13 @@
   // Shared by both message renderers. Chat-row holdToMenu deliberately stays separate.
   function messageGestures(row, bubble, {selection, id, menu, reply, album}) {
     const interactive = 'a,button,input,textarea,select,img,video,audio,.u-media,.u-reply,.u-wave,.reply-quote';
-    const holdInteractive = album ? 'a,button:not(.u-media),input,textarea,select,video,audio,.u-reply,.u-wave,.reply-quote' : interactive;
-    let timer = null, x0 = 0, y0 = 0, dx = 0, swiping = false, firstHold = false, suppressTap = false, touch = false;
+    // A photo, video, GIF or sticker IS the message when it has no caption (16.16 drew them without bubble chrome), so
+    // holding or right-clicking it must reach the same menu, reactions first (Miguel, 5 Nov 2026: "I couldn't react
+    // to a GIF"). A tap still opens the viewer / plays a held GIF. Albums keep their hold-to-select.
+    const holdInteractive = album ? 'a,button:not(.u-media),input,textarea,select,video,audio,.u-reply,.u-wave,.reply-quote'
+      : 'a,button:not(.u-media),input,textarea,select,audio,.u-reply,.u-wave,.reply-quote';
+    const onMedia = e => !album && !!e.target.closest('.u-media');
+    let timer = null, x0 = 0, y0 = 0, dx = 0, swiping = false, firstHold = false, suppressTap = false, touch = false, heldMenu = false;
     // Text is selectable like any page (Miguel, 30 Oct 2026): a mouse drag highlights part of any bubble, sent or
     // received, and a plain click never opens a menu (right-click does). A phone's hold still picks messages, so its
     // menu offers "Select text": that bubble then takes native selection handles, preselected, ready to Copy.
@@ -1797,18 +1802,23 @@
       document.addEventListener('selectionchange', watch);
     };
     const textMode = () => bubble.classList.contains('u-textsel');
-    const open = () => menu(touch ? {selectText} : {select: () => { window.getSelection()?.removeAllRanges(); selection()?.begin(id); }});
+    const select = () => { window.getSelection()?.removeAllRanges(); selection()?.begin(id); };
+    const open = () => menu(touch ? {selectText} : {select});
+    const openMedia = () => menu(touch ? {select, selectText} : {select});
     const cancel = () => { clearTimeout(timer); timer = null; };
     // Only a finger's first hold is kept from starting a native selection (it picks messages instead).
     bubble.addEventListener('selectstart', e => { if (touch && !textMode() && (!selection()?.active || firstHold)) e.preventDefault(); });
     bubble.addEventListener('pointerdown', e => {
-      firstHold = false; suppressTap = false; touch = e.pointerType === 'touch' || e.pointerType === 'pen';
+      firstHold = false; suppressTap = false; heldMenu = false; touch = e.pointerType === 'touch' || e.pointerType === 'pen';
       if (textMode() || selection()?.active || e.button > 0 || e.target.closest(holdInteractive)) return;
       cancel(); x0 = e.clientX; y0 = e.clientY; dx = 0; swiping = false;
       if (e.pointerType !== 'touch') return;
+      const media = onMedia(e);
       timer = setTimeout(() => {
-        timer = null; firstHold = true; navigator.vibrate?.(10);
-        window.getSelection()?.removeAllRanges(); swallowRelease(); selection()?.begin(id);
+        timer = null; navigator.vibrate?.(10); window.getSelection()?.removeAllRanges(); swallowRelease();
+        // Holding media opens the menu at once (a tap there belongs to the viewer); Select is in it.
+        if (media) { heldMenu = true; openMedia(); return; }
+        firstHold = true; selection()?.begin(id);
       }, 450);
     });
     bubble.addEventListener('pointermove', e => {
@@ -1824,6 +1834,8 @@
       if (swiping) { row.style.transform = ''; row.classList.remove('arm'); suppressTap = true; if (dx > 56) reply(); swiping = false; }
     };
     for (const type of ['pointerup','pointercancel','pointerleave']) bubble.addEventListener(type, end);
+    // A swipe-to-reply that started on a photo must not also open the viewer (its own click handler runs first).
+    bubble.addEventListener('click', e => { if (suppressTap && onMedia(e)) { suppressTap = false; e.preventDefault(); e.stopPropagation(); } }, true);
     bubble.addEventListener('click', e => {
       if (suppressTap) { suppressTap = false; e.preventDefault(); e.stopPropagation(); return; }
       if (selection()?.active || textMode() || e.target.closest(interactive)) return;
@@ -1833,10 +1845,11 @@
     });
     bubble.addEventListener('contextmenu', e => {
       // The first hold selects messages; the next hold is left entirely to native text selection.
+      if (heldMenu) { e.preventDefault(); return; } // the hold already opened it
       if ((selection()?.active && !firstHold) || textMode()) return;
       if (e.target.closest(holdInteractive)) return;
       e.preventDefault(); cancel();
-      if (!selection()?.active) open();
+      if (!selection()?.active) (onMedia(e) ? openMedia : open)();
     });
   }
   function gestures(row, b, m) {
