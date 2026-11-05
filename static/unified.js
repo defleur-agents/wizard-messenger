@@ -207,6 +207,7 @@
   }
   function back() {
     if (!s.overlay && view.selection?.active) { view.selection.clear(); return true; }
+    if (s.overlay && connectorController?.back?.()) return true;
     if (s.overlay === 'Edit QR codes') { myCodes(); return true; }
     if (s.overlay === 'Suggested merges') { accounts(); return true; } // nested: Back returns to the codes, not the list
     if (s.overlay === 'Advanced' || s.overlay === 'Agent drafts') { accounts(); return true; } // pages opened from Settings return to it
@@ -222,9 +223,10 @@
     closeOverlay(); lastFocus = document.activeElement; s.overlay = title;
     const layer = node('div', 'u-overlay'); layer.id = 'u-overlay';
     const panel = node('section', 'u-sheet'); panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-modal', 'true'); panel.setAttribute('aria-label', title); panel.tabIndex = -1;
-    const head = node('header'); head.append(node('h2', '', title), iconButton('close', 'Close', closeOverlay)); panel.append(node('span', 'grabber'), head);
+    const dismiss = () => { if (!connectorController?.back?.()) closeOverlay(); };
+    const head = node('header'); head.append(node('h2', '', title), iconButton('close', 'Close', dismiss)); panel.append(node('span', 'grabber'), head);
     layer.append(panel); $('messenger').append(layer);
-    layer.onclick = e => { if (e.target === layer) closeOverlay(); };
+    layer.onclick = e => { if (e.target === layer) dismiss(); };
     panel.onkeydown = e => {
       if (e.key !== 'Tab') return;
       const focusable = [...panel.querySelectorAll('button,input,select,textarea')].filter(x => !x.disabled);
