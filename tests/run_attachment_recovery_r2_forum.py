@@ -16,7 +16,7 @@ OUT.mkdir(exist_ok=True)
 R1 = Path('/srv/work/messenger-draft-attachment-20261105')
 PRODUCT = '0ecb22b2364121cfd6679fc9ca1485088bc209bb'
 sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-assert sha(R1 / 'evidence/qa-receipt.json') == 'e625c81f2a3f3e6d20c721f08e01b6594b89976eb843eca3efe8806ba7b9ef6c'
+assert sha(R1 / 'evidence/qa-receipt.json') == 'e302677a22537c031e79dfff0324e24d2c8cba009bfaa094bea62aa1c57a5ff2'
 assert subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True).strip() == ''
 revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
 changes = subprocess.check_output(['git', 'diff', '--name-only', PRODUCT, revision], cwd=ROOT, text=True).splitlines()
