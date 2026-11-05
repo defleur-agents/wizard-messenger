@@ -1945,7 +1945,8 @@
     return done;
   }
   async function del(m, everyone) {
-    if (everyone && !confirm('Delete this message for everyone?')) return;
+    // Never window.confirm: the Mac app's web view has no confirm panel, so it silently answers no.
+    if (everyone && !await ask({title: 'Delete for everyone?', body: 'It is removed from the chat for both of you.', yes: 'Delete', no: 'Keep'})) return;
     try { const r = await call('messages/' + encodeURIComponent(m.id) + '/delete', {everyone}); mergeMessages(view.id, r.messages || [r.message]); paintThread(); } catch (e) { error(e); }
   }
   function startReply(m) { view.edit = null; view.reply = m; if (m.network) view.useNetwork?.(m.network); view.paintBar?.(); view.draft?.focus(); }
@@ -2938,7 +2939,7 @@
       list.replaceChildren();
       for (const x of rows) {
         const row = button('', () => action(async () => {
-          if (!confirm('Merge ' + x.display_name + ' into ' + p.display_name + '?')) return;
+          if (!await ask({title: 'Merge contacts?', body: 'Merge ' + x.display_name + ' into ' + p.display_name + '?', yes: 'Merge', no: 'Cancel'})) { mergePicker(p); return; }
           await call('people/' + encodeURIComponent(p.id) + '/merge', {source_id: x.id});
           closeOverlay(); delete store.threads[p.id]; store.lists = {people: null, groups: null}; toast('Merged into one chat'); await openPerson(p.id);
         }), 'u-pick-row');
@@ -3242,7 +3243,7 @@
         review.disabled = body.disabled = recipient.disabled = draft.state !== 'draft';
         if (draft.state === 'sending') sheet.append(node('p', 'helper', 'Delivery is uncertain. Check the conversation before creating a replacement. Editing is locked.'));
         if (draft.state !== 'sending') sheet.append(button('Delete draft', () => action(async () => {
-          if (!confirm('Delete this local draft?')) return;
+          if (!await ask({title: 'Delete this local draft?', body: 'Nothing is sent.', yes: 'Delete', no: 'Keep'})) { await agentDrafts(); return; }
           try { await api('api/drafts/' + draft.id, {method:'DELETE', body:{revision:draft.revision}}); await afterAgentDraft(); }
           catch (e) { problem.textContent = e.message; }
         }), 'secondary wide'));
@@ -3283,7 +3284,7 @@
         catch (e) { problem.textContent = e.message; }
       }), 'secondary wide'));
       if (!draft.export && draft.state !== 'sending') sheet.append(button('Delete draft', () => action(async () => {
-        if (!confirm('Delete this local draft?')) return;
+        if (!await ask({title: 'Delete this local draft?', body: 'Nothing is sent.', yes: 'Delete', no: 'Keep'})) { await agentDrafts(); return; }
         try { await api('api/drafts/' + draft.id, {method: 'DELETE', body: {revision: draft.revision}}); await agentDrafts(); }
         catch (e) { problem.textContent = e.message; }
       }), 'secondary wide'));
