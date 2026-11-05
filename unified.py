@@ -773,10 +773,14 @@ class PeopleStore:
                 db.execute('DELETE FROM reaction WHERE event_id=?', (event_id,))
                 return self.bump(row[0])
         with self.db() as db:
-            ids = [r[0] for r in db.execute('SELECT id FROM message WHERE id=? OR source_event=?', (event_id, event_id))]
-        for target in ids:
-            self.bump(target, ",deleted=1,original='',translated=NULL,media=NULL,transcript=NULL")
-        return bool(ids)
+            targets = list(db.execute('SELECT id,album,media FROM message WHERE id=? OR source_event=?', (event_id, event_id)))
+        for target, album, raw_media in targets:
+            # Deletion clears content/URIs, but explicit non-content ordinals must
+            # survive so delayed Signal albums do not reorder their remaining tiles.
+            media = json.loads(raw_media) if raw_media else {}
+            ordinal = {key: media[key] for key in ('album_index', 'album_count') if key in media} if (album or '').startswith('signal:') else {}
+            self.bump(target, ",deleted=1,original='',translated=NULL,media=?,transcript=NULL", (json.dumps(ordinal) if ordinal else None,))
+        return bool(targets)
 
     def decorate(self, rows):
         """Public message rows: media without mxc URIs, aggregated reactions, reply excerpts."""
@@ -807,11 +811,12 @@ class PeopleStore:
                 r['sender'] = OWN_SENDER
             r['edited'], r['deleted'] = bool(r.get('edited')), bool(r.get('deleted'))
             media = json.loads(r['media']) if r.get('media') else None
-            if media and media.get('links') and not media.get('mxc'):
+            if media and media.get('links'):
                 r['links'] = [{k: v for k, v in l.items() if k in ('url', 'title', 'desc', 'site', 'w', 'h')} | {'image': bool(l.get('mxc'))} for l in media['links']]
+            if media and media.get('links') and not media.get('mxc'):
                 r['media'] = None
             elif media:
-                r['media'] = {k: v for k, v in media.items() if k in ('mime', 'size', 'w', 'h', 'duration', 'filename', 'waveform', 'voice')}
+                r['media'] = {k: v for k, v in media.items() if k in ('mime', 'size', 'w', 'h', 'duration', 'filename', 'waveform', 'voice', 'album_index', 'album_count')}
                 r['media']['thumb'] = bool(media.get('thumb')) or (media.get('mime', '').startswith('image/'))
             r['reactions'] = list(reacts.get(r['id'], {}).values())
             if r.get('reply_to'):
@@ -942,6 +947,8 @@ def message_parts(event):
             step = max(1, len(wave) / 48)
             top = max(max(wave), 1)
             media['waveform'] = [int(100 * wave[int(i * step)] / top) for i in range(min(48, len(wave)))]
+        if kind == 'm.image' and (previews := link_previews(content)):
+            media.update(previews)
         if not media['mxc']:
             return 'm.text', '[' + MEDIA_LABELS[kind] + ']' + (' ' + caption if caption else ''), None, reply_to
         return kind, caption, {k: v for k, v in media.items() if v not in (None, '')}, reply_to
@@ -1301,7 +1308,19 @@ class UnifiedInbox:
                 pass  # A malformed optional extension must not stall the room's sync.
 
         grouped = content.get('fi.mau.telegram.grouped_id')
-        album = 'telegram:' + str(grouped) if isinstance(grouped, (str, int)) and str(grouped) else None
+        album = 'telegram:' + str(grouped) if identity['network'] == 'telegram' and isinstance(grouped, (str, int)) and str(grouped) else None
+        group = content.get('org.wizard.signal.album')
+        media_mxc = media.get('mxc') if isinstance(media, dict) else None
+        if (identity['network'] == 'signal' and msgtype == 'm.image' and isinstance(media, dict)
+                and isinstance(media_mxc, str) and MXC.fullmatch(media_mxc)
+                and isinstance(group, dict) and isinstance(group.get('id'), str) and 0 < len(group['id']) <= 200
+                and type(group.get('index')) is int and type(group.get('count')) is int
+                and 2 <= group['count'] <= 100 and 0 <= group['index'] < group['count']):
+            album = 'signal:' + group['id']
+            filename = content.get('filename') or content.get('body')
+            media = dict(media, album_index=group['index'], album_count=group['count'])
+            if isinstance(filename, str):
+                media['filename'] = filename[:200]
         self.store.add_message(event['event_id'], identity, meta.get('names', {}).get(sender) or sender, outgoing, body,
                                event.get('origin_server_ts', 0), msgtype=msgtype, media=media, reply_to=reply_to, album=album, push_live=live)
         self.warm_voice(event['event_id'], msgtype, outgoing, media, event.get('origin_server_ts', 0))
@@ -1751,9 +1770,25 @@ class UnifiedInbox:
         if not message.get('album'):
             return [self.row(message_id)]
         with self.store.db() as db:
-            ids = [r[0] for r in db.execute('SELECT id FROM message WHERE album=? AND identity_id=? AND sender=? ORDER BY timestamp,rowid',
-                                          (message['album'], message['identity_id'], message['sender']))]
-        return [self.row(key) for key in ids]
+            timeline = list(db.execute('SELECT id,album,sender,outgoing,msgtype FROM message WHERE identity_id=? ORDER BY timestamp,rowid',
+                                       (message['identity_id'],)))
+        # Match the renderer's adjacent, photo-only scope. Never act on a same-ID
+        # marker across a text boundary or on the other direction of a conversation.
+        at = next(i for i, row in enumerate(timeline) if row['id'] == message_id)
+        def same(row):
+            return (row['album'] == message['album'] and row['sender'] == message['sender']
+                    and row['outgoing'] == message['outgoing'] and row['msgtype'] == 'm.image')
+        if message['msgtype'] != 'm.image':
+            return [self.row(message_id)]
+        lo, hi = at, at + 1
+        while lo and same(timeline[lo - 1]):
+            lo -= 1
+        while hi < len(timeline) and same(timeline[hi]):
+            hi += 1
+        rows = [self.row(row['id']) for row in timeline[lo:hi]]
+        if message['network'] == 'signal' and all('album_index' in (r.get('media') or {}) for r in rows):
+            rows.sort(key=lambda r: r['media']['album_index'])
+        return rows
 
     def store_gallery(self, event_id, identity, sender, outgoing, content, stamp, reply_to=None, client_id=None):
         # All N items (including item zero) are in the extension. Stable per-photo rows

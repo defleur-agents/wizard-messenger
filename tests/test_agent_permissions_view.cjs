@@ -3,24 +3,13 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 // Execute the shipping view with a small DOM, not source-string permission assertions.
-class Element {
-  constructor(tag) { this.tagName = tag; this.children = []; this.attrs = {}; this.dataset = {}; this.value = ''; this._text = ''; this.classList = {remove(){}}; }
-  set textContent(v) { this._text = v; this.children = []; }
-  get textContent() { return this._text + this.children.map(c => c.textContent).join(''); }
-  append(...els) { for (const el of els) { el.parent = this; this.children.push(el); } }
-  replaceChildren(...els) { this.children = []; this._text = ''; this.append(...els); }
-  setAttribute(k,v) { this.attrs[k] = v; }
-  getAttribute(k) { return this.attrs[k]; }
-  remove() { if (this.parent) this.parent.children = this.parent.children.filter(x => x !== this); }
-  focus() {}
-  querySelectorAll() { return []; }
-}
+const {Element, browserContext, makeDocument} = require('./helpers/unified_browser_context.cjs');
 async function fixture({deferPreview = false, connectors = false, connectorsUnavailable = false, remoteRequired = false} = {}) {
-  const root = new Element('main'), tabs = new Element('nav'); root.id = 'messenger'; tabs.id = 'inbox-tabs';
+  const document = makeDocument();
+  const root = document.createElement('main'), tabs = document.createElement('nav'); root.id = 'messenger'; tabs.id = 'inbox-tabs';
+  const inbox = document.createElement('section'); inbox.id = 'unified-inbox'; root.append(inbox, tabs); document.body.append(root);
   const all = () => { const result = []; const walk = e => {result.push(e); e.children.forEach(walk);}; walk(root); return result; };
-  const document = {activeElement: null, documentElement: {dataset:{}}, addEventListener(){},
-    getElementById: id => id === 'inbox-tabs' ? tabs : all().find(e => e.id === id),
-    createElement: tag => new Element(tag), createElementNS: (_,tag) => new Element(tag)};
+
   const calls = []; let releasePreview;
   let draft = {id:'d1',revision:1,state:'draft',person_id:'p1',identity_id:'i1',text:'Draft hello'};
   let policy = {mode:'no_access',enabled:false,log:[]}; const agents = [{id:'a0',name:'Oscar',level:'no_access',label:'No access'}];
@@ -53,9 +42,8 @@ async function fixture({deferPreview = false, connectors = false, connectorsUnav
     if (path === 'api/drafts/d1/send') {draft.state = 'sent'; return {draft};}
     throw new Error('Unexpected API: '+path);
   };
-  const context = {addEventListener(){},document,console,Audio:class {},navigator:{},localStorage:{getItem(){return null;}},sessionStorage:{getItem(){return null;}},confirm:()=>true,
-    setTimeout,clearTimeout,requestAnimationFrame:fn=>fn(),WizardApp:{update:{hold:()=>({release(){}})}}};
-  context.window = context;
+  const {context} = browserContext({document, overrides:{confirm:()=>true,
+    requestAnimationFrame:fn=>fn(),WizardApp:{update:{hold:()=>({release(){}})}}}});
   if (connectors) vm.runInNewContext(fs.readFileSync('static/connectors.js','utf8'), context);
   vm.runInNewContext(fs.readFileSync('static/unified.js','utf8'), context);
   context.MessengerUnified.mount({api});
