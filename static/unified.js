@@ -1680,7 +1680,10 @@
     const by = row => row?.updated_by || row?.created_by;
     const byAgent = row => by(row) && by(row).id !== 'owner';
     const dirty = () => sd.row ? ui.draft.value !== sd.saved || ui.channel.value !== sd.row.identity_id : !!ui.draft.value.trim();
-    const alive = () => sd.alive && ui.form.isConnected && s.person === id;
+    const alive = () => sd.alive && ui.form.isConnected && s.person === id && view.sd === sd;
+    // The global tray belongs to the currently visible composer, not to a suspended save.
+    // Keep this controller's handles (including an in-flight PUT's mutable sid) across navigation.
+    let attachments = [...(view.attach || [])], saveGeneration = 0;
     const note = () => {
       if (sd.conflict) {
         const box = node('div', 'u-draft-note conflict');
@@ -1738,22 +1741,36 @@
         if (at < 0) tray.push(it); else if (tray[at].unavailable) tray[at] = it;
         else if (it.url) URL.revokeObjectURL(it.url);
       }
-      view.attach = tray.length ? tray : null; errorsInTray();
+      attachments = tray; view.attach = tray.length ? tray : null; errorsInTray();
     }
-    async function save() {
+    function save() {
       clearTimeout(sd.timer); sd.timer = null; draftWrote();
+      // Freeze the originating composer before any await. A navigation flush may arrive after
+      // openPerson cleared the global tray; only the old controller's retained handles apply then.
+      if (alive()) attachments = [...(view.attach || [])];
+      const snapshot = {text: ui.draft.value, identity_id: ui.channel.value, attachments: [...attachments],
+        editing: alive() && !!view.edit, epoch: sd.epoch, generation: ++saveGeneration};
+      const saving = saveSnapshot(snapshot);
+      sd.saving = saving;
+      return saving.finally(() => { if (sd.saving === saving) sd.saving = null; });
+    }
+    async function saveSnapshot(snapshot) {
+      const fresh = () => sd.epoch === snapshot.epoch && saveGeneration === snapshot.generation;
       await sd.uploading?.catch(() => {});
-      if (sd.closing) { await sd.closing; if (sd.timer) return; } // a just-sent draft is deleted first; new text starts a new one
-      if (sd.busy) { await sd.busy.catch(() => {}); if (sd.timer) return; }
-      if (view.edit || sd.conflict) return;
+      if (!fresh()) return;
+      if (sd.closing) { await sd.closing; if (!fresh() || sd.timer) return; } // a just-sent draft is deleted first; new text starts a new one
+      if (sd.busy) { await sd.busy.catch(() => {}); if (!fresh() || sd.timer) return; }
+      if (snapshot.editing || sd.conflict) return;
       const run = (async () => {
-        const text = ui.draft.value, identity_id = ui.channel.value, files = (view.attach || []).some(it => it.sid);
+        const {text, identity_id} = snapshot, items = snapshot.attachments.filter(it => !it.removed);
+        // Server metadata is authoritative after the queue: a later batch may have persisted too.
+        const files = (sd.row?.attachments || []).length || items.some(it => it.sid);
         if (!identity_id) return;
         if (!sd.row) {
           if (!text.trim()) return;
           const r = await api('api/drafts', {method: 'POST', body: {person_id: id, identity_id, text}});
           sd.row = r.draft; sd.saved = text;
-        } else if (!text.trim() && !files && !(view.attach || []).length) {
+        } else if (!text.trim() && !files && !items.length) {
           await api('api/drafts/' + sd.row.id, {method: 'DELETE', body: {revision: sd.row.revision}}); sd.row = null; sd.saved = null;
         } else if (text !== sd.row.text || identity_id !== sd.row.identity_id) {
           const r = await api('api/drafts/' + sd.row.id, {method: 'POST', body: {revision: sd.row.revision, person_id: id, identity_id, text}});
@@ -1794,6 +1811,7 @@
     }
     function attach(items) {
       const epoch = sd.epoch;
+      attachments = [...new Set([...attachments, ...items])];
       return attachmentWork(async () => {
         for (const it of items) {
           if (!alive() || sd.epoch !== epoch) return;
@@ -1814,7 +1832,7 @@
       });
     }
     function detach(it) {
-      it.removed = true; errorsInTray();
+      it.removed = true; attachments = attachments.filter(old => old !== it); errorsInTray();
       return attachmentWork(async () => {
         if (!it.sid || !sd.row) return;
         try {
@@ -1825,6 +1843,7 @@
           // A refused removal is not a successful removal. Keep its chip and block until reconciled.
           if (alive()) {
             it.removed = false; it.removeFailed = true;
+            attachments = [...new Set([...attachments, it])];
             if (!(view.attach || []).includes(it)) view.attach = [...(view.attach || []), it];
             if (e.code !== 'not_found') error(e);
           }
@@ -2168,7 +2187,7 @@
     Object.assign(view, {draft, grow, paintBar, paintRecording, paintRecordingTick});
     form.append(bar, via, channel, row, notice); grow(); paintBar(); paintRecording();
     // Switching chats in the split (or redrawing on resize) must not drop a save that is still waiting.
-    const prev = view.sd, flushing = prev?.timer ? prev.save() : prev?.busy;
+    const prev = view.sd, flushing = prev?.timer ? prev.save() : prev?.saving || prev?.busy;
     prev?.stop?.(); view.sd = serverDraft(id, {form, draft, channel, grow, paintBar, paintVia}, prev?.id === id ? flushing : null);
     queueMicrotask(() => { if (!form.isConnected) return; if (!view.recording) record(true); recoverVoice(); });
     return form;
