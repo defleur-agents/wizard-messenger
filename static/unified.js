@@ -1049,7 +1049,14 @@
       }
       frag.append(empty);
     }
-    list.replaceChildren(frag);
+    replaceListRows(list, frag);
+  }
+  // A refresh replaces row nodes, not the owner's reading position. Explicitly restore before the next
+  // paint: Chromium's scroll anchoring otherwise follows a discarded row when draft/read state changes.
+  function replaceListRows(list, rows) {
+    const top = list.scrollTop;
+    list.replaceChildren(rows);
+    list.scrollTop = top;
   }
 
   const isLow = p => !!p.low_priority;

@@ -6,7 +6,7 @@
 const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
 const L = require('../static/app.js');
-const root = path.resolve(__dirname, '../static');
+const root = path.resolve(process.env.MESSENGER_STATIC_DIR || path.join(__dirname, '../static'));
 const out = path.resolve(process.argv[2] || process.env.EVIDENCE_DIR || 'desktop-split-shots'); fs.mkdirSync(out, {recursive: true});
 const WEB = process.env.WIZARD_WEB_DIR || '';
 const TYPES = {'.js': 'application/javascript', '.css': 'text/css', '.html': 'text/html', '.svg': 'image/svg+xml', '.png': 'image/png', '.webp': 'image/webp', '.jpg': 'image/jpeg', '.woff2': 'font/woff2'};
@@ -43,6 +43,8 @@ function fixture() {
 
 (async () => {
   const browser = await chromium.launch(), results = [];
+  try {
+  if (process.env.MESSENGER_FAIL_AFTER_LAUNCH === '1') throw new Error('deliberate post-launch cleanup probe');
   SKINS['landscapes-light'] = await landscapesLight();
   console.log('landscapes-light tokens from', SKINS['landscapes-light'].source);
   // Full behaviour run once (dark), screenshots for every skin at 1280 and 1600.
@@ -114,6 +116,22 @@ function fixture() {
       if (!file.startsWith(root) || !fs.existsSync(file)) return route.fulfill({status: 404, body: ''});
       return route.fulfill({status: 200, contentType: TYPES[path.extname(file)] || 'application/octet-stream', body: fs.readFileSync(file)});
     });
+    if (process.env.MESSENGER_SCROLL_TRACE === '1') await page.addInitScript(() => {
+      window.__listScrollTrace = [];
+      const orig = Element.prototype.replaceChildren;
+      Element.prototype.replaceChildren = function (...rows) {
+        const record = this.classList.contains('u-list') ? {before: this.scrollTop, height: this.scrollHeight, at: performance.now()} : null;
+        const result = orig.apply(this, rows);
+        if (record) { record.afterReplace = this.scrollTop; window.__listScrollTrace.push(record); requestAnimationFrame(() => { record.nextFrame = this.scrollTop; }); }
+        return result;
+      };
+    });
+    const trace = async step => {
+      const row = await page.evaluate(step => ({step, trace: window.__listScrollTrace, top: document.querySelector('.u-list')?.scrollTop,
+        selected: document.querySelector('.u-person.selected')?.dataset.pid}), step);
+      fs.writeFileSync(path.join(out, 'scroll-trace-' + skin + '.json'), JSON.stringify(row, null, 2));
+      console.log('SCROLL', JSON.stringify(row));
+    };
     await page.goto('https://messenger.test/');
     await page.locator('#u-pane-list .u-person', {hasText: 'Ana Souza'}).waitFor(); await page.waitForTimeout(400);
     const box = sel => page.locator(sel).first().boundingBox();
@@ -150,6 +168,7 @@ function fixture() {
       assert.equal(await list.evaluate(el => el.__kept === true), true, 'list not rebuilt by ✕');
       // ---- New chat button opens New message with the search focused; picking someone opens that chat ----
       await rowA.click(); await page.locator('#u-pane-thread .u-who-text strong', {hasText: 'Kira Novak'}).waitFor();
+      await trace('before-new-message');
       await page.locator('#u-pane-list .u-fab').click(); await page.locator('#u-pane-thread .u-newmsg').waitFor();
       assert.equal(await page.locator('.u-sheet').count(), 0, 'no New chat sheet in the split');
       await page.waitForTimeout(100);
@@ -170,7 +189,9 @@ function fixture() {
       const field = page.locator('#u-pane-thread textarea[aria-label="Message"]');
       await field.fill('Draft for Kira'); await page.waitForTimeout(1500);
       assert.equal(drafts.find(d => d.person_id === 'p10')?.text, 'Draft for Kira', 'draft autosaved to the server');
+      await trace('draft-saved-before-switch');
       await rowB.click(); await page.locator('#u-pane-thread .u-who-text strong', {hasText: 'Maya Cohen'}).waitFor(); await page.waitForTimeout(300);
+      await trace('after-switch');
       assert.equal(await list.evaluate(el => el.__kept === true), true, 'list still not rebuilt');
       assert.ok(Math.abs(await list.evaluate(el => el.scrollTop) - scrolled) < 2, 'list scroll kept after switching');
       assert.equal(await rowA.getAttribute('aria-current'), null); assert.equal(await rowB.getAttribute('aria-current'), 'true');
@@ -290,8 +311,17 @@ function fixture() {
     assert.deepEqual(errors, [], skin + ': no page errors');
     results.push(skin); await ctx.close();
   }
-  await browser.close();
   console.log('PASS desktop split: both panes at 1280/1600, list kept (node + scroll), selected row, autosaved drafts across switches,'
     + ' live unread + timeline, search on the left, list-only with nothing open, Escape/✕ close the detail, New chat opens New message beside the list, narrow Back keeps the scroll, compact rows, menus/sheets placed, native Wizard thread on the right,'
     + ' resize 1280 -> 600 -> 1280 keeps the chat, split with ✕/Escape at 640/760/1280 and one pane at 599/390; skins ' + results.join(', ') + '; shots in ' + out);
+  } catch (error) {
+    for (const [ci, ctx] of browser.contexts().entries()) for (const [pi, page] of ctx.pages().entries()) {
+      try {
+        await page.screenshot({path: path.join(out, `failure-${ci}-${pi}.png`), timeout: 5000});
+        fs.writeFileSync(path.join(out, `failure-${ci}-${pi}.json`), JSON.stringify(await page.evaluate(() => ({top: document.querySelector('.u-list')?.scrollTop,
+          trace: window.__listScrollTrace, active: document.activeElement?.outerHTML, detail: document.querySelector('#unified-inbox')?.dataset})), null, 2));
+      } catch (captureError) { console.error('failure capture:', captureError.message); }
+    }
+    throw error;
+  } finally { await browser.close(); console.log('CLEANUP desktop_split browser closed'); }
 })().catch(e => { console.error(e); process.exitCode = 1; });
