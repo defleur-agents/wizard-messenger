@@ -1,0 +1,128 @@
+// James, 5 Nov: warm Slack/Instagram belong in Add, never giant setup cards in Settings.
+// Synthetic framebuffer ONLY. This harness never opens any provider or a real login page.
+// SHELL_DIR is a pinned wizard-ux/web snapshot; shared host/client and palettes are real.
+const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
+const staticDir = path.resolve(__dirname, '../static'), shellDir = process.env.SHELL_DIR;
+const out = path.resolve(process.argv[2] || 'account-setup-evidence'); fs.mkdirSync(out, {recursive:true});
+const L = require('../static/app.js');
+const types = {'.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.html':'text/html'};
+const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><link rel="stylesheet" data-skin-pkg href="/wizard-os-home/skins/sepia/skin.css"><script>window.WizCore={apps:()=>({APPS:[{url:'/app/'}]})};</script><script src="/wizard-os-home/core/skins.js"></script><script src="/wizard-os-home/core/appearance-host.js"></script><style>html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:14px system-ui}nav{height:32px}.win{position:absolute;inset:32px 0 0;background:var(--sk-win)}iframe{width:100%;height:100%;border:0}button{cursor:pointer}</style></head><body><nav>Hosted synthetic proxy <button onclick="WosSkin.set('nebula')">Nebula</button><button onclick="WosSkin.set('sepia')">Sepia</button></nav><section class="win"><iframe src="/app/"></iframe></section></body></html>`;
+(async()=>{
+  assert(shellDir, 'SHELL_DIR required: real pinned shell source, not invented palette tokens');
+  const browser = await chromium.launch({headless:true,args:['--no-sandbox']});
+  const maker = await browser.newPage();
+  const frame = await maker.evaluate(()=>{const c=document.createElement('canvas');c.width=1280;c.height=1000;const x=c.getContext('2d');x.fillStyle='#e8edf4';x.fillRect(0,0,1280,1000);x.strokeStyle='#93a3ba';for(let i=0;i<1280;i+=80){x.beginPath();x.moveTo(i,0);x.lineTo(i,1000);x.stroke();}for(let i=0;i<1000;i+=80){x.beginPath();x.moveTo(0,i);x.lineTo(1280,i);x.stroke();}x.fillStyle='#182738';x.font='bold 48px sans-serif';x.fillText('SYNTHETIC PAGE — no account',35,110);for(const [a,b,t]of[[0,0,'TL'],[1160,0,'TR'],[0,900,'BL'],[1160,900,'BR']]){x.fillStyle='#197c59';x.fillRect(a,b,120,100);x.fillStyle='white';x.fillText(t,a+18,b+65);}return c.toDataURL('image/png').split(',')[1];}); await maker.close();
+  const summary=[];
+  for(const profile of [{name:'phone-enlarged',viewport:{width:360,height:640},isMobile:true,hasTouch:true},{name:'desktop-constrained',viewport:{width:860,height:620}},{name:'desktop-wide',viewport:{width:1280,height:860}}]){
+    const ctx=await browser.newContext({...profile,deviceScaleFactor:1});
+    const page=await ctx.newPage(), errors=[], inputs=[], cancelled=[], starts=[], forbidden=[];
+    page.on('pageerror',e=>errors.push(e.message));
+    const prov=(network,label,state,flows=[])=>({network,label,state,flows,supported:true,logins:state==='connected'?[{id:'fixture',name:'Fixture account'}]:[]});
+    const providers=[prov('telegram','Telegram','connected'),prov('slack','Slack','disconnected',[{id:'cookies',name:'Browser'}]),prov('instagram','Instagram DMs','disconnected',[{id:'android',name:'Native'}]),prov('twitter','X','not_configured')];
+    let seq=0, id=0;
+    await page.route('**/*',async route=>{
+      const req=route.request(),u=new URL(req.url());
+      if(u.origin!=='https://messenger.test'){forbidden.push(u.origin);return route.abort();}
+      const p=u.pathname, api=p.replace(/^\/app\//,'/');
+      const ok=result=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,result})});
+      if(p==='/host')return route.fulfill({contentType:'text/html',body:host});
+      if(p.startsWith('/wizard-os-home/')){const file=path.join(shellDir,p.slice(16));return fs.existsSync(file)&&fs.statSync(file).isFile()?route.fulfill({contentType:types[path.extname(file)]||'application/octet-stream',body:fs.readFileSync(file)}):route.fulfill({status:404,body:''});}
+      if(api==='/api/view/session')return ok({authenticated:true,csrf_token:'synthetic'});
+      if(api==='/api/status')return ok({state:'ready',account_configured:true});
+      const key='11'.repeat(32);
+      if(api==='/api/identity')return ok({identity:{account_id:key,npub:L.encodePublic(key),display_name:'Fixture owner'}});
+      if(['/api/contacts','/api/invites','/api/dms'].includes(api))return ok({contacts:[],invites:[],dms:[]});
+      if(api==='/api/unified/people')return ok({people:[{id:'a',display_name:'Synthetic chat',identities:[{id:'i',network:'telegram',kind:'person'}],labels:[],unread:0,last:{text:'Fixture',timestamp:Date.now(),outgoing:false}}],seq:5});
+      if(api==='/api/unified/groups')return ok({groups:[],seq:5});
+      if(api==='/api/unified/connectors')return ok({providers});
+      if(api==='/api/unified/connectors/browser/start'){starts.push(JSON.parse(req.postData()));return ok({id:'synthetic-'+(++id)});}
+      if(/\/browser\/[^/]+\/frame$/.test(api)){await new Promise(r=>setTimeout(r,120));return ok({seq:++seq,frame,state:'signing_in',host:'synthetic.invalid'});}
+      if(/\/browser\/[^/]+\/input$/.test(api)){inputs.push(JSON.parse(req.postData()));return ok({});}
+      if(/\/browser\/[^/]+\/cancel$/.test(api)){cancelled.push(api);return ok({});}
+      if(api.startsWith('/api/unified/updates')){await new Promise(r=>setTimeout(r,1500));return ok({seq:5});}
+      if(api.startsWith('/api/'))return ok({});
+      const file=path.join(staticDir,p.replace(/^\/app\//,'')||'index.html');
+      if(!file.startsWith(staticDir)||!fs.existsSync(file))return route.fulfill({status:404,body:''});
+      return route.fulfill({contentType:types[path.extname(file)]||'application/octet-stream',body:fs.readFileSync(file)});
+    });
+    await page.goto('https://messenger.test/host');
+    const f=page.frames().find(f=>f.url().endsWith('/app/')); assert(f);
+    await f.locator('.u-person').first().waitFor({timeout:15000});
+    await f.waitForFunction(()=>document.documentElement.dataset.skin==='nebula');
+    if(profile.isMobile)await f.addStyleTag({content:'html {font-size:20px} body{font-size:18px}'});
+    await f.locator('.u-settings-btn').click();
+    await f.locator('.c-plus').waitFor();
+    assert.equal(await f.locator('.c-card').count(),0,'Settings contains NO automatic disconnected setup cards');
+    assert.equal(await f.locator('.c-viewer').count(),0);
+    await f.locator('.c-plus').click();
+    assert.deepEqual(await f.locator('.c-add').evaluateAll(es=>es.map(e=>e.dataset.network).sort()),['instagram','slack','twitter']);
+    assert.equal(starts.length,0,'rendering settings/add cannot start a browser');
+    await f.locator('.c-add[data-network=instagram]').click();
+    assert.equal(await f.locator('.c-card').count(),1,'only selected Instagram opens');
+    await f.locator('.c-back').click();
+    await f.locator('.c-add[data-network=slack]').waitFor();
+    await f.locator('.c-add[data-network=slack]').click();
+    await f.locator('.c-card .primary').click();
+    await f.locator('.c-live-img').waitFor();
+    await f.waitForFunction(()=>document.querySelector('.c-live-img')?.naturalWidth===1280);
+    const doc=await f.evaluate(()=>window.__fixtureDocument=(window.__fixtureDocument||crypto.randomUUID()));
+    const paints=[];
+    for(const skin of ['nebula','sepia']){
+      await page.getByRole('button',{name:skin==='nebula'?'Nebula':'Sepia',exact:true}).click();
+      await f.waitForFunction(s=>document.documentElement.dataset.skin===s,skin);
+      await page.waitForTimeout(350);
+      const paint=await f.locator('.u-sheet').evaluate(e=>({bg:getComputedStyle(e).backgroundColor,ink:getComputedStyle(e).color,skin:document.documentElement.dataset.skin})); paints.push(paint);
+      assert.equal(await f.evaluate(()=>window.__fixtureDocument),doc,'skin change preserves document and flow');
+      assert.equal(starts.length,1,'skin switch must not create a second browser');
+      const geometry=await f.evaluate(()=>{const shell=document.querySelector('.c-live'),img=document.querySelector('.c-live-img'),panel=document.querySelector('.u-sheet');const b=img.getBoundingClientRect(),r=shell.getBoundingClientRect();return {fit:b.width<=shell.clientWidth+1&&b.height<=shell.clientHeight+1,inside:r.bottom<=innerHeight+1,overflow:panel.scrollWidth>panel.clientWidth+1,stageHeight:r.height};});
+      assert(geometry.fit&&geometry.inside&&!geometry.overflow&&geometry.stageHeight>=80,JSON.stringify(geometry));
+      for(const sel of ['.c-live-tools','.c-live-keys','.c-waiting']){const b=await f.locator(sel).boundingBox();assert(b&&b.y>=32&&b.y+b.height<=profile.viewport.height+1,sel+' reachable without zoom');}
+      const before=await f.locator('.u-sheet').screenshot();
+      await f.evaluate(()=>{const x=document.createElement('div');x.id='loud-behind';x.style='position:absolute;inset:0;color:red;font:60px serif;z-index:0';x.textContent='LOUD BACKGROUND '.repeat(100);document.querySelector('#messenger').prepend(x);});
+      const over=await f.locator('.u-sheet').screenshot();assert(before.equals(over),'text panel opaque over loud content');
+      await f.locator('#loud-behind').evaluate(e=>e.remove());
+      await page.screenshot({path:path.join(out,`${profile.name}-${skin}-fit.png`)});
+    }
+    assert.notEqual(paints[0].bg,paints[1].bg,'actual dark/light paint differs');
+    const img=f.locator('.c-live-img'),b=await img.boundingBox();
+    await page.mouse.click(b.x+b.width*.75,b.y+b.height*.6);
+    await page.waitForTimeout(80);let tap=inputs.filter(x=>x.type==='tap').at(-1);assert(Math.abs(tap.x-.75)<.015&&Math.abs(tap.y-.6)<.015,'fit tap maps to image not letterbox');
+    await f.getByRole('button',{name:'Full size',exact:true}).click();
+    await f.locator('.c-live').evaluate(e=>{e.scrollLeft=450;e.scrollTop=250;});
+    const stage=await f.locator('.c-live').boundingBox(), image=await img.boundingBox();
+    const x=stage.x+45,y=stage.y+45;await page.mouse.click(x,y);await page.waitForTimeout(80);
+    tap=inputs.filter(i=>i.type==='tap').at(-1);assert(Math.abs(tap.x-(x-image.x)/image.width)<.015&&Math.abs(tap.y-(y-image.y)/image.height)<.015,'full-size panned mapping');
+    await page.screenshot({path:path.join(out,`${profile.name}-full-size.png`)});
+    await f.getByRole('button',{name:'Fit window',exact:true}).click();
+    await f.getByRole('button',{name:'↓ Page',exact:true}).click();await f.getByRole('button',{name:'‹ Page back',exact:true}).click();
+    await page.waitForTimeout(80);assert(inputs.some(x=>x.type==='scroll'&&x.dy===360));assert(inputs.some(x=>x.type==='back'));
+    // Shell Back unwinds one layer, cancels exact disposable session, and leaves account selection reachable.
+    await f.evaluate(()=>window.MessengerUnified.back());
+    await f.locator('.c-card[data-network=slack]').waitFor();assert.equal(await f.locator('.c-viewer').count(),0);
+    await page.waitForTimeout(80);assert.equal(cancelled.length,1);assert.equal(new Set(cancelled).size,1);
+    await f.evaluate(()=>window.MessengerUnified.back());await f.locator('.c-add[data-network=slack]').waitFor();
+    // Outside click collapses Add, then dismisses Settings: never exits the app.
+    await f.locator('.u-overlay').evaluate(e=>e.dispatchEvent(new MouseEvent('click',{bubbles:true})));
+    assert.equal(await f.locator('.c-add-panel').isVisible(),false);
+    await f.locator('.u-overlay').evaluate(e=>e.dispatchEvent(new MouseEvent('click',{bubbles:true})));
+    assert.equal(await f.locator('.u-overlay').count(),0);assert(await f.locator('.u-person').first().isVisible());
+    if(profile.name==='phone-enlarged'){
+      await page.goto('https://messenger.test/app/');
+      await page.locator('.u-person').first().waitFor(); await page.locator('.u-settings-btn').click();
+      await page.locator('.c-plus').click(); await page.locator('.c-add[data-network=slack]').click(); await page.locator('.c-card .primary').click();
+      await page.waitForFunction(()=>document.querySelector('.c-live-img')?.naturalWidth===1280);
+      assert.equal(await page.locator('html').getAttribute('data-skin'),null,'standalone does not pretend to be hosted');
+      const dark=await page.locator('.u-sheet').evaluate(e=>({bg:getComputedStyle(e).backgroundColor,ink:getComputedStyle(e).color}));
+      assert.notEqual(dark.bg,'rgba(0, 0, 0, 0)'); assert.notEqual(dark.bg,dark.ink);
+      await page.screenshot({path:path.join(out,'phone-standalone-dark.png')});
+      await page.getByRole('button',{name:'Cancel sign-in',exact:true}).click(); await page.waitForTimeout(80);
+      assert.equal(cancelled.length,2,'standalone uses and cleans up the same disposable route');
+    }
+    assert.deepEqual(forbidden,[],'no provider navigation');assert.deepEqual(errors,[]);
+    summary.push({profile:profile.name,paints,starts:starts.length,cancelled:cancelled.length,inputs:inputs.length,status:'PASS'});
+    await ctx.close();
+  }
+  fs.writeFileSync(path.join(out,'summary.json'),JSON.stringify({coverage:'synthetic hosted proxy, real shared appearance host/client; no live auth or physical device',summary},null,2));
+  await browser.close();console.log(JSON.stringify(summary));
+})().catch(e=>{console.error(e);process.exit(1)});
