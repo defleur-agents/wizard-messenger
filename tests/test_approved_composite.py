@@ -18,7 +18,7 @@ class ApprovedCompositeTests(SignalAlbumSchemaTests):
 
     def test_approved_gif_and_sticker_flags_survive_signal_merge(self):
         for flag, public in [('fi.mau.gif', 'gif'), ('fi.mau.bridged_sticker', 'sticker')]:
-            _, _, media, _ = message_parts({'msgtype': 'm.video', 'body': 'clip.mp4', 'url': 'mxc://fixture/clip', 'info': {'mimetype': 'video/mp4', flag: True}})
+            _, _, media, _ = message_parts({'type': 'm.room.message', 'content': {'msgtype': 'm.video', 'body': 'clip.mp4', 'url': 'mxc://fixture/clip', 'info': {'mimetype': 'video/mp4', flag: True}}})
             self.assertTrue(media[public])
 
 
