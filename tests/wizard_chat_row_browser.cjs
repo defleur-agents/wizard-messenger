@@ -10,6 +10,7 @@ fs.mkdirSync(out, {recursive: true});
 
 async function scenario(browser, width, mirrored) {
   const ctx = await browser.newContext({viewport: {width, height: 844}});
+  await ctx.addInitScript(() => { try { localStorage.setItem('messenger.previews', '1'); } catch {} }); // previews are opt-in since 15.11; this test reads them
   await ctx.addInitScript(() => {
     const noop = () => {}; window.__badges = [];
     window.WizardApp = {ready: noop, update: {hold: () => ({release: noop})}, back: {register: hooks => { window.__back = hooks; }}, on: noop, badge: {set: n => window.__badges.push(n)}};
@@ -71,10 +72,10 @@ async function scenario(browser, width, mirrored) {
   } else assert.equal(await row.getAttribute('data-native-group'), dm.group_id);
   await page.getByRole('button', {name: 'Wizard', exact: true}).click();
   assert.equal(await page.locator('.u-person').count(), 2, 'Wizard chip lists Wizard chats (mirrored or native)');
-  await page.getByRole('button', {name: 'Unread', exact: true}).click();
+  await page.locator('#u-filters [data-seg=unread]').click();
   assert.equal(await page.locator('.u-person', {hasText: 'Wizard Alice'}).count(), 1);
   await page.screenshot({path: path.join(out, `inbox-${mirrored ? 'mirrored' : 'native'}-${width}.png`)});
-  await page.getByRole('button', {name: 'All', exact: true}).click();
+  await page.locator('#u-filters [data-seg=all]').click(); await page.getByRole('button', {name: 'Wizard', exact: true}).click();
   await row.click();
   if (mirrored) {
     await page.locator('.u-attach').waitFor({state: 'visible'});
@@ -93,7 +94,7 @@ async function scenario(browser, width, mirrored) {
       // Desktop split: the native thread sits beside the list; Back (no header button there) returns to the empty pane.
       assert.equal(await page.locator('#u-pane-list').isVisible(), true, 'list stays beside the native thread');
       assert.equal(await page.locator('#chat-back').isVisible(), false, 'no Back button in the split');
-      await page.evaluate(() => window.__back.back()); await page.locator('#u-pane-thread .u-newmsg').waitFor();
+      await page.evaluate(() => window.__back.back()); await page.locator('#unified-inbox[data-detail=none]').waitFor();
     } else await page.locator('#chat-back').click();
     await row.waitFor();
   }

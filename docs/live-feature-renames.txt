@@ -1,0 +1,13 @@
+# Same-word mappings below document the scanner's literal-array blind spot, not permission to drop a feature.
+label:All => All | test=tests/live_feature_map.test.mjs | token=SEGMENTS
+label:Unread => Unread | test=tests/live_feature_map.test.mjs | token=SEGMENTS
+label:Direct => Direct | test=tests/live_feature_map.test.mjs | token=TYPES
+label:Groups => Groups | test=tests/live_feature_map.test.mjs | token=TYPES
+label:Merged => Merged | test=tests/live_feature_map.test.mjs | token=TYPES
+# The former direct move actions now live in the Priority submenu.
+label:Move to Inbox => Normal | test=tests/live_feature_map.test.mjs | token=setPriority
+label:Move to Low priority => Low | test=tests/live_feature_map.test.mjs | token=setPriority
+label:Could not move this chat => Could not change priority | test=tests/live_feature_map.test.mjs | token=setPriority
+# Existing success copy is assembled in a conditional expression; verified by executing setPriority.
+label:Moved to Inbox => Moved to Inbox | test=tests/live_feature_map.test.mjs | token=setPriority
+label:Moved to Low priority => Moved to Low priority | test=tests/live_feature_map.test.mjs | token=setPriority

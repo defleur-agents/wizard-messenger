@@ -44,11 +44,15 @@ class SenderTests(unittest.TestCase):
     def test_real_loopback_fixed_routes_json_and_binary(self):
         self.assertTrue(self.invoke('/_matrix/provision/v3/login/start/email?user_id=%40owner%3Amessenger.internal', network='slack')['ok'])
         self.assertTrue(self.invoke('/_matrix/client/v3/rooms/%21test%3Amessenger.internal/send/m.room.message/client000', method='PUT')['ok'])
+        # A picked Telegram sticker is an m.sticker event (composer picker); other event types stay refused.
+        self.assertTrue(self.invoke('/_matrix/client/v3/rooms/%21test%3Amessenger.internal/send/m.sticker/client001', method='PUT')['ok'])
+        with self.assertRaises(EngineError):
+            self.invoke('/_matrix/client/v3/rooms/%21test%3Amessenger.internal/send/m.room.encrypted/client002', method='PUT')
         self.assertEqual(self.invoke('/_matrix/media/v3/upload?filename=photo.png', body=b'test', content_type='image/png')['bytes'], 4)
         # Browser and cURL sign-ins (Slack token login) submit a cookies step.
         self.assertTrue(self.invoke('/_matrix/provision/v3/login/step/proc1/fi.mau.slack.login.auth_token/cookies?user_id=%40owner%3Amessenger.internal', network='slack')['ok'])
         with self.assertRaises(EngineError): self.invoke('/_matrix/provision/v3/login/step/proc1/x/webauthn?user_id=%40owner%3Amessenger.internal', network='slack')
-        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(len(self.calls), 5)
 
     def test_james_any_file_fixed_upload_name_and_strict_mime(self):
         for mime in ('application/pdf', 'application/zip', 'application/octet-stream', 'image/svg+xml'):

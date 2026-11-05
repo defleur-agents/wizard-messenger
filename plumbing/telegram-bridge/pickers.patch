@@ -1,0 +1,533 @@
+diff --git a/pkg/connector/connector.go b/pkg/connector/connector.go
+index a888383b..6c61aea2 100644
+--- a/pkg/connector/connector.go
++++ b/pkg/connector/connector.go
+@@ -45,6 +45,7 @@ func (tc *TelegramConnector) Init(bridge *bridgev2.Bridge) {
+ }
+ 
+ func (tc *TelegramConnector) Start(ctx context.Context) error {
++	tc.registerWizardPickers()
+ 	return tc.Store.Upgrade(ctx)
+ }
+ 
+diff --git a/pkg/connector/wizardpickers.go b/pkg/connector/wizardpickers.go
+new file mode 100644
+index 00000000..e112d550
+--- /dev/null
++++ b/pkg/connector/wizardpickers.go
+@@ -0,0 +1,393 @@
++// SPDX-License-Identifier: AGPL-3.0-or-later
++
++// Wizard Messenger composer pickers: read-only provisioning routes that list the owner's own Telegram
++// stickers (recent, favourites, installed packs) and GIFs (saved GIFs, @gif search) with small previews,
++// and prepare one picked item for sending. Nothing here sends a message: Messenger sends the picked sticker
++// as m.sticker carrying fi.mau.bridged_sticker (the bridge then forwards the original Telegram sticker, no
++// reupload) and the picked GIF as m.video with fi.mau.gif (bridged back as a Telegram animation).
++package connector
++
++import (
++	"cmp"
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++
++	"maunium.net/go/mautrix"
++	"maunium.net/go/mautrix/bridgev2"
++	"maunium.net/go/mautrix/event"
++	"maunium.net/go/mautrix/id"
++
++	"go.mau.fi/mautrix-telegram/pkg/connector/media"
++	"go.mau.fi/mautrix-telegram/pkg/gotd/tg"
++)
++
++// WizardPickerAPI is the slice of the Telegram API the pickers read. *tg.Client satisfies it; tests record calls.
++type WizardPickerAPI interface {
++	MessagesGetRecentStickers(ctx context.Context, request *tg.MessagesGetRecentStickersRequest) (tg.MessagesRecentStickersClass, error)
++	MessagesGetFavedStickers(ctx context.Context, hash int64) (tg.MessagesFavedStickersClass, error)
++	MessagesGetAllStickers(ctx context.Context, hash int64) (tg.MessagesAllStickersClass, error)
++	MessagesGetStickerSet(ctx context.Context, request *tg.MessagesGetStickerSetRequest) (tg.MessagesStickerSetClass, error)
++	MessagesGetSavedGifs(ctx context.Context, hash int64) (tg.MessagesSavedGifsClass, error)
++	ContactsResolveUsername(ctx context.Context, request *tg.ContactsResolveUsernameRequest) (*tg.ContactsResolvedPeer, error)
++	MessagesGetInlineBotResults(ctx context.Context, request *tg.MessagesGetInlineBotResultsRequest) (*tg.MessagesBotResults, error)
++}
++
++type wizardPickItem struct {
++	ID        string              `json:"id"`
++	Kind      string              `json:"kind"`
++	Emoji     string              `json:"emoji,omitempty"`
++	Pack      string              `json:"pack,omitempty"`
++	Mime      string              `json:"mime,omitempty"`
++	W         int                 `json:"w,omitempty"`
++	H         int                 `json:"h,omitempty"`
++	Duration  int                 `json:"duration,omitempty"`
++	Thumb     id.ContentURIString `json:"thumb,omitempty"`
++	ThumbMime string              `json:"thumb_mime,omitempty"`
++}
++
++type wizardPack struct {
++	ShortName string           `json:"short_name"`
++	Title     string           `json:"title"`
++	Count     int              `json:"count"`
++	Stickers  []wizardPickItem `json:"stickers,omitempty"`
++}
++
++// Picked documents are remembered (bounded) so a later prepare call can download the exact file.
++type wizardDocCache struct {
++	sync.Mutex
++	docs map[int64]*tg.Document
++	gif  *tg.InputUser
++}
++
++var wizardDocs = &wizardDocCache{docs: map[int64]*tg.Document{}}
++
++const wizardDocCacheMax = 4000
++const wizardPickerLimit = 40
++
++func (c *wizardDocCache) put(doc *tg.Document) {
++	c.Lock()
++	defer c.Unlock()
++	if len(c.docs) >= wizardDocCacheMax {
++		c.docs = map[int64]*tg.Document{}
++	}
++	c.docs[doc.ID] = doc
++}
++
++func (c *wizardDocCache) get(docID int64) *tg.Document {
++	c.Lock()
++	defer c.Unlock()
++	return c.docs[docID]
++}
++
++func wizardDocuments(list []tg.DocumentClass, limit int) []*tg.Document {
++	out := make([]*tg.Document, 0, min(len(list), limit))
++	for _, d := range list {
++		if doc, ok := d.(*tg.Document); ok && len(out) < limit {
++			out = append(out, doc)
++		}
++	}
++	return out
++}
++
++// wizardDescribe is the picker item for a document, without any download.
++func wizardDescribe(doc *tg.Document, kind string) wizardPickItem {
++	item := wizardPickItem{ID: strconv.FormatInt(doc.ID, 10), Kind: kind, Mime: doc.MimeType}
++	for _, attr := range doc.Attributes {
++		switch a := attr.(type) {
++		case *tg.DocumentAttributeSticker:
++			item.Emoji = a.Alt
++			if set, ok := a.Stickerset.(*tg.InputStickerSetShortName); ok {
++				item.Pack = set.ShortName
++			}
++		case *tg.DocumentAttributeImageSize:
++			item.W, item.H = a.W, a.H
++		case *tg.DocumentAttributeVideo:
++			item.W, item.H, item.Duration = a.W, a.H, int(a.Duration*1000)
++		}
++	}
++	return item
++}
++
++// wizardThumbDoc keeps only the downloadable preview sizes (no vector outlines or inline stripped bytes).
++func wizardThumbDoc(doc *tg.Document) *tg.Document {
++	thumbs := make([]tg.PhotoSizeClass, 0, len(doc.Thumbs))
++	for _, t := range doc.Thumbs {
++		switch t.(type) {
++		case *tg.PhotoSize, *tg.PhotoSizeProgressive:
++			thumbs = append(thumbs, t)
++		}
++	}
++	if len(thumbs) == 0 {
++		return nil
++	}
++	copied := *doc
++	copied.Thumbs = thumbs
++	return &copied
++}
++
++// previews uploads each item's preview to the private homeserver (cached by Telegram location, so the second
++// opening is instant). Static stickers without a preview size are small enough to show whole.
++func (tc *TelegramClient) wizardPreviews(ctx context.Context, docs []*tg.Document, kind string) []wizardPickItem {
++	items := make([]wizardPickItem, len(docs))
++	var wg sync.WaitGroup
++	slots := make(chan struct{}, 6)
++	for i, doc := range docs {
++		wizardDocs.put(doc)
++		items[i] = wizardDescribe(doc, kind)
++		wg.Add(1)
++		go func(i int, doc *tg.Document) {
++			defer wg.Done()
++			slots <- struct{}{}
++			defer func() { <-slots }()
++			var ready *media.ReadyTransferer
++			if thumbDoc := wizardThumbDoc(doc); thumbDoc != nil {
++				ready = media.NewTransferer(tc.client.API()).WithDocument(thumbDoc, true)
++			} else if doc.MimeType == "image/webp" {
++				ready = media.NewTransferer(tc.client.API()).WithDocument(doc, false)
++			} else {
++				return
++			}
++			mxc, _, info, err := ready.Transfer(ctx, tc.main.Store, tc.main.Bridge.Bot)
++			if err == nil && mxc != "" {
++				items[i].Thumb = mxc
++				if info != nil {
++					items[i].ThumbMime = info.MimeType
++				}
++			}
++		}(i, doc)
++	}
++	wg.Wait()
++	return items
++}
++
++func wizardStickerLists(ctx context.Context, api WizardPickerAPI) (recent, faved []*tg.Document, packs []wizardPack, err error) {
++	if r, err := api.MessagesGetRecentStickers(ctx, &tg.MessagesGetRecentStickersRequest{}); err != nil {
++		return nil, nil, nil, err
++	} else if got, ok := r.(*tg.MessagesRecentStickers); ok {
++		recent = wizardDocuments(got.Stickers, 30)
++	}
++	if f, err := api.MessagesGetFavedStickers(ctx, 0); err != nil {
++		return nil, nil, nil, err
++	} else if got, ok := f.(*tg.MessagesFavedStickers); ok {
++		faved = wizardDocuments(got.Stickers, 30)
++	}
++	all, err := api.MessagesGetAllStickers(ctx, 0)
++	if err != nil {
++		return nil, nil, nil, err
++	}
++	if got, ok := all.(*tg.MessagesAllStickers); ok {
++		for _, set := range got.Sets {
++			if set.Archived || set.Emojis || set.Masks {
++				continue
++			}
++			packs = append(packs, wizardPack{ShortName: set.ShortName, Title: set.Title, Count: set.Count})
++		}
++	}
++	return recent, faved, packs, nil
++}
++
++func (tc *TelegramClient) wizardStickers(ctx context.Context) (any, error) {
++	recent, faved, packs, err := wizardStickerLists(ctx, tc.client.API())
++	if err != nil {
++		return nil, err
++	}
++	return map[string]any{
++		"recent":    tc.wizardPreviews(ctx, recent, "sticker"),
++		"favorites": tc.wizardPreviews(ctx, faved, "sticker"),
++		"packs":     packs,
++	}, nil
++}
++
++func (tc *TelegramClient) wizardStickerPack(ctx context.Context, shortName string) (any, error) {
++	raw, err := tc.client.API().MessagesGetStickerSet(ctx, &tg.MessagesGetStickerSetRequest{Stickerset: &tg.InputStickerSetShortName{ShortName: shortName}})
++	if err != nil {
++		return nil, err
++	}
++	set, ok := raw.AsModified()
++	if !ok {
++		return nil, mautrix.MNotFound.WithMessage("sticker pack not found")
++	}
++	// The send path looks the original sticker up in this same cache.
++	tc.addStickerPackToCache(set, true)
++	docs := wizardDocuments(set.Documents, 200)
++	items := tc.wizardPreviews(ctx, docs, "sticker")
++	for i := range items {
++		items[i].Pack = set.Set.ShortName
++	}
++	return wizardPack{ShortName: set.Set.ShortName, Title: set.Set.Title, Count: set.Set.Count, Stickers: items}, nil
++}
++
++func wizardGifBot(ctx context.Context, api WizardPickerAPI) (*tg.InputUser, error) {
++	wizardDocs.Lock()
++	cached := wizardDocs.gif
++	wizardDocs.Unlock()
++	if cached != nil {
++		return cached, nil
++	}
++	resolved, err := api.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: "gif"})
++	if err != nil {
++		return nil, err
++	}
++	for _, u := range resolved.Users {
++		if user, ok := u.(*tg.User); ok && user.Bot {
++			bot := &tg.InputUser{UserID: user.ID, AccessHash: user.AccessHash}
++			wizardDocs.Lock()
++			wizardDocs.gif = bot
++			wizardDocs.Unlock()
++			return bot, nil
++		}
++	}
++	return nil, mautrix.MNotFound.WithMessage("GIF search is not available")
++}
++
++// wizardGifList returns saved GIFs (empty query) or @gif inline search results: animation documents only.
++func wizardGifList(ctx context.Context, api WizardPickerAPI, query, offset string) ([]*tg.Document, string, error) {
++	if strings.TrimSpace(query) == "" {
++		saved, err := api.MessagesGetSavedGifs(ctx, 0)
++		if err != nil {
++			return nil, "", err
++		}
++		got, ok := saved.(*tg.MessagesSavedGifs)
++		if !ok {
++			return nil, "", nil
++		}
++		return wizardDocuments(got.Gifs, wizardPickerLimit), "", nil
++	}
++	bot, err := wizardGifBot(ctx, api)
++	if err != nil {
++		return nil, "", err
++	}
++	results, err := api.MessagesGetInlineBotResults(ctx, &tg.MessagesGetInlineBotResultsRequest{Bot: bot, Peer: &tg.InputPeerSelf{}, Query: query, Offset: offset})
++	if err != nil {
++		return nil, "", err
++	}
++	var docs []tg.DocumentClass
++	for _, r := range results.Results {
++		if m, ok := r.(*tg.BotInlineMediaResult); ok && m.Document != nil {
++			docs = append(docs, m.Document)
++		}
++	}
++	return wizardDocuments(docs, wizardPickerLimit), results.NextOffset, nil
++}
++
++func (tc *TelegramClient) wizardGifs(ctx context.Context, query, offset string) (any, error) {
++	docs, next, err := wizardGifList(ctx, tc.client.API(), query, offset)
++	if err != nil {
++		return nil, err
++	}
++	return map[string]any{"items": tc.wizardPreviews(ctx, docs, "gif"), "next_offset": next}, nil
++}
++
++// wizardPrepare uploads one picked document whole and returns the Matrix content info Messenger sends.
++func (tc *TelegramClient) wizardPrepare(ctx context.Context, kind string, docID int64) (any, error) {
++	doc := wizardDocs.get(docID)
++	if doc == nil {
++		return nil, mautrix.MNotFound.WithMessage("pick it again")
++	}
++	item := wizardDescribe(doc, kind)
++	xfer := media.NewTransferer(tc.client.API())
++	var sticker *event.BridgedSticker
++	for _, attr := range doc.Attributes {
++		switch a := attr.(type) {
++		case *tg.DocumentAttributeSticker:
++			xfer = xfer.WithStickerConfig(tc.main.Config.AnimatedSticker)
++			sticker = tc.stickerSourceFromAttribute(ctx, doc.ID, a)
++			xfer = xfer.WithStickerMetadata(sticker)
++		case *tg.DocumentAttributeVideo:
++			xfer = xfer.WithVideo(a)
++		case *tg.DocumentAttributeImageSize:
++			xfer = xfer.WithImageSize(a)
++		}
++	}
++	if sticker != nil {
++		// Warm the pack cache the send path reads, so the original sticker is forwarded without reupload.
++		if _, err := tc.GetCachedStickerPack(ctx, strings.TrimPrefix(sticker.PackURL, StickerPackURLPrefix), nil, false); err != nil {
++			sticker = nil
++		}
++	}
++	mxc, _, info, err := xfer.WithDocument(doc, false).Transfer(ctx, tc.main.Store, tc.main.Bridge.Bot)
++	if err != nil {
++		return nil, err
++	}
++	if info == nil {
++		info = &event.FileInfo{}
++	}
++	info.BridgedSticker = sticker
++	if kind == "gif" {
++		info.MauGIF = true
++	}
++	info.Width, info.Height = cmp.Or(info.Width, item.W), cmp.Or(info.Height, item.H)
++	if info.Duration == 0 {
++		info.Duration = item.Duration
++	}
++	return map[string]any{"url": mxc, "info": info, "emoji": item.Emoji}, nil
++}
++
++func wizardWriteJSON(w http.ResponseWriter, value any) {
++	w.Header().Set("Content-Type", "application/json")
++	_ = json.NewEncoder(w).Encode(value)
++}
++
++// registerWizardPickers adds GET-only routes to the existing provisioning router (shared-secret auth, owner login).
++func (tc *TelegramConnector) registerWizardPickers() {
++	matrix, ok := tc.Bridge.Matrix.(bridgev2.MatrixConnectorWithProvisioning)
++	if !ok {
++		return
++	}
++	prov := matrix.GetProvisioning()
++	if prov == nil || prov.GetRouter() == nil {
++		return
++	}
++	handle := func(run func(ctx context.Context, client *TelegramClient, r *http.Request) (any, error)) http.HandlerFunc {
++		return func(w http.ResponseWriter, r *http.Request) {
++			user := prov.GetUser(r)
++			login := user.GetDefaultLogin()
++			if login == nil {
++				mautrix.MForbidden.WithMessage("Telegram is not connected").Write(w)
++				return
++			}
++			client, ok := login.Client.(*TelegramClient)
++			if !ok || client.client == nil || !client.IsLoggedIn() {
++				mautrix.MForbidden.WithMessage("Telegram is not connected").Write(w)
++				return
++			}
++			ctx, cancel := context.WithTimeout(r.Context(), 50*time.Second)
++			defer cancel()
++			result, err := run(ctx, client, r)
++			if err != nil {
++				var we mautrix.RespError
++				if errors.As(err, &we) {
++					we.Write(w)
++					return
++				}
++				mautrix.MUnknown.WithMessage("Telegram did not answer").Write(w)
++				return
++			}
++			wizardWriteJSON(w, result)
++		}
++	}
++	router := prov.GetRouter()
++	router.HandleFunc("GET /v3/wizard/stickers", handle(func(ctx context.Context, c *TelegramClient, r *http.Request) (any, error) {
++		return c.wizardStickers(ctx)
++	}))
++	router.HandleFunc("GET /v3/wizard/stickers/{pack}", handle(func(ctx context.Context, c *TelegramClient, r *http.Request) (any, error) {
++		return c.wizardStickerPack(ctx, r.PathValue("pack"))
++	}))
++	router.HandleFunc("GET /v3/wizard/gifs", handle(func(ctx context.Context, c *TelegramClient, r *http.Request) (any, error) {
++		return c.wizardGifs(ctx, r.URL.Query().Get("q"), r.URL.Query().Get("offset"))
++	}))
++	router.HandleFunc("GET /v3/wizard/prepare/{kind}/{doc}", handle(func(ctx context.Context, c *TelegramClient, r *http.Request) (any, error) {
++		kind := r.PathValue("kind")
++		docID, err := strconv.ParseInt(r.PathValue("doc"), 10, 64)
++		if err != nil || (kind != "sticker" && kind != "gif") {
++			return nil, mautrix.MNotFound.WithMessage("unknown item")
++		}
++		return c.wizardPrepare(ctx, kind, docID)
++	}))
++}
+diff --git a/pkg/connector/wizardpickers_test.go b/pkg/connector/wizardpickers_test.go
+new file mode 100644
+index 00000000..39c3f0b7
+--- /dev/null
++++ b/pkg/connector/wizardpickers_test.go
+@@ -0,0 +1,116 @@
++// SPDX-License-Identifier: AGPL-3.0-or-later
++package connector
++
++import (
++	"context"
++	"testing"
++
++	"go.mau.fi/mautrix-telegram/pkg/gotd/tg"
++)
++
++type pickerRecordingAPI struct {
++	inline   []*tg.MessagesGetInlineBotResultsRequest
++	resolved int
++	saved    int
++}
++
++func pickerSticker(docID int64, alt, pack string) *tg.Document {
++	return &tg.Document{ID: docID, MimeType: "image/webp", Attributes: []tg.DocumentAttributeClass{
++		&tg.DocumentAttributeImageSize{W: 512, H: 512},
++		&tg.DocumentAttributeSticker{Alt: alt, Stickerset: &tg.InputStickerSetShortName{ShortName: pack}},
++	}}
++}
++
++func pickerGif(docID int64) *tg.Document {
++	return &tg.Document{ID: docID, MimeType: "video/mp4", Attributes: []tg.DocumentAttributeClass{
++		&tg.DocumentAttributeVideo{W: 320, H: 180, Duration: 2.5}, &tg.DocumentAttributeAnimated{},
++	}}
++}
++
++func (a *pickerRecordingAPI) MessagesGetRecentStickers(ctx context.Context, req *tg.MessagesGetRecentStickersRequest) (tg.MessagesRecentStickersClass, error) {
++	return &tg.MessagesRecentStickers{Stickers: []tg.DocumentClass{pickerSticker(1, "😀", "Cats"), &tg.DocumentEmpty{ID: 9}}}, nil
++}
++func (a *pickerRecordingAPI) MessagesGetFavedStickers(ctx context.Context, hash int64) (tg.MessagesFavedStickersClass, error) {
++	return &tg.MessagesFavedStickers{Stickers: []tg.DocumentClass{pickerSticker(2, "❤️", "Dogs")}}, nil
++}
++func (a *pickerRecordingAPI) MessagesGetAllStickers(ctx context.Context, hash int64) (tg.MessagesAllStickersClass, error) {
++	return &tg.MessagesAllStickers{Sets: []tg.StickerSet{
++		{ShortName: "Cats", Title: "Cats", Count: 12},
++		{ShortName: "Old", Title: "Old", Count: 3, Archived: true},
++		{ShortName: "Emo", Title: "Custom emoji", Count: 40, Emojis: true},
++	}}, nil
++}
++func (a *pickerRecordingAPI) MessagesGetStickerSet(ctx context.Context, req *tg.MessagesGetStickerSetRequest) (tg.MessagesStickerSetClass, error) {
++	return &tg.MessagesStickerSetNotModified{}, nil
++}
++func (a *pickerRecordingAPI) MessagesGetSavedGifs(ctx context.Context, hash int64) (tg.MessagesSavedGifsClass, error) {
++	a.saved++
++	return &tg.MessagesSavedGifs{Gifs: []tg.DocumentClass{pickerGif(10), pickerGif(11)}}, nil
++}
++func (a *pickerRecordingAPI) ContactsResolveUsername(ctx context.Context, req *tg.ContactsResolveUsernameRequest) (*tg.ContactsResolvedPeer, error) {
++	a.resolved++
++	return &tg.ContactsResolvedPeer{Users: []tg.UserClass{&tg.User{ID: 140267078, AccessHash: 77, Bot: true, Username: req.Username}}}, nil
++}
++func (a *pickerRecordingAPI) MessagesGetInlineBotResults(ctx context.Context, req *tg.MessagesGetInlineBotResultsRequest) (*tg.MessagesBotResults, error) {
++	a.inline = append(a.inline, req)
++	return &tg.MessagesBotResults{NextOffset: "24", Results: []tg.BotInlineResultClass{
++		&tg.BotInlineMediaResult{ID: "a", Type: "gif", Document: pickerGif(20)},
++		&tg.BotInlineResult{ID: "b", Type: "article"},
++	}}, nil
++}
++
++func TestWizardStickerListsKeepOwnStickersAndInstalledPacks(t *testing.T) {
++	recent, faved, packs, err := wizardStickerLists(context.Background(), &pickerRecordingAPI{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(recent) != 1 || recent[0].ID != 1 || len(faved) != 1 || faved[0].ID != 2 {
++		t.Fatalf("recent=%v faved=%v", recent, faved)
++	}
++	if len(packs) != 1 || packs[0].ShortName != "Cats" || packs[0].Count != 12 {
++		t.Fatalf("archived/emoji packs must be hidden: %+v", packs)
++	}
++	item := wizardDescribe(recent[0], "sticker")
++	if item.ID != "1" || item.Emoji != "😀" || item.Pack != "Cats" || item.W != 512 || item.Mime != "image/webp" {
++		t.Fatalf("item %+v", item)
++	}
++}
++
++func TestWizardGifListSavedThenInlineSearch(t *testing.T) {
++	wizardDocs.gif = nil
++	api := &pickerRecordingAPI{}
++	saved, next, err := wizardGifList(context.Background(), api, "  ", "")
++	if err != nil || len(saved) != 2 || next != "" || api.saved != 1 || len(api.inline) != 0 {
++		t.Fatalf("saved=%d next=%q err=%v", len(saved), next, err)
++	}
++	found, next, err := wizardGifList(context.Background(), api, "cat", "")
++	if err != nil || len(found) != 1 || found[0].ID != 20 || next != "24" {
++		t.Fatalf("found=%v next=%q err=%v", found, next, err)
++	}
++	req := api.inline[0]
++	if bot, ok := req.Bot.(*tg.InputUser); !ok || bot.UserID != 140267078 || bot.AccessHash != 77 {
++		t.Fatalf("bot %+v", req.Bot)
++	}
++	if _, ok := req.Peer.(*tg.InputPeerSelf); !ok || req.Query != "cat" {
++		t.Fatal("inline query must be a read in Saved Messages")
++	}
++	if _, _, err := wizardGifList(context.Background(), api, "dog", "24"); err != nil || api.resolved != 1 || api.inline[1].Offset != "24" {
++		t.Fatal("bot is resolved once and the offset pages")
++	}
++	item := wizardDescribe(found[0], "gif")
++	if item.Duration != 2500 || item.W != 320 || item.Kind != "gif" {
++		t.Fatalf("gif item %+v", item)
++	}
++}
++
++func TestWizardThumbDocDropsOutlines(t *testing.T) {
++	doc := &tg.Document{ID: 5, Thumbs: []tg.PhotoSizeClass{&tg.PhotoPathSize{Type: "j"}, &tg.PhotoStrippedSize{Type: "i"}}}
++	if wizardThumbDoc(doc) != nil {
++		t.Fatal("no downloadable preview")
++	}
++	doc.Thumbs = append(doc.Thumbs, &tg.PhotoSize{Type: "m", W: 128, H: 128, Size: 4000})
++	got := wizardThumbDoc(doc)
++	if got == nil || len(got.Thumbs) != 1 || len(doc.Thumbs) != 3 {
++		t.Fatal("keeps the real size without changing the cached document")
++	}
++}

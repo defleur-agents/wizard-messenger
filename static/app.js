@@ -108,8 +108,46 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = logic;
   if (typeof document === 'undefined') return;
 
+  // Opened on Messenger's raw app port (https://<box>:9245/) instead of its Wizard path (/messenger/ on the Wizard
+  // origin): a stale launcher address, a bookmark, or a Wizard window framing the raw port. There the session cookie
+  // (Path=/messenger/) never comes back and a trusted Wizard refuses every owner call (trusted_gateway_required),
+  // so the page could only ever show "Couldn't reach Messenger". Go to the same page on the Wizard origin instead.
+  // This runs before anything else: the raw port does not serve the shell's /wizard-os-home/ client.
+  // Only ever to one of this box's own Wizard origins (the server lists them in meta messenger-gateway), only on the
+  // same host name, at most once a minute per tab (sessionStorage), and never to the address already open.
+  const GATEWAY_FLAG = 'messenger-gateway-redirect';
+  function gatewayTarget(refused = false) {
+    let cfg; try { cfg = JSON.parse(document.querySelector('meta[name="messenger-gateway"]')?.content || 'null'); } catch { return null; }
+    const path = cfg?.path, origins = Array.isArray(cfg?.origins) ? cfg.origins : [];
+    if (typeof path !== 'string' || !/^\/(?:[A-Za-z0-9_-]+\/)+$/.test(path)) return null;   // served at / : nothing to move to
+    let framed = false; try { framed = window.top !== window; } catch { framed = true; }
+    const own = origins.filter(o => { try { const u = new URL(o); return u.origin === o && u.protocol === 'https:' && u.hostname === location.hostname; } catch { return false; } });
+    const onPath = location.pathname === path || location.pathname.startsWith(path);
+    const originOf = s => { try { return new URL(s).origin; } catch { return ''; } };
+    const parent = framed ? (location.ancestorOrigins?.[0] || originOf(document.referrer)) : originOf(document.referrer);
+    let origin = own.includes(parent) ? parent : '';
+    if (!origin && (refused || !onPath) && !framed) origin = own[0] || '';   // no referrer: the box's first Wizard origin
+    if (!origin || (origin === location.origin && onPath)) return null;
+    // A Wizard window framing this page from another origin, a page off the Wizard path, or an owner refusal.
+    if (!(refused || !onPath || (framed && origin !== location.origin))) return null;
+    const target = new URL(path, origin);
+    if (location.hash && !location.hash.startsWith('#ticket=')) target.hash = location.hash;
+    return target.href;
+  }
+  function toGateway(refused = false) {
+    if (location.hash.startsWith('#ticket=')) return false;   // a one-use launch ticket is never carried across
+    const target = gatewayTarget(refused); if (!target) return false;
+    try {
+      const last = +sessionStorage.getItem(GATEWAY_FLAG) || 0;
+      if (Date.now() - last < 60000) return false;          // tried a minute ago and came back here: show the card
+      sessionStorage.setItem(GATEWAY_FLAG, String(Date.now()));
+    } catch { return false; }                               // no storage, no loop guard: never redirect
+    const note = document.getElementById('gate-description'); if (note) note.textContent = 'Opening Messenger in Wizard…';
+    location.replace(target); return true;
+  }
+  if (toGateway()) return;
   if (!window.WizardApp) throw new Error('Messenger requires the shared WizardApp client');
-  window.WizardApp.ready({name: 'messenger', version: '0.2.0-unified.15.13'});
+  window.WizardApp.ready({name: 'messenger', version: '0.2.0-unified.16.22'});
 
   const $ = id => document.getElementById(id);
   const state = {
@@ -137,7 +175,7 @@
     if (!state.records.has(group)) {
       let saved = {};
       try { saved = JSON.parse(localStorage.getItem(storagePrefix() + group) || '{}'); } catch { /* A draft failure never permits an untracked send. */ }
-      const record = {draft: typeof saved?.draft === 'string' ? saved.draft : '', attempts: Array.isArray(saved?.attempts) ? saved.attempts.filter(a => a && (typeof a.text === 'string' || a.message_ids?.length) && /^[a-zA-Z0-9_-]{16,128}$/.test(a.request_id)) : [], invite_sent: saved?.invite_sent === true, seen: saved?.seen || null, muted: saved?.muted === true, low_priority: saved?.low_priority === true};
+      const record = {draft: typeof saved?.draft === 'string' ? saved.draft : '', attempts: Array.isArray(saved?.attempts) ? saved.attempts.filter(a => a && (typeof a.text === 'string' || a.message_ids?.length) && /^[a-zA-Z0-9_-]{16,128}$/.test(a.request_id)) : [], invite_sent: saved?.invite_sent === true, seen: saved?.seen || null, muted: saved?.muted === true, low_priority: saved?.low_priority === true, medium_priority: saved?.medium_priority === true && saved?.low_priority !== true};
       for (const attempt of record.attempts) if (attempt.state === 'sending') attempt.state = 'checking';
       state.records.set(group, record);
       syncUpdateHold();
@@ -427,18 +465,19 @@
   }
   function renderList() {
     if (state.mode !== 'ready') return;
-    const signature = JSON.stringify([state.group, state.listLoaded, state.pendingInvite, state.contacts, state.invites, state.dms, [...state.cache].map(([id,c]) => [id,c.messages.at(-1)]), [...state.records].map(([id,r]) => [id,r.seen,r.invite_sent,r.muted,r.low_priority])]);
+    const signature = JSON.stringify([state.group, state.listLoaded, state.pendingInvite, state.contacts, state.invites, state.dms, [...state.cache].map(([id,c]) => [id,c.messages.at(-1)]), [...state.records].map(([id,r]) => [id,r.seen,r.invite_sent,r.muted,r.low_priority,r.medium_priority])]);
     if (signature === state.listSignature) return; state.listSignature = signature;
     // Adapter rows only: native history, invite and send handling stay in this engine.
     const nativeRows = [...state.invites, ...state.dms.filter(dm => !isIncoming(dm))].map(dm => {
       const record = readRecord(dm.group_id), last = cacheFor(dm.group_id).messages.at(-1), invite = isIncoming(dm);
       return {id: 'private:' + dm.group_id, native: true, invite, group_id: dm.group_id, display_name: peerName(dm),
-        identities: [{network: 'private', kind: 'person'}], muted: !!record.muted, low_priority: !!record.low_priority,
+        identities: [{network: 'private', kind: 'person'}], muted: !!record.muted, low_priority: !!record.low_priority, medium_priority: !!record.medium_priority,
         unread: invite || (last?.direction === 'received' && record.seen !== last.message_id) ? 1 : 0,
         last: {text: invite ? 'wants to chat' : last?.text || (record.invite_sent ? 'Invite sent' : 'No messages yet'),
           timestamp: stamp(last?.created_at), outgoing: last?.direction === 'sent'},
         setMuted: () => { record.muted = !record.muted; persist(dm.group_id); state.listSignature = ''; renderList(); },
-        setLowPriority: v => { record.low_priority = !!v; persist(dm.group_id); state.listSignature = ''; renderList(); }};
+        setLowPriority: v => { record.low_priority = !!v; if (v) record.medium_priority = false; persist(dm.group_id); state.listSignature = ''; renderList(); },
+        setMediumPriority: v => { record.medium_priority = !!v; if (v) record.low_priority = false; persist(dm.group_id); state.listSignature = ''; renderList(); }};
     });
     window.MessengerUnified?.setNativeRows?.(nativeRows);
     const list = $('conversation-list'), top = list.scrollTop, fragment = document.createDocumentFragment();
@@ -609,8 +648,8 @@
     U.actionMenu(node, 'Message', [
       ...(busy ? [] : [{label: 'Reply', icon: 'reply', run: () => startReply(m)}]),
       {label: 'Copy', icon: 'copy', run: () => copy(m.text)},
-      ...(opts.selectText && m.text ? [{label: 'Select text', icon: 'copy', run: opts.selectText}] : []),
-      {label: 'Forward to Wizard', icon: 'reply', run: () => state.selection?.forward([m.message_id])},
+      ...(opts.selectText && m.text ? [{label: 'Select text', icon: 'textsel', run: opts.selectText}] : []),
+      {label: 'Forward to Wizard', icon: 'forward', run: () => state.selection?.forward([m.message_id])},
       ...(outgoing && !busy ? [{label: 'Edit', icon: 'compose', run: () => startEdit(m)}] : []),
       ...(opts.select ? [{label: 'Select', icon: 'check', run: opts.select}] : []),
       ...(outgoing && !busy ? [{label: 'Delete for everyone', icon: 'trash', danger: true, run: () => deleteForEveryone(group, m)}] : [])
@@ -1148,6 +1187,7 @@
             // A restarting server or a refused burst is no answer: keep what this device knew and retry the boot.
             if (response.status >= 500 && response.status !== 501) throw new APIError('server_restarting', response.status);
             let answer = null; try { answer = await response.json(); } catch { throw new APIError('server_restarting', response.status); }
+            if (response.status === 403 && answer?.error?.code === 'trusted_gateway_required' && toGateway(true)) return;
             trustedWizard = response.ok && answer?.result?.enabled === true;
             try { if (trustedWizard) localStorage.setItem(TRUSTED_KEY, '1'); else localStorage.removeItem(TRUSTED_KEY); } catch { /* storage blocked */ }
           } catch (error) { if (error.name === 'AbortError') throw error; if (!transient(error)) trustedWizard = false; else throw error; }

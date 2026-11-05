@@ -101,9 +101,9 @@ class ConnectorInbox(UnifiedInbox):
                 pass
         return status
 
-    def provision(self, path, method='GET', body=None):
+    def provision(self, path, method='GET', body=None, query=None, timeout=15):
         # Preserve the legacy Telegram routes, but all writes use the sender.
-        return self.connectors.request('telegram', path, method, body)
+        return self.connectors.request('telegram', path, method, body, query=query, timeout=timeout)
 
     def room_meta(self, room, data):
         """Room kind/label/member names, cached; full state is fetched only for new rooms or state changes."""
@@ -403,6 +403,7 @@ class ConnectorInbox(UnifiedInbox):
             self.store.put('sync_error', '')
             self.rescan_dropped()
             self.refresh_pictures()
+            self.repair_rows()
             return {'state': 'ready'}
         except EngineError as error:
             self.store.put('sync_error', error.message)

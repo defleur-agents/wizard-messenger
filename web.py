@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import hmac
+import html
 from http.cookies import SimpleCookie
 import json
 import mimetypes
@@ -117,6 +118,13 @@ class BrowserAuth:
 
 # Machine keys are untrusted agent capabilities, never owner browser authority.
 from drafts import Drafts
+
+def gateway_origins(origins):
+    """The box's Wizard origins (MESSENGER_ALLOWED_ORIGINS) in a form safe for a CSP source list and app.js.
+    A plain function over the server's `origins`: the owner Unix hop (owner_unix.OwnerUnixServer) copies the
+    ViewServer's attributes, not its methods, and serves this same page."""
+    return sorted(o for o in origins or () if re.fullmatch(r'https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?', o))
+
 
 class ViewServer(MessengerServer):
     def __init__(self,address,engine,token,origins):
@@ -348,7 +356,7 @@ class ViewHandler(Handler):
         from wizard_agents import LEVELS as WIZARD_LEVELS, LABELS as WIZARD_LABELS
         return {'wizard_agents':self.service.wizard_agents.list(),
                 'wizard_levels':[{'id':l,'label':WIZARD_LABELS[l],'recommended':l==RECOMMENDED} for l in WIZARD_LEVELS],
-                'gateway_connected':bool(self.service.gateway_grant.current()),
+                'gateway_connected':bool(self.service.gateway_grant.current() or getattr(self.service, 'gateway_key', None) and self.service.gateway_key.current()),
                 'agents':keys.list(),'app_key':{'id':'app-key','name':'Wizard app key','level':app_level,'label':LABELS[app_level]},
                 'levels':[{'id':l,'label':LABELS[l],'recommended':l==RECOMMENDED} for l in LEVELS],
                 'log':self.service.agent_access.recent(30)}
@@ -369,10 +377,15 @@ class ViewHandler(Handler):
                 raise EngineError('not_configured','Unified inbox is not enabled',503)
             import inbox_feed
             if path=='/api/inbox' and method=='GET':
-                return 200,inbox_feed.items(unified.store)
+                return 200,inbox_feed.feed(unified)
+            if path=='/api/inbox/wait' and method=='GET':
+                # Long poll (the shell's change signal): the socket must outlive the hold.
+                self.connection.settimeout(60)
+                q=parse_qs(urlsplit(self.path).query)
+                return 200,inbox_feed.wait(unified,(q.get('v') or [''])[0],(q.get('hold') or [inbox_feed.HOLD_MAX])[0])
             if path=='/api/inbox/act' and method=='POST':
                 return 200,inbox_feed.act(unified,self._body())
-            raise EngineError('method_not_allowed','Use GET /api/inbox or POST /api/inbox/act',405)
+            raise EngineError('method_not_allowed','Use GET /api/inbox, GET /api/inbox/wait or POST /api/inbox/act',405)
         except EngineError as e:
             self.close_connection=True
             return e.status,{'ok':False,'error':e.message,'code':e.code}
@@ -384,7 +397,7 @@ class ViewHandler(Handler):
             from remote_authority import remote_required_gate
             remote_required_gate(method, path)
         self._agent_gate(method,path)
-        if path in ('/api/inbox','/api/inbox/act'):
+        if path in ('/api/inbox','/api/inbox/wait','/api/inbox/act'):
             return self._inbox(method,path)
         if self.service.trusted_owner.enabled and self.headers.get('Authorization') and path in ('/api/view/session','/api/view/unlock','/api/view/trusted-owner'):
             raise EngineError('owner_only','Owner browser access is required',403)
@@ -393,6 +406,28 @@ class ViewHandler(Handler):
         if path=='/api/view/trusted-owner' and method=='GET':
             self._trusted_owner()
             return 200,{'ok':True,'result':{'enabled':True,'remembered':self.service.trusted_owner.path.exists()}}
+        if path == '/api/view/voice-original' or path.startswith('/api/view/voice-original/'):
+            # Not an agent tool or bearer capability. Keep the normal owner session, proof and CSRF boundary.
+            if self.headers.get('Authorization'):
+                raise EngineError('owner_only', 'Recording recovery is owner-only', 403)
+            self._authorize()
+            data_root = getattr(self.service.engine, 'data', None)
+            if not data_root:
+                raise EngineError('not_configured', 'Recording archive unavailable', 503)
+            import voice_archive
+            root = Path(data_root) / 'voice-originals'
+            if path == '/api/view/voice-original' and method == 'PUT':
+                query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if len(urlsplit(self.path).query) > 2048 or any(len(v) != 1 for v in query.values()):
+                    raise EngineError('invalid_input', 'Invalid recording metadata', 400)
+                metadata = {k: v[0] for k, v in query.items()}
+                result = voice_archive.archive(root, self._raw_body(), metadata)
+                return 200, {'ok': True, 'result': result}
+            if method == 'GET' and path.startswith('/api/view/voice-original/'):
+                payload = voice_archive.readback(root, path[len('/api/view/voice-original/'):])
+                self._headers(200, payload, 'application/octet-stream')
+                return None
+            raise EngineError('not_found', 'No such recording route', 404)
         if path.startswith('/api/view/push'):
             # Bearers (including Full access) never possess notification authority.
             if self.headers.get('Authorization'):
@@ -620,7 +655,16 @@ class ViewHandler(Handler):
             body=source.read_bytes()
             mime=mimetypes.guess_type(source.name)[0] or 'application/octet-stream'
             if mime.startswith('text/') or mime in ['application/javascript','application/json']: mime+='; charset=utf-8'
-            csp="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'"
+            ancestors="'self'"
+            if allowed[path]=='index.html':
+                # Where this Messenger lives on the box's Wizard origins (app.js gatewayTarget): a page opened on the
+                # raw app port moves itself there instead of a dead "Couldn't reach Messenger" card. Those origins
+                # may frame the page, so a Wizard window still pointing at the raw port runs that redirect too.
+                origins=gateway_origins(getattr(self.service,'origins',()))
+                gateway=html.escape(json.dumps({'path':self.service.public_path,'origins':origins},separators=(',',':')),quote=True)
+                body=body.replace(b'<meta name="referrer"',('<meta name="messenger-gateway" content="'+gateway+'">\n  <meta name="referrer"').encode(),1)
+                ancestors=' '.join(["'self'",*origins])
+            csp="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors "+ancestors
             self._headers(200,body,mime,csp)
         except EngineError as e: self._reply(e.status,{'ok':False,'error':{'code':e.code,'message':e.message}})
         except (BrokenPipeError,ConnectionResetError): pass

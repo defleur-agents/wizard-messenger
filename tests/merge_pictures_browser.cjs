@@ -28,7 +28,8 @@ const ident = (id, net, kind = 'person') => ({id: id + '-' + net, network: net, 
     const ctx = await browser.newContext({viewport, deviceScaleFactor: 2});
     // Desktop split (Messenger 900px and wider): no Back button beside the list; Back (Escape) clears the open chat.
     const closeChat = async () => (await page.evaluate(() => document.documentElement.hasAttribute('data-split'))) ? page.keyboard.press('Escape') : page.getByRole('button', {name: 'Back', exact: true}).click();
-    await ctx.addInitScript(() => { const noop = () => {}; window.WizardApp = {ready: noop, update: {hold: () => ({release: noop})}, back: {register: noop}, on: noop, nav: {}, toast: noop, badge: {set: noop}}; });
+    await ctx.addInitScript(() => { try { localStorage.setItem('messenger.previews', '1'); } catch {} }); // previews are opt-in since 15.11; this test reads them
+await ctx.addInitScript(() => { const noop = () => {}; window.WizardApp = {ready: noop, update: {hold: () => ({release: noop})}, back: {register: noop}, on: noop, nav: {}, toast: noop, badge: {set: noop}}; });
     const page = await ctx.newPage(), errors = [];
     page.on('pageerror', e => errors.push(e.message));
     const ownKey = '11'.repeat(32);
@@ -90,7 +91,9 @@ const ident = (id, net, kind = 'person') => ({id: id + '-' + net, network: net, 
     assert.equal(await page.locator('.u-person', {hasText: 'Family'}).locator('.u-net').count(), 1);
     assert.match(await page.locator('.u-person', {hasText: 'Replied to your story'}).textContent(), /Ana Souza/);
     assert.equal(await page.locator('.u-person', {hasText: 'instagram.com'}).count(), 0, 'no raw links in previews');
-    assert.equal(await page.locator('.u-chip', {hasText: 'Merged'}).count(), 1, 'Merged filter appears when a chat is merged');
+    await page.locator('#u-filters .u-filter-btn').click();
+    assert.equal(await page.locator('.u-filter-menu').getByRole('menuitemradio', {name: 'Merged', exact: true}).count(), 1, 'Merged filter appears when a chat is merged');
+    await page.keyboard.press('Escape'); await page.locator('.u-filter-menu').waitFor({state: 'detached'});
     await page.locator('.u-person', {hasText: 'Ana from Contacts'}).waitFor();
     await page.locator('.u-person', {hasText: 'Bo Chen'}).click({button: 'right'});
     await page.getByRole('menuitem', {name: 'Add to Contacts'}).click();

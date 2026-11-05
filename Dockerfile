@@ -3,23 +3,28 @@ ARG MESSENGER_RUNTIME_BASE=debian:bookworm-slim
 FROM ${MDK_BUILD_IMAGE} AS mdk
 USER root
 WORKDIR /build/mdk
-ENV CARGO_BUILD_JOBS=1 CARGO_HOME=/build/cache CARGO_TARGET_DIR=/build/target CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_INCREMENTAL=false
-# A received, hash-audited prebuilt binary image may be supplied for packaging.
-# The default path always builds the exact upstream source and Cargo.lock.
+ARG CARGO_JOBS=1
+ENV CARGO_BUILD_JOBS=${CARGO_JOBS} CARGO_HOME=/build/cache CARGO_TARGET_DIR=/build/target CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_INCREMENTAL=false
+COPY engine/patches/0001-rustls-0.23.46.patch engine/patches/0002-relay-plane-drop.patch /engine-patches/
+# The default path builds the exact upstream source with the tracked security overlay.
+# Prebuilt wn/wnd carriers are refused until their rustls 0.23.46 provenance is audited.
 RUN --mount=type=cache,target=/build/cache --mount=type=cache,target=/build/target \
     mkdir -p /out && \
-    if [ -x /usr/local/bin/wn ] && [ -x /usr/local/bin/wnd ]; then \
-      cp /usr/local/bin/wn /usr/local/bin/wnd /out/; \
-    else \
-      apt-get update && apt-get install -y --no-install-recommends git pkg-config libssl-dev ca-certificates && \
-      git init . && git remote add origin https://github.com/marmot-protocol/mdk.git && \
-      git fetch --depth=1 origin 122bd90ffac60bb6311346e228d0f609a18521ee && \
-      git checkout --detach FETCH_HEAD && \
-      test "$(git rev-parse HEAD)" = 122bd90ffac60bb6311346e228d0f609a18521ee && \
-      printf '%s\n' 'c245642970ffd60b0a8c5e9264a8b8d2695ad8f2c08c290a42a3d1ef2b47604b  Cargo.lock' | sha256sum -c - && \
-      cargo build --locked -p wn-cli --bins -j1 && \
-      cp /build/target/debug/wn /build/target/debug/wnd /out/; \
-    fi
+    if [ -e /usr/local/bin/wn ] || [ -e /usr/local/bin/wnd ]; then \
+      echo 'unproven prebuilt wn/wnd carrier refused; use the source-build path with the rustls security overlay' >&2; exit 1; \
+    fi && \
+    apt-get update && apt-get install -y --no-install-recommends git pkg-config libssl-dev ca-certificates && \
+    git init . && git remote add origin https://github.com/marmot-protocol/mdk.git && \
+    git fetch --depth=1 origin 122bd90ffac60bb6311346e228d0f609a18521ee && \
+    git checkout --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = 122bd90ffac60bb6311346e228d0f609a18521ee && \
+    printf '%s\n' 'c245642970ffd60b0a8c5e9264a8b8d2695ad8f2c08c290a42a3d1ef2b47604b  Cargo.lock' | sha256sum -c - && \
+    git apply --check /engine-patches/0001-rustls-0.23.46.patch && \
+    git apply --whitespace=error /engine-patches/0001-rustls-0.23.46.patch && \
+    printf '%s\n' 'dac950e433d49280ebb9f8c46cfe4432287e0812186115e077bf83fee953377a  Cargo.lock' | sha256sum -c - && \
+    git -c user.name=build -c user.email=build@localhost am /engine-patches/0002-relay-plane-drop.patch && \
+    cargo build --locked -p wn-cli --bins -j${CARGO_JOBS} && \
+    cp /build/target/debug/wn /build/target/debug/wnd /out/
 
 FROM ${MESSENGER_RUNTIME_BASE} AS runtime
 USER root
@@ -31,8 +36,8 @@ RUN if ! command -v gnome-keyring-daemon >/dev/null; then \
 COPY --from=mdk /out/wn /out/wnd /usr/local/bin/
 RUN test "$(wn --version)" = 'wn 0.12.0'
 COPY owner_unix.py /app/owner_unix.py
-COPY engine.py server.py web.py trusted_owner.py passkey.py messenger_addresses.py unified.py unified_setup.py telegram_application.py translation.py history_cursor.py permissions.py agent_keys.py agent_tools.py wizard_agents.py drafts.py inbox_feed.py remote_authority.py API-contract.json /app/
-RUN apt-get update && apt-get install -y --no-install-recommends python3-cryptography && rm -rf /var/lib/apt/lists/*
+COPY engine.py server.py web.py trusted_owner.py passkey.py messenger_addresses.py unified.py unified_setup.py telegram_application.py translation.py history_cursor.py permissions.py agent_keys.py agent_tools.py wizard_agents.py drafts.py voice_archive.py inbox_feed.py remote_authority.py API-contract.json /app/
+RUN apt-get update && apt-get install -y --no-install-recommends python3-cryptography opus-tools mkvtoolnix && rm -rf /var/lib/apt/lists/*
 COPY connector_setup.py connectors.py connector_inbox.py connector_web.py connector_sender.py browser_signin.py /app/
 COPY readiness/search.py readiness/__init__.py /app/readiness/
 COPY push_notifications /app/push_notifications
@@ -54,5 +59,5 @@ USER 1000:1000
 WORKDIR /app
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3)"
-LABEL org.opencontainers.image.title="Wizard Messenger" org.opencontainers.image.version="0.2.0-unified.15.12" org.opencontainers.image.licenses="MIT" org.wizardos.messenger.mdk-revision="122bd90ffac60bb6311346e228d0f609a18521ee"
+LABEL org.opencontainers.image.title="Wizard Messenger" org.opencontainers.image.version="0.2.0-unified.16.22" org.opencontainers.image.licenses="MIT" org.wizardos.messenger.mdk-revision="122bd90ffac60bb6311346e228d0f609a18521ee" org.wizardos.messenger.mdk-patches="rustls-0.23.46,relay-plane-drop" org.opencontainers.image.source="https://github.com/humanitylabs-org/wizard-messenger"
 ENTRYPOINT ["/app/entrypoint.sh"]

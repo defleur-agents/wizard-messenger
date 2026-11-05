@@ -121,12 +121,63 @@ UPLOAD_MAX = 25 * 1024 * 1024
 MEDIA_CACHE_MAX = 300 * 1024 * 1024
 
 
+def webm_to_ogg(data):
+    """WebM Opus voice note (Safari, the Mac app) -> Ogg Opus, packet for packet, with mkvextract. Tolerates the
+    unknown sizes and cut-off tails Safari's recorder writes. Works in the /tmp tmpfs only."""
+    import subprocess, tempfile
+    with tempfile.TemporaryDirectory(prefix='voice-') as d:
+        src, out = os.path.join(d, 'in.webm'), os.path.join(d, 'out.ogg')
+        with open(src, 'wb') as f:
+            f.write(data)
+        try:
+            subprocess.run(['mkvextract', src, 'tracks', '0:' + out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=120, check=False)
+            with open(out, 'rb') as f:
+                ogg = f.read()
+        except FileNotFoundError:
+            fail('media_unsupported', 'This Messenger cannot prepare voice notes yet', 409)
+        except (subprocess.SubprocessError, OSError):
+            ogg = b''
+    if ogg[:4] != b'OggS' or b'OpusHead' not in ogg[:200]:
+        fail('invalid_upload', 'That voice note could not be read. Record it again.', 415)
+    return ogg
+
+
+def ogg_ms(data):
+    """Playable length of an Ogg Opus file in ms (last page granule minus pre-skip), or None."""
+    at = data.rfind(b'OggS')
+    head = data.find(b'OpusHead')
+    if at < 0 or head < 0 or len(data) < at + 14 or len(data) < head + 12:
+        return None
+    granule = int.from_bytes(data[at + 6:at + 14], 'little')
+    pre = int.from_bytes(data[head + 10:head + 12], 'little')
+    if granule >= 2 ** 62 or granule <= pre:
+        return None
+    return (granule - pre) // 48
+
+
+def wav_to_opus(data):
+    """PCM WAV voice note -> Ogg Opus (32 kbit/s speech, like Telegram's own) with opusenc. Pipes only."""
+    import subprocess
+    try:
+        out = subprocess.run(['opusenc', '--quiet', '--speech', '--bitrate', '32', '-', '-'], input=data,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120, check=True).stdout
+    except FileNotFoundError:
+        fail('media_unsupported', 'This Messenger cannot prepare voice notes yet', 409)
+    except (subprocess.SubprocessError, OSError):
+        fail('invalid_upload', 'That voice note could not be read. Record it again.', 415)
+    if out[:4] != b'OggS':
+        fail('invalid_upload', 'That voice note could not be read. Record it again.', 415)
+    return out
+
+
 def sniff(data):
     """Magic-byte type check for uploads; the client's Content-Type is never trusted."""
     if data[:3] == b'\xff\xd8\xff': return 'image/jpeg'
     if data[:8] == b'\x89PNG\r\n\x1a\n': return 'image/png'
     if data[:6] in (b'GIF87a', b'GIF89a'): return 'image/gif'
     if data[:4] == b'RIFF' and data[8:12] == b'WEBP': return 'image/webp'
+    if data[:4] == b'RIFF' and data[8:12] == b'WAVE': return 'audio/wav'
     if data[:4] == b'OggS': return 'audio/ogg'
     if data[:4] == b'\x1a\x45\xdf\xa3': return 'audio/webm'
     if data[4:8] == b'ftyp': return 'audio/mp4' if data[8:11] in (b'M4A', b'mp4', b'iso') and b'M4A' in data[8:32] else 'video/mp4'
@@ -167,6 +218,9 @@ MIGRATIONS = [
     ('person', 'name_locked', 'INTEGER NOT NULL DEFAULT 0'),
     # 1 = the owner moved this chat to Low priority: it leaves the Inbox, unread counts and notifications.
     ('person', 'low_priority', 'INTEGER NOT NULL DEFAULT 0'),
+    # 1 = Medium priority: stays in the Inbox but never pings (no push, badge, Unread count or Wizard inbox feed).
+    # Medium and Low are exclusive; setting one clears the other.
+    ('person', 'medium_priority', 'INTEGER NOT NULL DEFAULT 0'),
 ]
 
 # Matches the bridges' backfill.unread_hours_threshold: older history is read.
@@ -482,6 +536,14 @@ class PeopleStore:
                 p['last'] = {'text': '' if r['deleted'] else r['original'][:140], 'outgoing': bool(r['outgoing']), 'sender': OWN_SENDER if r['outgoing'] else r['sender'], 'timestamp': r['timestamp']}
                 if r['msgtype'] != 'm.text' or r['deleted'] or media.get('voice'):
                     p['last'].update(msgtype=r['msgtype'], deleted=bool(r['deleted']), voice=bool(media.get('voice')))
+                    if media.get('gif') or (r['msgtype'] == 'm.image' and media.get('mime') == 'image/gif'):
+                        p['last']['gif'] = True
+                    if media.get('sticker'):
+                        p['last']['sticker'] = True
+                elif not r['deleted']:
+                    gone = unavailable_media(r['original'], r['timestamp'])
+                    if gone:
+                        p['last'].update(text=gone[1][:140], unavailable=gone[0])
                 p['unread'] = unread.get(pid, 0)
                 p['last_read_ts'] = max(i['last_read_ts'] for i in ident)
                 p['peer_read_ts'] = max(i['peer_read_ts'] for i in ident)
@@ -559,7 +621,7 @@ class PeopleStore:
     def update(self, person_id, payload):
         self.person(person_id)
         with self.db() as db:
-            for key in ('display_name', 'language', 'preferred_identity', 'muted', 'low_priority'):
+            for key in ('display_name', 'language', 'preferred_identity', 'muted', 'low_priority', 'medium_priority'):
                 if key not in payload:
                     continue
                 value = payload[key]
@@ -567,10 +629,16 @@ class PeopleStore:
                     if value and not db.execute('SELECT 1 FROM identity WHERE id=? AND person_id=?', (value, person_id)).fetchone():
                         fail('invalid_identity', 'Choose an identity belonging to this person')
                     value = value or None
-                elif key in ('muted', 'low_priority'):
+                elif key in ('muted', 'low_priority', 'medium_priority'):
                     if not isinstance(value, bool):
                         fail('invalid_input', key + ' is true or false')
                     value = int(value)
+                    if key == 'low_priority' and value and payload.get('medium_priority') is True:
+                        fail('invalid_input', 'A chat is either Medium or Low priority')
+                    # One priority at a time: Medium clears Low and Low clears Medium.
+                    if value and key in ('low_priority', 'medium_priority'):
+                        other = 'medium_priority' if key == 'low_priority' else 'low_priority'
+                        db.execute('UPDATE person SET ' + other + '=0 WHERE id=?', (person_id,))
                 elif key == 'language':
                     if value not in ('', 'en', 'th', 'ja', 'zh', 'es', 'fr', 'de'):
                         fail('invalid_language', 'Choose a supported language')
@@ -678,8 +746,8 @@ class PeopleStore:
                              'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                              (event_id, identity['id'], sender, int(outgoing), original, translated, timestamp, seq, msgtype, media_json, reply_to, client_id, album, source_event))
             inserted = cur.rowcount == 1
-            # Muted and Low priority chats never notify (the person may have been merged since: join on the identity).
-            quiet = db.execute('SELECT 1 FROM identity i JOIN person p ON p.id=i.person_id WHERE i.id=? AND (p.muted=1 OR p.low_priority=1)',
+            # Muted, Medium and Low priority chats never notify (the person may have been merged since: join on the identity).
+            quiet = db.execute('SELECT 1 FROM identity i JOIN person p ON p.id=i.person_id WHERE i.id=? AND (p.muted=1 OR p.low_priority=1 OR p.medium_priority=1)',
                                (identity['id'],)).fetchone()
             if inserted and not outgoing and push_live and self.push_enabled and not quiet:
                 db.execute('INSERT OR IGNORE INTO push_intent(message,created) VALUES(?,?)',
@@ -800,10 +868,14 @@ class PeopleStore:
                     entry['mine'] = entry['mine'] or bool(r[2])
             quoted = {}
             if replies:
-                for r in db.execute('SELECT id,sender,outgoing,original,msgtype,deleted,media FROM message WHERE id IN (%s)' % ','.join('?' * len(replies)), replies):
+                for r in db.execute('SELECT id,sender,outgoing,original,msgtype,deleted,media,timestamp FROM message WHERE id IN (%s)' % ','.join('?' * len(replies)), replies):
                     media = json.loads(r['media']) if r['media'] else {}
-                    quoted[r['id']] = {'id': r['id'], 'sender': OWN_SENDER if r['outgoing'] else r['sender'], 'outgoing': bool(r['outgoing']), 'text': '' if r['deleted'] else r['original'][:200],
-                                       'msgtype': r['msgtype'], 'voice': bool(media.get('voice')), 'deleted': bool(r['deleted'])}
+                    text = '' if r['deleted'] else r['original'][:200]
+                    gone = r['msgtype'] == 'm.text' and unavailable_media(r['original'], r['timestamp'])
+                    if gone:
+                        text = unavailable_label(gone[0]) + (' · ' + gone[1][:160] if gone[1] else '')
+                    quoted[r['id']] = {'id': r['id'], 'sender': OWN_SENDER if r['outgoing'] else r['sender'], 'outgoing': bool(r['outgoing']), 'text': text,
+                                       'msgtype': r['msgtype'], 'voice': bool(media.get('voice')), 'gif': bool(media.get('gif')), 'deleted': bool(r['deleted'])}
         for r in rows:
             r['outgoing'] = bool(r['outgoing'])
             if r['outgoing']:
@@ -811,13 +883,22 @@ class PeopleStore:
                 r['sender'] = OWN_SENDER
             r['edited'], r['deleted'] = bool(r.get('edited')), bool(r.get('deleted'))
             media = json.loads(r['media']) if r.get('media') else None
+            if media and media.get('mentions'):
+                r['mentions'] = [{k: v for k, v in x.items() if k in ('text', 'me', 'net', 'acc')} for x in media['mentions'] if isinstance(x, dict)]
             if media and media.get('links'):
                 r['links'] = [{k: v for k, v in l.items() if k in ('url', 'title', 'desc', 'site', 'w', 'h')} | {'image': bool(l.get('mxc'))} for l in media['links']]
             if media and media.get('links') and not media.get('mxc'):
                 r['media'] = None
-            elif media:
-                r['media'] = {k: v for k, v in media.items() if k in ('mime', 'size', 'w', 'h', 'duration', 'filename', 'waveform', 'voice', 'album_index', 'album_count')}
+            elif media and (r.get('msgtype') != 'm.text' or media.get('mxc') or media.get('marmot')):
+                r['media'] = {k: v for k, v in media.items() if k in ('mime', 'size', 'w', 'h', 'duration', 'filename', 'waveform', 'voice', 'gif', 'sticker', 'album_index', 'album_count')}
                 r['media']['thumb'] = bool(media.get('thumb')) or (media.get('mime', '').startswith('image/'))
+            else:
+                r['media'] = None
+            if r.get('msgtype') == 'm.text' and not r['deleted']:
+                gone = unavailable_media(r.get('original'), r.get('timestamp'))
+                if gone:
+                    # Media the bridge could not deliver: the view shows a quiet placeholder plus any caption.
+                    r['unavailable'], r['original'], r['translated'] = gone[0], gone[1], None
             r['reactions'] = list(reacts.get(r['id'], {}).values())
             if r.get('reply_to'):
                 r['reply'] = quoted.get(r['reply_to'])
@@ -916,6 +997,10 @@ def message_parts(event):
     reply_to = (relates.get('m.in_reply_to') or {}).get('event_id')
     if event.get('type') == 'm.sticker':
         info = content.get('info') or {}
+        if str(info.get('mimetype', '')).startswith('video/') and content.get('url'):
+            # A Telegram video sticker (webm) plays like the bridge's animated stickers do.
+            return 'm.video', '', {k: v for k, v in {'mxc': content.get('url'), 'mime': info.get('mimetype'), 'w': info.get('w'), 'h': info.get('h'),
+                                   'size': info.get('size'), 'thumb': info.get('thumbnail_url') or None, 'sticker': True}.items() if v is not None}, reply_to
         return 'm.sticker', '', {'mxc': content.get('url'), 'mime': info.get('mimetype', 'image/webp'), 'w': info.get('w'), 'h': info.get('h'),
                                  'size': info.get('size'), 'thumb': (info.get('thumbnail_url') or None), 'alt': content.get('body', '')}, reply_to
     if event.get('type') != 'm.room.message':
@@ -949,10 +1034,113 @@ def message_parts(event):
             media['waveform'] = [int(100 * wave[int(i * step)] / top) for i in range(min(48, len(wave)))]
         if kind == 'm.image' and (previews := link_previews(content)):
             media.update(previews)
+        if kind == 'm.video':
+            # Bridged GIFs (WhatsApp/Telegram) and Telegram animated stickers arrive as short looping videos.
+            if info.get('fi.mau.bridged_sticker') or info.get('fi.mau.telegram.animated_sticker'):
+                media['sticker'] = True
+            elif info.get('fi.mau.gif') or info.get('fi.mau.telegram.gif') or (info.get('fi.mau.loop') and info.get('fi.mau.no_audio')):
+                media['gif'] = True
         if not media['mxc']:
             return 'm.text', '[' + MEDIA_LABELS[kind] + ']' + (' ' + caption if caption else ''), None, reply_to
-        return kind, caption, {k: v for k, v in media.items() if v not in (None, '')}, reply_to
+        return kind, caption, {k: v for k, v in media.items() if v is not None and v != '' and v is not False}, reply_to
     return None
+
+
+# Bridge lines that stand in for media the bridge could not deliver. WhatsApp only keeps old media on the
+# sender's phone for a while: once it is gone the bridge says so in a notice (and keeps any caption after a
+# blank line). They are not messages, so the view shows a quiet placeholder instead of the bridge's sentence.
+UNAVAILABLE = re.compile(r'\AFailed to bridge (photo|image|gif|voice message|video attachment|video|file attachment|file|sticker|'
+                         r'audio attachment|audio|media)\b[^\n]*(?:\n\n(.*))?\Z', re.S)
+UNAVAILABLE_KIND = {'photo': 'photo', 'image': 'photo', 'gif': 'gif', 'voice message': 'voice', 'video attachment': 'video', 'video': 'video',
+                    'file attachment': 'file', 'file': 'file', 'sticker': 'sticker', 'audio attachment': 'audio', 'audio': 'audio', 'media': 'media'}
+UNAVAILABLE_LABELS = {'photo': '📷 Photo', 'gif': 'GIF', 'voice': '🎤 Voice message', 'video': '🎬 Video', 'file': '📎 File',
+                      'sticker': 'Sticker', 'audio': '🎵 Audio', 'media': '📎 Media'}
+WAITING_PREFIX = 'Decrypting message from WhatsApp failed'
+# WhatsApp re-sends an undecryptable message within moments when the sender's phone is online; the bridge then edits
+# the notice into the real message. Past this age it is not coming: say so instead of "waiting" forever.
+WAITING_MAX_MS = 3600 * 1000
+
+
+def unavailable_media(original, stamp=None):
+    """('photo'|'video'|..., caption) for a bridge's "Failed to bridge ..." line, ('waiting', '') for a WhatsApp
+    message the bridge is still waiting to decrypt ('undecryptable' once it is older than WAITING_MAX_MS, when the
+    message time is given), else None."""
+    if not isinstance(original, str) or not original.startswith(('Failed to bridge ', WAITING_PREFIX)):
+        return None
+    if original.startswith(WAITING_PREFIX):
+        old = isinstance(stamp, (int, float)) and stamp > 0 and stamp < time.time() * 1000 - WAITING_MAX_MS
+        return ('undecryptable' if old else 'waiting'), ''
+    match = UNAVAILABLE.match(original)
+    if not match:
+        return None
+    return UNAVAILABLE_KIND[match.group(1)], (match.group(2) or '').strip()
+
+
+def unavailable_label(kind):
+    if kind == 'waiting':
+        return '⏳ Waiting for this message'
+    if kind == 'undecryptable':
+        return "🔒 Message couldn't be decrypted"
+    return UNAVAILABLE_LABELS.get(kind, '📎 Media') + ' not available'
+
+
+def media_label(msgtype, media):
+    """Short chat-list label for a media message (same words as snippet() in static/unified.js)."""
+    media = media if isinstance(media, dict) else {}
+    if media.get('voice'):
+        return '🎤 Voice message'
+    if media.get('sticker'):
+        return 'Sticker'
+    if media.get('gif') or (msgtype == 'm.image' and media.get('mime') == 'image/gif'):
+        return 'GIF'
+    return {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.audio': '🎵 Audio', 'm.file': '📎 File',
+            'm.sticker': 'Sticker', 'm.location': '📍 Location'}.get(msgtype)
+
+
+# Mentions arrive as Matrix pills in formatted_body; the plain body carries the bridge ghost's display name,
+# e.g. "+31 6 1234 5678 (WA)". Messenger swaps in the best name it knows and remembers where each one is.
+PILL = re.compile(r'<a\s+href="https://matrix\.to/#/([^"?]+)(?:\?[^"]*)?"\s*>(.*?)</a>', re.S | re.I)
+TAG = re.compile(r'<[^>]+>')
+
+
+def mention_pills(content):
+    """[(user_id, text shown in body)] for each user pill in an HTML message, in order."""
+    if not isinstance(content, dict):
+        return []
+    html_body = content.get('formatted_body')
+    if not isinstance(html_body, str) or '/#/' not in html_body:
+        return []
+    import html as _html
+    out = []
+    for target, label in PILL.findall(html_body):
+        user = unquote(target)
+        if not user.startswith('@') or ':' not in user:
+            continue  # room/event links are not mentions
+        text = _html.unescape(TAG.sub('', label)).strip()
+        if text:
+            out.append((user, text))
+    return out[:20]
+
+
+def substitute_mentions(body, pills, resolve):
+    """Replace each pill's text in `body` with "@<best name>". `resolve(user_id, text)` -> (name, extra dict).
+    Returns (body, [{'text': '@Name', ...extra}])."""
+    mentions, at, out = [], 0, []
+    for user, text in pills:
+        i = body.find(text, at)
+        if i < 0:
+            continue
+        start = i - 1 if i > 0 and body[i - 1] == '@' else i
+        name, extra = resolve(user, text)
+        shown = text if text.startswith('@') and not extra.get('me') else '@' + name
+        out.append(body[at:start])
+        out.append(shown)
+        at = i + len(text)
+        mentions.append(dict(extra, text=shown))
+    if not mentions:
+        return body, []
+    out.append(body[at:])
+    return ''.join(out), mentions
 
 
 class UnifiedInbox:
@@ -1087,10 +1275,10 @@ class UnifiedInbox:
         except (OSError, ValueError, KeyError):
             return False
 
-    def provision(self, path, method='GET', body=None):
+    def provision(self, path, method='GET', body=None, query=None, timeout=65):
         if not self.telegram_configured():
             fail('telegram_not_configured', 'Telegram not configured. Supply TELEGRAM_API_ID and TELEGRAM_API_HASH at installation.', 409)
-        return http(self.bridge, '/_matrix/provision/v3' + path + '?' + urlencode({'user_id': self.owner}), method, body, self.keys()['provisioning'], 65)
+        return http(self.bridge, '/_matrix/provision/v3' + path + '?' + urlencode({**(query or {}), 'user_id': self.owner}), method, body, self.keys()['provisioning'], timeout)
 
     # A Telegram login waits on the owner leaving the app to read a code, so the current
     # step lives here (shape only, never typed values) and the view resumes it on return.
@@ -1279,12 +1467,7 @@ class UnifiedInbox:
                     self.store.react(event['event_id'], relates.get('event_id', ''), sender, relates['key'][:32], outgoing)
             return
         if etype == 'm.room.message' and relates.get('rel_type') == 'm.replace':
-            new = content.get('m.new_content') or {}
-            if isinstance(new.get('body'), str) and new.get('msgtype') in ('m.text', 'm.notice', 'm.emote'):
-                with self.store.db() as db:
-                    ok = db.execute('SELECT 1 FROM message WHERE id=? AND identity_id=? AND deleted=0 AND (sender=? OR (outgoing=1 AND ?))', (relates.get('event_id'), identity['id'], meta.get('names', {}).get(sender) or sender, outgoing)).fetchone()
-                if ok:
-                    self.store.bump(relates.get('event_id'), ',original=?,translated=NULL,translation_error=NULL,edited=1', (new['body'],))
+            self.apply_edit(identity, meta, sender, outgoing, relates.get('event_id'), content.get('m.new_content'))
             return
         if sender == '@' + identity['network'] + 'bot:messenger.internal':
             # Bridge error notices are not chat lines: mark our newest recent outgoing message as failed.
@@ -1300,6 +1483,8 @@ class UnifiedInbox:
         if parts is None:
             return
         msgtype, body, media, reply_to = parts
+        if msgtype != 'm.location':
+            body, media = self.with_mentions(identity, meta, content, body, media)
         if content.get('org.wizard.gallery') is not None and msgtype == 'm.image':
             try:
                 self.store_gallery(event['event_id'], identity, meta.get('names', {}).get(sender) or sender, outgoing, content, event.get('origin_server_ts', 0), reply_to=reply_to)
@@ -1326,6 +1511,197 @@ class UnifiedInbox:
         self.warm_voice(event['event_id'], msgtype, outgoing, media, event.get('origin_server_ts', 0))
 
     WARM_DAYS = 3
+    EDIT_TEXT = ('m.text', 'm.notice', 'm.emote')
+    EDIT_MEDIA = ('m.image', 'm.video', 'm.audio', 'm.file')
+
+    def apply_edit(self, identity, meta, sender, outgoing, target, new):
+        """Apply an m.replace from the same sender. Text edits change the words. A media edit turns the row into
+        that media: WhatsApp messages that fail to decrypt first arrive as a "Decrypting message from WhatsApp
+        failed…" notice and the bridge later edits it into the real message, very often a photo or GIF."""
+        if not isinstance(new, dict) or not isinstance(target, str):
+            return False
+        names = meta.get('names') or {}
+        with self.store.db() as db:
+            row = db.execute('SELECT msgtype,media,original,sender,outgoing FROM message WHERE id=? AND identity_id=? AND deleted=0',
+                             (target, identity['id'])).fetchone()
+        if not row or not self.same_author(identity, target, row, sender, outgoing, names):
+            return False
+        kind = new.get('msgtype')
+        dump = lambda m: json.dumps(m, ensure_ascii=False) if m else None
+        # A bridge placeholder turning into the real message (or into "media expired") is not an owner-visible edit.
+        quiet = bool(unavailable_media(row['original'])) or (isinstance(new.get('body'), str) and bool(unavailable_media(new['body'])))
+        if kind in self.EDIT_MEDIA:
+            parts = message_parts({'type': 'm.room.message', 'content': new})
+            if parts and parts[2] and parts[2].get('mxc'):
+                msgtype, body, media, _ = parts
+                body, media = self.with_mentions(identity, meta, new, body, media)
+                old = json.loads(row['media']) if row['media'] else {}
+                edited = ',edited=1' if not quiet and row['msgtype'] == msgtype and old.get('mxc') == media.get('mxc') and body != row['original'] else ''
+                return self.store.bump(target, ',msgtype=?,media=?,original=?,translated=NULL,translation_error=NULL' + edited, (msgtype, dump(media), body))
+        if not isinstance(new.get('body'), str) or kind not in self.EDIT_TEXT:
+            return False
+        body = ('* ' if kind == 'm.emote' else '') + REPLY_FALLBACK.sub('', new['body'], count=1)
+        flag = '' if quiet else ',edited=1'
+        if row['msgtype'] == 'm.text' or unavailable_media(body):
+            body, media = self.with_mentions(identity, meta, new, body, link_previews(new) if kind != 'm.emote' else None)
+            return self.store.bump(target, ",msgtype='m.text',original=?,media=?,translated=NULL,translation_error=NULL" + flag, (body, dump(media)))
+        # A caption edit on a photo/video keeps the media.
+        old = json.loads(row['media']) if row['media'] else {}
+        old.pop('mentions', None)
+        body, media = self.with_mentions(identity, meta, new, body, old)
+        return self.store.bump(target, ',original=?,media=?,translated=NULL,translation_error=NULL' + flag, (body, dump(media)))
+
+    def same_author(self, identity, target, row, sender, outgoing, names):
+        """Only the author may edit a message. Rows store the sender's display name at the time, and bridges rename
+        ghosts later (WhatsApp's "Name (WA)" becomes "Name", contact names change), so a stored-name mismatch is
+        settled by the original event's sender mxid, never by a looser name match."""
+        if outgoing and row['outgoing']:
+            return True
+        if row['outgoing'] or not isinstance(sender, str) or not sender:
+            return False
+        if row['sender'] == sender:
+            return True
+        # Fast path: the stored name is this sender's current name and nobody else in the room wears it.
+        if row['sender'] == names.get(sender) and sum(1 for v in names.values() if v == row['sender']) == 1:
+            return True
+        try:
+            event = self.mx(self.room(identity['address']) + '/event/' + quote(target, safe=''))
+        except (EngineError, KeyError, TypeError):
+            return False
+        return isinstance(event, dict) and event.get('sender') == sender
+
+    # ---------- mentions ----------
+    def with_mentions(self, identity, meta, content, body, media):
+        """Swap bridge ghost names in @mentions for the best name Messenger knows; keep where they are."""
+        if not body or not isinstance(content, dict):
+            return body, media
+        try:
+            pills = mention_pills(content)
+            names = meta.get('names') or {}
+            listed = (content.get('m.mentions') or {}).get('user_ids') if isinstance(content.get('m.mentions'), dict) else None
+            seen = {u for u, _ in pills}
+            for user in listed if isinstance(listed, list) else []:
+                label = names.get(user) if isinstance(user, str) else None
+                if user not in seen and isinstance(label, str) and label and label in body:
+                    pills.append((user, label))
+            if not pills:
+                return body, media
+            pills.sort(key=lambda p: body.find(p[1]) if body.find(p[1]) >= 0 else len(body))
+            new_body, mentions = substitute_mentions(body, pills, lambda user, text: self.mention_name(identity, meta, user, text))
+        except Exception:
+            return body, media  # a malformed optional extension never stalls a room's sync
+        if not mentions:
+            return body, media
+        return new_body, dict(media or {}, mentions=mentions)
+
+    def own_display_name(self, network):
+        for key in ('own_names:' + network, None):
+            if key:
+                try:
+                    names = json.loads(self.store.get(key) or '[]')
+                except ValueError:
+                    names = []
+            else:
+                names = sorted(self.store.own_names())
+            good = [plain_name(network, n) for n in names if isinstance(n, str) and not weak_label(plain_name(network, n))]
+            if good:
+                return good[0]
+        return OWN_SENDER
+
+    def ghost_names(self):
+        """(network, account) -> the name of the owner's one-to-one chat with that account, when it is a real name."""
+        cached = getattr(self, '_ghost_names', None)
+        if cached and time.time() - cached[0] < 120:
+            return cached[1]
+        out = {}
+        with self.store.db() as db:
+            accounts = PeopleStore.room_accounts(db)
+            for room, name in db.execute("SELECT i.address,p.display_name FROM identity i JOIN person p ON p.id=i.person_id WHERE i.kind='person'"):
+                for acc in accounts.get(room, []):
+                    if not weak_label(name):
+                        out.setdefault((acc['network'], acc['value']), name)
+        self._ghost_names = (time.time(), out)
+        return out
+
+    def mention_name(self, identity, meta, user, text):
+        network = identity['network']
+        if user == self.owner or self.is_me(user):
+            return self.own_display_name(network), {'me': True}
+        names = meta.get('names') or {}
+        name = plain_name(network, names.get(user) if isinstance(names.get(user), str) and names.get(user) else text.lstrip('@'))
+        name = plain_name(network, name)
+        prefix = '@' + network + '_'
+        account = user[len(prefix):].split(':')[0] if user.startswith(prefix) else None
+        if weak_label(name) and account:
+            name = self.ghost_names().get((network, account)) or name
+        return (name or text).strip(), ({'net': network, 'acc': account} if account else {})
+
+    # ---------- one-time repairs of rows stored by older releases ----------
+    REPAIR_BATCH = 40
+
+    def repair_rows(self):
+        """Small batches per sync pass, each kind once (kv marker): never blocks live delivery."""
+        for name, fn in (('repair_waiting_v2', self.repair_waiting), ('repair_reparse_v1', self.repair_reparse)):
+            if self.store.get(name):
+                continue
+            try:
+                if fn():
+                    self.store.put(name, '1')
+            except Exception as error:  # retried on the next pass
+                print('row repair %s: %s' % (name, type(error).__name__), flush=True)
+
+    def _repair_candidates(self, where, args=()):
+        tried = self.__dict__.setdefault('_repair_tried', set())
+        with self.store.db() as db:
+            rows = [dict(r) for r in db.execute(
+                'SELECT m.id,m.msgtype,m.media,m.original,i.id AS identity_id,i.network,i.address,i.person_id FROM message m JOIN identity i ON i.id=m.identity_id '
+                "WHERE m.deleted=0 AND m.id LIKE '$%' AND i.network!='messenger' AND " + where, args)]
+        todo = [r for r in rows if r['id'] not in tried]
+        return todo[:self.REPAIR_BATCH], len(todo) <= self.REPAIR_BATCH, tried
+
+    def repair_waiting(self):
+        """Rows stuck on "Decrypting message from WhatsApp failed": apply the bridge's latest edit (often a photo)."""
+        rows, last, tried = self._repair_candidates('m.original LIKE ?', (WAITING_PREFIX + '%',))
+        for r in rows:
+            tried.add(r['id'])
+            path = '/_matrix/client/v1/rooms/%s/relations/%s/m.replace?limit=20' % (quote(r['address'], safe=''), quote(r['id'], safe=''))
+            chunk = http(self.matrix, path, 'GET', None, self.matrix_token(), 15).get('chunk') or []
+            edits = sorted((e for e in chunk if isinstance(e, dict) and isinstance((e.get('content') or {}).get('m.new_content'), dict)),
+                           key=lambda e: e.get('origin_server_ts', 0))
+            if not edits:
+                continue
+            ev = edits[-1]
+            meta = self.room_meta(r['address'], {})
+            identity = {'id': r['identity_id'], 'network': r['network'], 'address': r['address'], 'person_id': r['person_id']}
+            self.apply_edit(identity, meta, ev.get('sender', ''), self.is_me(ev.get('sender', '')), r['id'], ev['content']['m.new_content'])
+        return last
+
+    def repair_reparse(self):
+        """Re-read the original event of rows an older release stored without the GIF/sticker flag or with a
+        bridge ghost name (" (WA)") in place of a mention, and store them the way ingest does now."""
+        rows, last, tried = self._repair_candidates(
+            "m.edited=0 AND ((m.msgtype='m.video' AND m.media NOT LIKE '%\"gif\"%' AND m.media NOT LIKE '%\"sticker\"%') OR "
+            "(m.original LIKE '% (WA)%' OR m.original LIKE '% (Twitter)%' OR m.original LIKE '% (LinkedIn)%'))")
+        for r in rows:
+            tried.add(r['id'])
+            try:
+                event = self.mx(self.room(r['address']) + '/event/' + quote(r['id'], safe=''))
+            except EngineError:
+                continue
+            parts = message_parts(event)
+            if not parts or parts[0] != r['msgtype']:
+                continue
+            msgtype, body, media, _ = parts
+            if unavailable_media(body):
+                continue  # the row shows what the bridge's later edit said, not this placeholder
+            meta = self.room_meta(r['address'], {})
+            identity = {'id': r['identity_id'], 'network': r['network'], 'address': r['address'], 'person_id': r['person_id']}
+            if msgtype != 'm.location':
+                body, media = self.with_mentions(identity, meta, event.get('content') or {}, body, media)
+            new_media = json.dumps(media, ensure_ascii=False) if media else None
+            if (body, new_media) != (r['original'], r['media']):
+                self.store.bump(r['id'], ',original=?,media=?' + (',translated=NULL' if body != r['original'] else ''), (body, new_media))
+        return last
 
     def warm_voice(self, message_id, msgtype, outgoing, media, stamp):
         if msgtype != 'm.audio' or outgoing or not media or not media.get('mxc'):
@@ -1692,6 +2068,10 @@ class UnifiedInbox:
                 fail('upload_expired', 'Attach the photos again', 409)
             if any(u['kind'] != 'image' or u['mime'] not in ('image/jpeg', 'image/png', 'image/webp') for u in gallery):
                 fail('invalid_album', 'Albums contain still photos only')
+        if payload.get('pick') is not None:
+            if identity['network'] != 'telegram' or upload_ids is not None or payload.get('upload_id') or payload.get('text'):
+                fail('pick_unsupported', 'Stickers and GIFs from Telegram can be sent in Telegram chats', 409)
+            return self.send_pick(identity, payload.get('pick'), client_id, self.reply_target(identity, payload.get('reply_to')))
         upload = gallery[0] if gallery else self.uploads.get(payload.get('upload_id')) if payload.get('upload_id') else None
         if payload.get('upload_id') and (not upload or upload['person_id'] != person_id or upload['expires'] <= time.time()):
             fail('upload_expired', 'Attach the file again', 409)
@@ -1765,6 +2145,19 @@ class UnifiedInbox:
             self.drop_upload(payload.get('upload_id'))
         return {'state': 'sent', 'event_id': event, 'message': self.row(event)}
 
+    def send_pick(self, identity, key, client_id, reply_to):
+        kind, content = self.pick_content(key)
+        if reply_to:
+            content['m.relates_to'] = {'m.in_reply_to': {'event_id': reply_to}}
+        started = time.time()
+        result = self.mx(self.room(identity['address']) + '/send/' + kind + '/' + client_id, 'PUT', content)
+        self.timing('send', started)
+        event = result['event_id']
+        msgtype, caption, media, _ = message_parts({'type': kind, 'content': content})
+        self.store.add_message(event, identity, self.owner, True, '', int(time.time() * 1000),
+                               msgtype=msgtype, media=media, reply_to=reply_to, client_id=client_id)
+        return {'state': 'sent', 'event_id': event, 'message': self.row(event)}
+
     def album_rows(self, message_id):
         message = self.store.message(message_id)
         if not message.get('album'):
@@ -1822,6 +2215,14 @@ class UnifiedInbox:
         for key in ('w', 'h', 'duration'):
             if isinstance(meta.get(key), int) and 0 < meta[key] < 10 ** 8:
                 info[key] = meta[key]
+        real = upload.get('ms')
+        if upload['kind'] == 'voice' and real:
+            # Never send a clipped voice note (Miguel, 3 Nov 2026: a 2-minute note reached James as 7 seconds).
+            said = info.get('duration')
+            if said and said - real > 3000 and real < said * 0.9:
+                fail('voice_clipped', 'Only %d:%02d of %d:%02d was recorded, so it was not sent. Record again.'
+                     % (real // 60000, real // 1000 % 60, said // 60000, said // 1000 % 60), 422)
+            info['duration'] = real
         media = {'mxc': upload['mxc'], 'mime': upload['mime'], 'size': upload['size'], 'w': info.get('w'), 'h': info.get('h'), 'duration': info.get('duration')}
         if upload['kind'] == 'voice':
             wave = [int(x) for x in (meta.get('waveform') or []) if isinstance(x, (int, float))][:128]
@@ -1860,9 +2261,15 @@ class UnifiedInbox:
         else:
             if kind == 'voice' and mime == 'video/mp4':
                 mime = 'audio/mp4'  # Safari records voice into an mp4 container
-            ok = {'image': ('image/jpeg', 'image/png', 'image/gif', 'image/webp'), 'voice': ('audio/ogg', 'audio/webm', 'audio/mp4')}[kind]
+            ok = {'image': ('image/jpeg', 'image/png', 'image/gif', 'image/webp'), 'voice': ('audio/ogg', 'audio/webm', 'audio/mp4', 'audio/wav')}[kind]
             if mime not in ok:
                 fail('invalid_upload', 'That file type is not supported here', 415)
+            if kind == 'voice' and mime == 'audio/wav':
+                # Browsers without WebCodecs (Safari before 26, the Mac app) record plain PCM; Telegram wants Ogg Opus.
+                data, mime = wav_to_opus(data), 'audio/ogg'
+            if kind == 'voice' and mime == 'audio/webm':
+                # Safari's WebM is not rewrapped in the browser without WebCodecs: Telegram wants Ogg Opus.
+                data, mime = webm_to_ogg(data), 'audio/ogg'
             ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'audio/ogg': 'ogg', 'audio/webm': 'webm', 'audio/mp4': 'm4a'}[mime]
             filename = ('voice-message.' if kind == 'voice' else 'photo.') + ext
         mxc = path = None
@@ -1882,7 +2289,8 @@ class UnifiedInbox:
             with os.fdopen(fd, 'wb') as out:
                 out.write(data)
             path = str(path)
-        self.uploads[upload_id] = {'mxc': mxc, 'path': path, 'mime': mime, 'size': len(data), 'kind': kind, 'filename': filename, 'person_id': person_id, 'expires': now + 3600}
+        self.uploads[upload_id] = {'mxc': mxc, 'path': path, 'mime': mime, 'size': len(data), 'kind': kind, 'filename': filename, 'person_id': person_id, 'expires': now + 3600,
+                                   'ms': ogg_ms(data) if kind == 'voice' and mime == 'audio/ogg' else None}
         result = {'upload_id': upload_id, 'mime': mime, 'size': len(data)}
         if kind == 'file':
             result['name'] = filename
@@ -1982,6 +2390,98 @@ class UnifiedInbox:
         served = meta_path.read_text().strip() if meta_path.exists() else 'application/octet-stream'
         return Blob(path, served if served in INLINE_MIME else 'application/octet-stream', media.get('filename') or 'media', served in INLINE_MIME)
 
+    # ---------- composer pickers: the owner's own Telegram stickers and GIFs ----------
+    # The Telegram bridge (plumbing/telegram-bridge/pickers.patch) lists recent/favourite stickers, installed packs,
+    # saved GIFs and @gif search results with previews on the private homeserver. mxc URIs stay on the box: the view
+    # gets opaque pick ids and a media proxy. Picking prepares the whole file once; sending is the normal send call.
+    PICKS_MAX = 5000
+
+    @staticmethod
+    def short(value, n):
+        """Bridge-supplied label, clipped; empty is fine."""
+        return value.strip()[:n] if isinstance(value, str) else ''
+
+    def picker_items(self, items, kind):
+        picks = self.__dict__.setdefault('picks', {})
+        if len(picks) > self.PICKS_MAX:
+            picks.clear()
+        out = []
+        for raw in items or []:
+            if not isinstance(raw, dict) or not re.fullmatch(r'-?[0-9]{1,20}', str(raw.get('id', ''))):
+                continue
+            doc = str(raw['id'])
+            key = kind + '-' + ('n' + doc[1:] if doc.startswith('-') else doc)
+            thumb = raw.get('thumb') if MXC.fullmatch(raw.get('thumb') or '') else None
+            old = picks.get(key) or {}
+            picks[key] = {**old, 'kind': kind, 'doc': str(raw['id']), 'thumb': thumb, 'thumb_mime': self.short(raw.get('thumb_mime') or 'image/webp', 80),
+                          'emoji': self.short(raw.get('emoji') or '', 40), 'mime': self.short(raw.get('mime') or '', 80)}
+            item = {'id': key, 'emoji': picks[key]['emoji'], 'thumb': bool(thumb), 'mime': picks[key]['mime']}
+            for k in ('w', 'h', 'duration'):
+                if isinstance(raw.get(k), int) and 0 < raw[k] < 10 ** 8:
+                    item[k] = raw[k]
+            out.append(item)
+        return out
+
+    def picker(self, suffix, q):
+        if suffix == ['stickers']:
+            r = self.provision('/wizard/stickers', timeout=55)
+            packs = [{'id': self.short(p.get('short_name'), 80), 'title': self.short(p.get('title') or p.get('short_name'), 80), 'count': p.get('count') if isinstance(p.get('count'), int) else 0}
+                     for p in (r.get('packs') or []) if isinstance(p, dict) and re.fullmatch(r'[A-Za-z0-9_]{1,80}', str(p.get('short_name', '')))]
+            return {'recent': self.picker_items(r.get('recent'), 'sticker'), 'favorites': self.picker_items(r.get('favorites'), 'sticker'), 'packs': packs}
+        if len(suffix) == 2 and suffix[0] == 'stickers':
+            if not re.fullmatch(r'[A-Za-z0-9_]{1,80}', suffix[1]):
+                fail('not_found', 'No such sticker pack', 404)
+            r = self.provision('/wizard/stickers/' + suffix[1], timeout=55)
+            return {'id': suffix[1], 'title': self.short(r.get('title') or suffix[1], 80), 'stickers': self.picker_items(r.get('stickers'), 'sticker')}
+        if suffix == ['gifs']:
+            query = {'q': (q('q', '') or '')[:120].strip()}
+            if q('offset'):
+                query['offset'] = q('offset')[:64]
+            r = self.provision('/wizard/gifs', query=query, timeout=55)
+            return {'items': self.picker_items(r.get('items'), 'gif'), 'next': self.short(r.get('next_offset') or '', 64)}
+        if len(suffix) == 2 and suffix[0] == 'media':
+            pick = self.__dict__.get('picks', {}).get(suffix[1])
+            if not pick:
+                fail('not_found', 'Pick it again', 404)
+            if q('kind') == 'full':
+                ready = self.picker_prepare(suffix[1])
+                return self.media_blob(ready['url'], ready['info'].get('mimetype') or 'application/octet-stream', pick['kind'])
+            if not pick['thumb']:
+                fail('not_found', 'No preview', 404)
+            return self.media_blob(pick['thumb'], pick['thumb_mime'], 'preview')
+        fail('not_found', 'No such picker route', 404)
+
+    def picker_prepare(self, key):
+        pick = self.__dict__.get('picks', {}).get(key)
+        if not pick:
+            fail('pick_expired', 'Pick it again', 409)
+        if not pick.get('ready'):
+            r = self.provision('/wizard/prepare/%s/%s' % (pick['kind'], pick['doc']), timeout=55)
+            info = r.get('info') if isinstance(r.get('info'), dict) else {}
+            if not MXC.fullmatch(r.get('url') or ''):
+                fail('upstream_unavailable', 'Telegram did not send that ' + pick['kind'] + '. Try again.', 503)
+            keep = ('mimetype', 'w', 'h', 'size', 'duration', 'thumbnail_url', 'thumbnail_info', 'fi.mau.bridged_sticker', 'fi.mau.gif')
+            info = {k: v for k, v in info.items() if k in keep}
+            if info.get('thumbnail_url') and not MXC.fullmatch(info['thumbnail_url']):
+                info.pop('thumbnail_url', None); info.pop('thumbnail_info', None)
+            pick['ready'] = {'url': r['url'], 'info': info, 'emoji': self.short(r.get('emoji') or pick.get('emoji') or '', 40)}
+        return pick['ready']
+
+    def pick_content(self, key):
+        """(event type, content) for a picked sticker or GIF."""
+        pick = self.__dict__.get('picks', {}).get(key) if isinstance(key, str) else None
+        if not pick:
+            fail('pick_expired', 'Pick it again', 409)
+        ready = self.picker_prepare(key)
+        info = dict(ready['info'])
+        if pick['kind'] == 'sticker':
+            # fi.mau.bridged_sticker lets the bridge forward the original Telegram sticker (no reupload).
+            return 'm.sticker', {'body': ready['emoji'] or 'Sticker', 'url': ready['url'], 'info': info}
+        info.update({'fi.mau.gif': True, 'fi.mau.loop': True, 'fi.mau.autoplay': True, 'fi.mau.hide_controls': True, 'fi.mau.no_audio': True})
+        name = 'gif.' + {'video/mp4': 'mp4', 'video/webm': 'webm', 'image/gif': 'gif'}.get(info.get('mimetype'), 'mp4')
+        msgtype = 'm.image' if info.get('mimetype') == 'image/gif' else 'm.video'
+        return 'm.room.message', {'msgtype': msgtype, 'body': name, 'filename': name, 'url': ready['url'], 'info': info}
+
     def matrix_upload(self, data, filename, mime):
         req = Request(self.matrix.rstrip('/') + '/_matrix/media/v3/upload?' + urlencode({'filename': filename}), data=data, method='POST',
                       headers={'Authorization': 'Bearer ' + self.matrix_token(), 'Content-Type': mime})
@@ -2020,6 +2520,9 @@ class UnifiedInbox:
         mxc = (media.get('thumb') if thumb and media.get('thumb') else media['mxc'])
         if not re.fullmatch(r'mxc://([A-Za-z0-9.:_-]+)/([A-Za-z0-9_-]+)', mxc or ''):
             fail('not_found', 'No media on that message', 404)
+        if thumb and not media.get('thumb') and mime == 'image/gif' and (media.get('size') or 0) <= 12 * 1024 * 1024:
+            # The homeserver's thumbnailer turns an animated GIF into a still picture: send the GIF itself.
+            return self.media_blob(mxc, mime, media.get('filename') or 'media')
         return self.media_blob(mxc, mime, media.get('filename') or 'media', thumb=thumb and not media.get('thumb'), raw_thumb=thumb)
 
     def media_blob(self, mxc, mime, name, *, thumb=False, raw_thumb=False, size=800):
@@ -2201,6 +2704,8 @@ class UnifiedInbox:
             return self.store.dismiss_merge(payload.get('id'))
         if suffix == ['directory'] and method == 'GET':
             return {'people': self.store.people('person', chats=False), 'groups': self.store.people('group', chats=False)}
+        if suffix and suffix[0] == 'picker' and method == 'GET':
+            return self.picker(suffix[1:], q)
         if len(suffix) == 2 and suffix[0] == 'media' and method == 'GET':
             return self.media(text(suffix[1], 300), q('kind') if q('kind') in ('thumb', 'link0', 'link1') else 'full')
         if len(suffix) >= 2 and suffix[0] == 'people':
