@@ -992,6 +992,10 @@ def message_parts(event):
     reply_to = (relates.get('m.in_reply_to') or {}).get('event_id')
     if event.get('type') == 'm.sticker':
         info = content.get('info') or {}
+        if str(info.get('mimetype', '')).startswith('video/') and content.get('url'):
+            # A Telegram video sticker (webm) plays like the bridge's animated stickers do.
+            return 'm.video', '', {k: v for k, v in {'mxc': content.get('url'), 'mime': info.get('mimetype'), 'w': info.get('w'), 'h': info.get('h'),
+                                   'size': info.get('size'), 'thumb': info.get('thumbnail_url') or None, 'sticker': True}.items() if v is not None}, reply_to
         return 'm.sticker', '', {'mxc': content.get('url'), 'mime': info.get('mimetype', 'image/webp'), 'w': info.get('w'), 'h': info.get('h'),
                                  'size': info.get('size'), 'thumb': (info.get('thumbnail_url') or None), 'alt': content.get('body', '')}, reply_to
     if event.get('type') != 'm.room.message':
@@ -1264,10 +1268,10 @@ class UnifiedInbox:
         except (OSError, ValueError, KeyError):
             return False
 
-    def provision(self, path, method='GET', body=None):
+    def provision(self, path, method='GET', body=None, query=None, timeout=65):
         if not self.telegram_configured():
             fail('telegram_not_configured', 'Telegram not configured. Supply TELEGRAM_API_ID and TELEGRAM_API_HASH at installation.', 409)
-        return http(self.bridge, '/_matrix/provision/v3' + path + '?' + urlencode({'user_id': self.owner}), method, body, self.keys()['provisioning'], 65)
+        return http(self.bridge, '/_matrix/provision/v3' + path + '?' + urlencode({**(query or {}), 'user_id': self.owner}), method, body, self.keys()['provisioning'], timeout)
 
     # A Telegram login waits on the owner leaving the app to read a code, so the current
     # step lives here (shape only, never typed values) and the view resumes it on return.
@@ -2045,6 +2049,10 @@ class UnifiedInbox:
                 fail('upload_expired', 'Attach the photos again', 409)
             if any(u['kind'] != 'image' or u['mime'] not in ('image/jpeg', 'image/png', 'image/webp') for u in gallery):
                 fail('invalid_album', 'Albums contain still photos only')
+        if payload.get('pick') is not None:
+            if identity['network'] != 'telegram' or upload_ids is not None or payload.get('upload_id') or payload.get('text'):
+                fail('pick_unsupported', 'Stickers and GIFs from Telegram can be sent in Telegram chats', 409)
+            return self.send_pick(identity, payload.get('pick'), client_id, self.reply_target(identity, payload.get('reply_to')))
         upload = gallery[0] if gallery else self.uploads.get(payload.get('upload_id')) if payload.get('upload_id') else None
         if payload.get('upload_id') and (not upload or upload['person_id'] != person_id or upload['expires'] <= time.time()):
             fail('upload_expired', 'Attach the file again', 409)
@@ -2116,6 +2124,19 @@ class UnifiedInbox:
                                msgtype=msgtype, media=media, reply_to=reply_to, client_id=client_id)
         if upload:
             self.drop_upload(payload.get('upload_id'))
+        return {'state': 'sent', 'event_id': event, 'message': self.row(event)}
+
+    def send_pick(self, identity, key, client_id, reply_to):
+        kind, content = self.pick_content(key)
+        if reply_to:
+            content['m.relates_to'] = {'m.in_reply_to': {'event_id': reply_to}}
+        started = time.time()
+        result = self.mx(self.room(identity['address']) + '/send/' + kind + '/' + client_id, 'PUT', content)
+        self.timing('send', started)
+        event = result['event_id']
+        msgtype, caption, media, _ = message_parts({'type': kind, 'content': content})
+        self.store.add_message(event, identity, self.owner, True, '', int(time.time() * 1000),
+                               msgtype=msgtype, media=media, reply_to=reply_to, client_id=client_id)
         return {'state': 'sent', 'event_id': event, 'message': self.row(event)}
 
     def album_rows(self, message_id):
@@ -2333,6 +2354,98 @@ class UnifiedInbox:
             os.utime(path)
         served = meta_path.read_text().strip() if meta_path.exists() else 'application/octet-stream'
         return Blob(path, served if served in INLINE_MIME else 'application/octet-stream', media.get('filename') or 'media', served in INLINE_MIME)
+
+    # ---------- composer pickers: the owner's own Telegram stickers and GIFs ----------
+    # The Telegram bridge (plumbing/telegram-bridge/pickers.patch) lists recent/favourite stickers, installed packs,
+    # saved GIFs and @gif search results with previews on the private homeserver. mxc URIs stay on the box: the view
+    # gets opaque pick ids and a media proxy. Picking prepares the whole file once; sending is the normal send call.
+    PICKS_MAX = 5000
+
+    @staticmethod
+    def short(value, n):
+        """Bridge-supplied label, clipped; empty is fine."""
+        return value.strip()[:n] if isinstance(value, str) else ''
+
+    def picker_items(self, items, kind):
+        picks = self.__dict__.setdefault('picks', {})
+        if len(picks) > self.PICKS_MAX:
+            picks.clear()
+        out = []
+        for raw in items or []:
+            if not isinstance(raw, dict) or not re.fullmatch(r'-?[0-9]{1,20}', str(raw.get('id', ''))):
+                continue
+            doc = str(raw['id'])
+            key = kind + '-' + ('n' + doc[1:] if doc.startswith('-') else doc)
+            thumb = raw.get('thumb') if MXC.fullmatch(raw.get('thumb') or '') else None
+            old = picks.get(key) or {}
+            picks[key] = {**old, 'kind': kind, 'doc': str(raw['id']), 'thumb': thumb, 'thumb_mime': self.short(raw.get('thumb_mime') or 'image/webp', 80),
+                          'emoji': self.short(raw.get('emoji') or '', 40), 'mime': self.short(raw.get('mime') or '', 80)}
+            item = {'id': key, 'emoji': picks[key]['emoji'], 'thumb': bool(thumb), 'mime': picks[key]['mime']}
+            for k in ('w', 'h', 'duration'):
+                if isinstance(raw.get(k), int) and 0 < raw[k] < 10 ** 8:
+                    item[k] = raw[k]
+            out.append(item)
+        return out
+
+    def picker(self, suffix, q):
+        if suffix == ['stickers']:
+            r = self.provision('/wizard/stickers', timeout=55)
+            packs = [{'id': self.short(p.get('short_name'), 80), 'title': self.short(p.get('title') or p.get('short_name'), 80), 'count': p.get('count') if isinstance(p.get('count'), int) else 0}
+                     for p in (r.get('packs') or []) if isinstance(p, dict) and re.fullmatch(r'[A-Za-z0-9_]{1,80}', str(p.get('short_name', '')))]
+            return {'recent': self.picker_items(r.get('recent'), 'sticker'), 'favorites': self.picker_items(r.get('favorites'), 'sticker'), 'packs': packs}
+        if len(suffix) == 2 and suffix[0] == 'stickers':
+            if not re.fullmatch(r'[A-Za-z0-9_]{1,80}', suffix[1]):
+                fail('not_found', 'No such sticker pack', 404)
+            r = self.provision('/wizard/stickers/' + suffix[1], timeout=55)
+            return {'id': suffix[1], 'title': self.short(r.get('title') or suffix[1], 80), 'stickers': self.picker_items(r.get('stickers'), 'sticker')}
+        if suffix == ['gifs']:
+            query = {'q': (q('q', '') or '')[:120].strip()}
+            if q('offset'):
+                query['offset'] = q('offset')[:64]
+            r = self.provision('/wizard/gifs', query=query, timeout=55)
+            return {'items': self.picker_items(r.get('items'), 'gif'), 'next': self.short(r.get('next_offset') or '', 64)}
+        if len(suffix) == 2 and suffix[0] == 'media':
+            pick = self.__dict__.get('picks', {}).get(suffix[1])
+            if not pick:
+                fail('not_found', 'Pick it again', 404)
+            if q('kind') == 'full':
+                ready = self.picker_prepare(suffix[1])
+                return self.media_blob(ready['url'], ready['info'].get('mimetype') or 'application/octet-stream', pick['kind'])
+            if not pick['thumb']:
+                fail('not_found', 'No preview', 404)
+            return self.media_blob(pick['thumb'], pick['thumb_mime'], 'preview')
+        fail('not_found', 'No such picker route', 404)
+
+    def picker_prepare(self, key):
+        pick = self.__dict__.get('picks', {}).get(key)
+        if not pick:
+            fail('pick_expired', 'Pick it again', 409)
+        if not pick.get('ready'):
+            r = self.provision('/wizard/prepare/%s/%s' % (pick['kind'], pick['doc']), timeout=55)
+            info = r.get('info') if isinstance(r.get('info'), dict) else {}
+            if not MXC.fullmatch(r.get('url') or ''):
+                fail('upstream_unavailable', 'Telegram did not send that ' + pick['kind'] + '. Try again.', 503)
+            keep = ('mimetype', 'w', 'h', 'size', 'duration', 'thumbnail_url', 'thumbnail_info', 'fi.mau.bridged_sticker', 'fi.mau.gif')
+            info = {k: v for k, v in info.items() if k in keep}
+            if info.get('thumbnail_url') and not MXC.fullmatch(info['thumbnail_url']):
+                info.pop('thumbnail_url', None); info.pop('thumbnail_info', None)
+            pick['ready'] = {'url': r['url'], 'info': info, 'emoji': self.short(r.get('emoji') or pick.get('emoji') or '', 40)}
+        return pick['ready']
+
+    def pick_content(self, key):
+        """(event type, content) for a picked sticker or GIF."""
+        pick = self.__dict__.get('picks', {}).get(key) if isinstance(key, str) else None
+        if not pick:
+            fail('pick_expired', 'Pick it again', 409)
+        ready = self.picker_prepare(key)
+        info = dict(ready['info'])
+        if pick['kind'] == 'sticker':
+            # fi.mau.bridged_sticker lets the bridge forward the original Telegram sticker (no reupload).
+            return 'm.sticker', {'body': ready['emoji'] or 'Sticker', 'url': ready['url'], 'info': info}
+        info.update({'fi.mau.gif': True, 'fi.mau.loop': True, 'fi.mau.autoplay': True, 'fi.mau.hide_controls': True, 'fi.mau.no_audio': True})
+        name = 'gif.' + {'video/mp4': 'mp4', 'video/webm': 'webm', 'image/gif': 'gif'}.get(info.get('mimetype'), 'mp4')
+        msgtype = 'm.image' if info.get('mimetype') == 'image/gif' else 'm.video'
+        return 'm.room.message', {'msgtype': msgtype, 'body': name, 'filename': name, 'url': ready['url'], 'info': info}
 
     def matrix_upload(self, data, filename, mime):
         req = Request(self.matrix.rstrip('/') + '/_matrix/media/v3/upload?' + urlencode({'filename': filename}), data=data, method='POST',
@@ -2556,6 +2669,8 @@ class UnifiedInbox:
             return self.store.dismiss_merge(payload.get('id'))
         if suffix == ['directory'] and method == 'GET':
             return {'people': self.store.people('person', chats=False), 'groups': self.store.people('group', chats=False)}
+        if suffix and suffix[0] == 'picker' and method == 'GET':
+            return self.picker(suffix[1:], q)
         if len(suffix) == 2 and suffix[0] == 'media' and method == 'GET':
             return self.media(text(suffix[1], 300), q('kind') if q('kind') in ('thumb', 'link0', 'link1') else 'full')
         if len(suffix) >= 2 and suffix[0] == 'people':
