@@ -133,7 +133,7 @@ try:
     free=shutil.disk_usage(STAGE).free
     checkpoint('integrity',result='running',free_bytes=free,required_free_bytes=30*1024**3)
     assert free>=30*1024**3,'full libsignal build needs 30 GiB free; no global pruning'
-    python('gate-regressions',['test_signal_release_gate'])
+    python('gate-regressions',['test_signal_release_gate','test_signal_native_recorded'])
     # Execute full comprehensive browser contract on BOTH shipped IIFEs first.
     node('baseline-browser-vm-contract',['tests/unified_browser_context.test.cjs'],cwd=BASE)
     node('candidate-browser-vm-contract',['tests/unified_browser_context.test.cjs'])

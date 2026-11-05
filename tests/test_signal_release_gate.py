@@ -16,7 +16,7 @@ class NativeReportTransport(unittest.TestCase):
         self.events_path = self.root / 'native.jsonl'
         self.tap_path = self.root / 'native.tap'
         self.events = [dict(type='test:pass', name='works', file=str(self.root/'tests/original.cjs'),
-                            nesting=0, line=59, column=1, skip=False, todo=False, details={})]
+                            nesting=0, testNumber=1, line=59, column=1, skip=False, todo=False, details={})]
         self.tap = ('TAP version 13\n# Subtest: works\nok 1 - works\n'
                     '  ---\n  duration_ms: 1\n  ...\n1..1\n# tests 1\n# suites 0\n'
                     '# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 2.5\n')
@@ -72,7 +72,7 @@ class NativeReportTransport(unittest.TestCase):
         # Even matching TAP names/counts cannot hide duplicate file::name IDs.
         tap = self.tap.replace('1..1\n', 'ok 2 - works\n1..2\n').replace('# tests 1', '# tests 2').replace('# pass 1', '# pass 2')
         with self.assertRaisesRegex(AssertionError, 'duplicate test ID'):
-            self.load(events=self.events*2, tap=tap)
+            self.load(events=self.events+[dict(self.events[0], testNumber=2)], tap=tap)
 
     def test_fail_exit_must_match_native_counts_and_cases(self):
         failed = [dict(self.events[0], type='test:fail', details={'error':{'code':'ERR_ASSERTION'}})]

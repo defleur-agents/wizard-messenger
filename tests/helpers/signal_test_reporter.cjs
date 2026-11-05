@@ -17,6 +17,7 @@ module.exports = async function* (events) {
     const data = event.data;
     yield JSON.stringify({type:event.type,name:data.name,file:data.file,line:data.line,column:data.column,
       nesting:data.nesting,skip:data.skip||false,todo:data.todo||false,
+      ...(event.type==='test:summary'?{}:{testNumber:data.testNumber}),
       details:{...data.details,error:errorRecord(data.details?.error)},
       ...(event.type==='test:summary'?{counts:data.counts}:{} )})+'\n';
   }

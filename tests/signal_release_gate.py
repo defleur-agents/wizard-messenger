@@ -42,7 +42,11 @@ def validate_transport(events, tap_path, returncode):
     assert all(not (e.get('skip') and e.get('todo')) for e in results), 'skip and todo overlap'
     counts = dict(tests=len(results), suites=0, passed=0, failed=0, cancelled=0, skipped=0, todo=0)
     expected_rows = []
-    for number, event in enumerate(results, 1):
+    for event in results:
+        # Native file wrappers and child cases have different numbering scopes.
+        # Preserve Node's number; the terminal plan independently counts events.
+        number = event.get('testNumber')
+        assert type(number) is int and 0 < number <= 2**53-1, 'invalid native testNumber'
         skip, todo = event.get('skip', False), event.get('todo', False)
         assert all(isinstance(flag, (bool, str)) for flag in (skip, todo)), 'invalid skip/todo flag'
         error = (event.get('details') or {}).get('error') or {}
@@ -106,7 +110,8 @@ def load_events(path, root, tap_path, returncode):
         if event['type'] not in ('test:pass', 'test:fail'):
             continue
         file = str(Path(event['file']).relative_to(root)) if event.get('file') else '<no-file>'
-        ident = file + '::' + event['name']
+        name = file if event['name'] == event.get('file') else event['name']
+        ident = file + '::' + name
         assert ident not in cases, 'duplicate test ID: ' + ident
         details = event.get('details') or {}
         error = normalize(details.get('error'), root)
