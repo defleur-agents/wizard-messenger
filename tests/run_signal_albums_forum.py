@@ -85,9 +85,7 @@ def node(name, tests, cwd=ROOT, expected_skips=(), differential=False, extra=Non
     code=run(name,['node','--test','--test-reporter=tap','--test-reporter='+str(ROOT/'tests/helpers/signal_test_reporter.cjs'),
                   '--test-reporter-destination='+str(tap),'--test-reporter-destination='+str(events),*tests],
              cwd=cwd,extra=extra,required=False)
-    cases=load_events(events,cwd)
-    failures=sum(v['status']=='fail' for v in cases.values())
-    assert (code==0 and failures==0) or (code==1 and failures>0), 'runner exit/case mismatch '+name
+    cases=load_events(events,cwd,tap,code)
     save(name+'-cases',cases)
     if not differential:
         strict_pass(cases,expected_skips);assert code==0,name+' failed'

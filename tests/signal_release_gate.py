@@ -20,10 +20,87 @@ def normalize(value, root):
         return [normalize(v, root) for v in value]
     return value
 
-def load_events(path, root):
-    events = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
-    summaries = [e for e in events if e['type'] == 'test:summary']
-    assert summaries, 'native node:test summary missing'
+def tap_escape(value):
+    # Same escaping as Node's native TAP reporter (including control characters).
+    for char, escaped in [('\b', r'\b'), ('\f', r'\f'), ('\t', r'\t'),
+                          ('\n', r'\n'), ('\r', r'\r'), ('\v', r'\v')]:
+        value = value.replace(char, escaped)
+    return value.replace('\\', '\\\\').replace('#', r'\#')
+
+
+def validate_transport(events, tap_path, returncode):
+    """Require paired, complete native TAP + JSONL; Node 20 has no summary event.
+
+    The admitted suites are flat node:test cases, not describe()/nested suites.
+    Reject any other shape rather than silently miscounting it. TAP is only a
+    transport/completeness witness; IDs and assertion signatures stay in JSONL.
+    """
+    results = [e for e in events if e['type'] in ('test:pass', 'test:fail')]
+    assert results, 'no executed tests'
+    assert all(e.get('nesting') == 0 and (e.get('details') or {}).get('type') != 'suite'
+               for e in results), 'unsupported nested/suite transport'
+    assert all(not (e.get('skip') and e.get('todo')) for e in results), 'skip and todo overlap'
+    counts = dict(tests=len(results), suites=0, passed=0, failed=0, cancelled=0, skipped=0, todo=0)
+    expected_rows = []
+    for number, event in enumerate(results, 1):
+        skip, todo = event.get('skip', False), event.get('todo', False)
+        assert all(isinstance(flag, (bool, str)) for flag in (skip, todo)), 'invalid skip/todo flag'
+        error = (event.get('details') or {}).get('error') or {}
+        assert error.get('failureType') != 'cancelledByParent', 'cancelled native test'
+        category = ('skipped' if skip else 'todo' if todo else
+                    'passed' if event['type'] == 'test:pass' else 'failed')
+        counts[category] += 1
+        row = ('ok' if event['type'] == 'test:pass' else 'not ok') + f' {number} - ' + tap_escape(event['name'])
+        if skip or todo:
+            flag = skip or todo
+            row += ' # ' + ('SKIP' if skip else 'TODO')
+            if isinstance(flag, str):
+                row += ' ' + tap_escape(flag)
+        expected_rows.append(row)
+    tap = Path(tap_path).read_text()
+    assert tap.startswith('TAP version 13\n'), 'native TAP header missing'
+    fields = [('tests', 'tests'), ('suites', 'suites'), ('pass', 'passed'), ('fail', 'failed'),
+              ('cancelled', 'cancelled'), ('skipped', 'skipped'), ('todo', 'todo')]
+    pattern = r'^1\.\.(\d+)\n' + ''.join(r'# '+label+r' (\d+)\n' for label, _ in fields)
+    pattern += r'# duration_ms (?:\d+(?:\.\d+)?)(?:[eE][+-]?\d+)?\n\Z'
+    terminal = re.search(pattern, tap, re.MULTILINE)
+    assert terminal, 'native TAP terminal plan/counts missing or truncated'
+    body = tap[:terminal.start()]
+    assert not re.search(r'^(?:1\.\.|Bail out!)', body, re.MULTILINE), 'duplicate TAP plan or bailout'
+    rows = re.findall(r'^(?:not )?ok\b[^\n]*', body, re.MULTILINE)
+    assert rows == expected_rows, 'native TAP/JSONL case inventory or statuses differ'
+    assert int(terminal[1]) == len(results), 'native TAP plan/JSONL count mismatch'
+    for index, (_, key) in enumerate(fields, 2):
+        assert int(terminal[index]) == counts[key], 'native TAP count mismatch: ' + key
+    assert type(returncode) is int and returncode == (1 if counts['failed'] else 0), 'runner exit/case mismatch'
+    # Newer Node versions may also emit native summaries. Never manufacture one.
+    # Validate every supplied summary against its file scope or the whole run.
+    seen = set()
+    for summary in (e for e in events if e['type'] == 'test:summary'):
+        file = summary.get('file')
+        assert file not in seen, 'duplicate native summary'
+        seen.add(file)
+        scoped = [e for e in results if not file or e.get('file') == file]
+        assert scoped, 'native summary has unknown file scope'
+        expected = dict(counts) if not file else dict(tests=len(scoped), suites=0, passed=0,
+                                                     failed=0, cancelled=0, skipped=0, todo=0)
+        if file:
+            for event in scoped:
+                key = ('skipped' if event.get('skip') else 'todo' if event.get('todo') else
+                       'passed' if event['type'] == 'test:pass' else 'failed')
+                expected[key] += 1
+        actual = summary.get('counts')
+        assert isinstance(actual, dict), 'native summary counts missing'
+        for key, value in dict(expected, topLevel=len(scoped)).items():
+            assert type(actual.get(key)) is int and actual[key] == value, 'native summary count mismatch: ' + key
+
+
+def load_events(path, root, tap_path, returncode):
+    text = Path(path).read_text()
+    assert text.endswith('\n'), 'native JSONL missing or truncated'
+    events = [json.loads(line) for line in text.splitlines()]
+    assert all(e['type'] in ('test:pass', 'test:fail', 'test:summary') for e in events), 'unexpected native event'
+    validate_transport(events, tap_path, returncode)
     cases = {}
     for event in events:
         if event['type'] not in ('test:pass', 'test:fail'):
