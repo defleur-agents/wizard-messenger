@@ -997,3 +997,40 @@ html[data-presentation="immersive"] #unified-inbox .u-header, html[data-presenta
 .u-message.outgoing .u-mention.me { background: color-mix(in srgb, currentColor 30%, transparent); }
 .u-text code { padding: 0 0.25em; border-radius: 0.3em; font-family: var(--wz-font-mono, monospace); font-size: 0.9em; background: color-mix(in srgb, currentColor 12%, transparent); }
 .u-text .u-code-block { display: block; margin: 0.2em 0; padding: 0.4em 0.5em; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Emoji / GIFs / Stickers (Miguel, 5 Nov 2026): one smiley in the message box opens a tabbed panel above it. */
+.u-field { position: relative; }
+.u-field textarea { padding-right: 46px; }
+.u-pick-btn { position: absolute; right: 2px; bottom: 0; width: 44px; height: 44px; min-width: 0; min-height: 0; border-radius: 50%; color: var(--ink-3); background: none; }
+.u-pick-btn:hover, .u-pick-btn.on { color: var(--accent); }
+.u-pick-btn svg { width: 24px; height: 24px; }
+.u-picker { display: flex; flex-direction: column; height: min(44vh, 360px); min-height: 220px; border-radius: 18px; overflow: hidden; background: linear-gradient(var(--panel-tint), var(--panel-tint)) var(--panel-solid); color: var(--ink); border: 1px solid var(--line); }
+.u-picker[hidden] { display: none; }
+.u-pick-tabs { display: flex; gap: 4px; padding: 6px 8px 0; flex-shrink: 0; }
+.u-pick-tab { flex: 0 0 auto; min-height: 36px; padding: 0 14px; border-radius: 18px; background: none; color: var(--ink-2); font-weight: 600; font-size: 0.875rem; }
+.u-pick-tab.on { background: var(--accent-soft); color: var(--ink); }
+.u-pick-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 8px 8px; }
+.u-pick-search { width: 100%; box-sizing: border-box; min-height: 38px; margin: 4px 0 6px; padding: 8px 14px; border-radius: 19px; border: 0; background: var(--raised); color: var(--ink); }
+.u-pick-head { margin: 8px 4px 4px; font-size: 0.75rem; font-weight: 600; color: var(--ink-3); }
+.u-emo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); gap: 2px; }
+.u-emo { width: 100%; height: 42px; min-width: 0; min-height: 0; padding: 0; border-radius: 10px; font-size: 1.625rem; line-height: 1; background: none; }
+.u-emo:hover, .u-emo:focus-visible, .u-pick-tile:hover, .u-pick-tile:focus-visible { background: var(--raised); }
+.u-pick-empty { margin: 18px 8px; text-align: center; color: var(--ink-3); font-size: 0.875rem; }
+.u-pick-retry, .u-pick-more { display: block; margin: 0 auto 8px; }
+.u-gif-grid { columns: 3 110px; column-gap: 4px; }
+.u-pick-tile { position: relative; display: block; width: 100%; min-width: 0; min-height: 0; padding: 0; margin: 0 0 4px; border-radius: 10px; overflow: hidden; background: var(--raised); break-inside: avoid; }
+.u-pick-tile img, .u-pick-tile video { display: block; width: 100%; height: 100%; object-fit: cover; }
+.u-pick-tile video { position: absolute; inset: 0; opacity: 0; }
+.u-pick-tile.live video { opacity: 1; }
+.u-pick-tile.gif:not([style]) { aspect-ratio: 4 / 3; }
+.u-pick-alt { display: grid; place-items: center; width: 100%; height: 100%; min-height: 64px; font-size: 1.75rem; color: var(--ink-3); }
+.u-pack-row { display: flex; gap: 6px; overflow-x: auto; padding: 4px 0 6px; scrollbar-width: none; }
+.u-pack { flex: 0 0 auto; max-width: 160px; min-height: 32px; padding: 0 12px; border-radius: 16px; background: var(--raised); color: var(--ink-2); font-size: 0.8125rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.u-pack.on { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
+.u-sticker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 4px; }
+.u-pick-tile.sticker { aspect-ratio: 1; margin: 0; background: none; }
+.u-pick-tile.sticker img { object-fit: contain; }
+@media (max-width: 600px) {
+  .u-picker { height: min(42vh, 340px); border-radius: 16px; }
+  .u-emo-grid { grid-template-columns: repeat(auto-fill, minmax(38px, 1fr)); }
+  .u-sticker-grid { grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); }
+}

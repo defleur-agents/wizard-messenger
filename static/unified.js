@@ -89,6 +89,7 @@
     bell: ['M6 9a6 6 0 0 1 12 0c0 6 2.5 7.5 2.5 7.5h-17S6 15 6 9z', 'M10 20a2 2 0 0 0 4 0'],
     belloff: ['M6 9a6 6 0 0 1 9.4-4.9', 'M18 9c0 6 2.5 7.5 2.5 7.5H8', 'M10 20a2 2 0 0 0 4 0', 'M3 3l18 18'],
     lowpri: ['M3 4h18v4H3z', 'M5 8v11h14V8', 'M10 12h4'], unread: ['M21 12a9 9 0 1 1-6-8.5', 'M19 7a2 2 0 1 0 0-.01'], inbox: ['M3 13h5l2 3h4l2-3h5', 'M5.5 5h13L21 13v6H3v-6z'],
+    smile: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M8.5 14.5s1.3 2 3.5 2 3.5-2 3.5-2', 'M9 9.5v.01', 'M15 9.5v.01'],
     qr: ['M4 4h6v6H4z', 'M14 4h6v6h-6z', 'M4 14h6v6H4z', 'M14 14h2v2h-2z', 'M18 14h2', 'M14 18v2', 'M18 18h2v2h-2z'],
   };
   function icon(name) {
@@ -296,6 +297,7 @@
     s.login = null; s.overlay = null; $('u-overlay')?.remove(); view.lifted?.classList.remove('lifted'); view.lifted = null; lastFocus?.focus(); hold(); syncBar();
   }
   function back() {
+    if (!s.overlay && view.picker?.isOpen) { view.picker.close(); return true; }
     if (!s.overlay && view.selection?.active) { view.selection.clear(); return true; }
     if (s.overlay === 'Edit QR codes') { myCodes(); return true; }
     if (s.overlay === 'Suggested merges') { accounts(); return true; } // nested: Back returns to the codes, not the list
@@ -2208,6 +2210,11 @@
     const send = iconButton('send', reviewed ? 'Preview send' : 'Send', () => submit(), 'u-send');
     const mic = iconButton('mic', 'Record voice message', () => record(), 'u-mic'); mic.hidden = !telegramOnly;
     const field = node('div', 'u-field'); field.append(draft);
+    // One button opens Emoji / GIFs / Stickers, like Telegram (Miguel, 5 Nov 2026: "I don't know how to send emojis").
+    const pickerBtn = iconButton('smile', 'Emoji, GIFs and stickers', () => mediaPicker.toggle(), 'u-pick-btn'); pickerBtn.setAttribute('aria-expanded', 'false');
+    field.append(pickerBtn);
+    const mediaPicker = picker({id, draft, button: pickerBtn, form, telegram: () => ((p.identities || []).find(i => i.id === channel.value) || p.identities?.[0])?.network === 'telegram',
+      send: pick => { if (s.person !== id) return; const reply = view.reply; view.reply = null; paintBar(); queueSend(id, {pick, reply, identity_id: channel.value}); }});
     const row = node('div', 'u-compose-row'); row.append(attach, field, send, mic, file);
     const paintBar = () => {
       bar.replaceChildren(); const target = view.edit || view.reply; const a = view.attach || [];
@@ -2482,12 +2489,178 @@
       while (wave.children.length > 40) wave.firstChild.remove();
     };
     Object.assign(view, {draft, grow, paintBar, paintRecording, paintRecordingTick});
-    form.append(bar, via, channel, row, notice); grow(); paintBar(); paintRecording();
+    form.append(bar, via, channel, mediaPicker.panel, row, notice); grow(); paintBar(); paintRecording();
     // Switching chats in the split (or redrawing on resize) must not drop a save that is still waiting.
     const prev = view.sd, flushing = prev?.timer ? prev.save() : prev?.busy;
     prev?.stop?.(); view.sd = serverDraft(id, {form, draft, channel, grow, paintBar, paintVia}, prev?.id === id ? flushing : null);
     queueMicrotask(() => { if (!form.isConnected) return; if (!view.recording) record(true); recoverVoice(); });
     return form;
+  }
+  // ---------- Emoji / GIFs / Stickers (Miguel, 5 Nov 2026) ----------
+  // One panel above the box, opened by the smiley in the box. Emoji go in at the caret (the box stays as typed);
+  // GIFs and stickers are the owner's own Telegram ones (saved GIFs, @gif search, recent/favourite stickers and
+  // installed packs, listed by the Telegram bridge) and send at once, through the same queue as every message.
+  // The full emoji set is Wizard's shared one (WosTopicEmoji, the Chats topic picker); the reaction grid is the fallback.
+  const EMOJI_RECENT = 'messenger-emoji-recent-v1';
+  let emojiKit = null;
+  function loadEmojiKit() {
+    if (window.WosTopicEmoji?.categories?.length) return Promise.resolve(window.WosTopicEmoji);
+    if (emojiKit) return emojiKit;
+    const load = src => new Promise((resolve, reject) => { const el = document.createElement('script'); el.src = src; el.async = false; el.onload = resolve; el.onerror = reject; document.head.append(el); });
+    emojiKit = (window.WosTopicEmojiData ? Promise.resolve() : load('/wizard-os-home/core/chat-topic-emojis-data.js'))
+      .then(() => window.WosTopicEmoji || load('/wizard-os-home/core/chat-topic-emojis.js'))
+      .then(() => window.WosTopicEmoji?.categories?.length ? window.WosTopicEmoji : null).catch(() => null);
+    return emojiKit;
+  }
+  const emojiRecent = () => { try { const v = JSON.parse(localStorage.getItem(EMOJI_RECENT) || '[]'); return Array.isArray(v) ? v.filter(x => typeof x === 'string').slice(0, 24) : []; } catch { return []; } };
+  function rememberEmoji(k) {
+    const list = [k, ...emojiRecent().filter(x => x !== k)].slice(0, 24);
+    try { localStorage.setItem(EMOJI_RECENT, JSON.stringify(list)); } catch { /* private mode: recent stays for this session */ }
+    recent = [k, ...recent.filter(x => x !== k)].slice(0, 8); // the reaction strip leads with the same recent picks
+  }
+  const pickerCache = {stickers: null, packs: Object.create(null), gifs: Object.create(null)};
+  const pickURL = (pid, full) => 'api/unified/picker/media/' + encodeURIComponent(pid) + (full ? '?kind=full' : '');
+  function picker(o) {
+    const panel = node('div', 'u-picker'); panel.hidden = true; panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', 'Emoji, GIFs and stickers');
+    const tabs = node('div', 'u-pick-tabs'); tabs.setAttribute('role', 'tablist');
+    const body = node('div', 'u-pick-body');
+    panel.append(tabs, body);
+    const state = {open: false, tab: 'emoji', start: null, end: null, gen: 0};
+    const touch = () => matchMedia('(pointer: coarse)').matches;
+    // The caret survives the box losing focus (the phone keyboard goes down while the panel is open).
+    const keep = () => { state.start = o.draft.selectionStart; state.end = o.draft.selectionEnd; };
+    for (const ev of ['select', 'keyup', 'pointerup', 'input', 'blur']) o.draft.addEventListener(ev, keep);
+    o.draft.addEventListener('focus', () => { if (state.open && touch()) close(); }); // tapping the box brings the keyboard back, like Telegram
+    function insert(k) {
+      const v = o.draft.value, a = Math.min(state.start ?? v.length, v.length), b = Math.max(a, Math.min(state.end ?? a, v.length));
+      o.draft.value = v.slice(0, a) + k + v.slice(b);
+      o.draft.dispatchEvent(new Event('input', {bubbles: true}));
+      state.start = state.end = a + k.length;
+      if (!touch()) { o.draft.focus(); o.draft.setSelectionRange(state.start, state.end); }
+      rememberEmoji(k);
+    }
+    function tab(name, label) {
+      const t = button(label, () => show(name), 'u-pick-tab' + (state.tab === name ? ' on' : '')); t.setAttribute('role', 'tab'); t.setAttribute('aria-selected', String(state.tab === name)); t.dataset.tab = name; return t;
+    }
+    function paintTabs() {
+      const tg = o.telegram(); if (!tg && state.tab !== 'emoji') state.tab = 'emoji';
+      tabs.replaceChildren(tab('emoji', 'Emoji'), ...(tg ? [tab('gifs', 'GIFs'), tab('stickers', 'Stickers')] : []));
+    }
+    function show(name) { state.tab = name; state.gen++; paintTabs(); body.replaceChildren(); body.scrollTop = 0; ({emoji: emojiTab, gifs: gifTab, stickers: stickerTab})[name](state.gen); }
+    function section(title, cls) { const h = node('h3', 'u-pick-head', title); const g = node('div', cls); body.append(h, g); return g; }
+    function emojiButton(k) { const b = button(k, () => insert(k), 'u-emo'); b.setAttribute('aria-label', k); return b; }
+    function emojiTab(gen) {
+      const search = node('input', 'u-pick-search'); search.type = 'search'; search.placeholder = 'Search emoji'; search.setAttribute('aria-label', 'Search emoji'); search.enterKeyHint = 'search';
+      const list = node('div', 'u-pick-list');
+      body.append(search, list);
+      const paint = kit => {
+        if (gen !== state.gen) return;
+        list.replaceChildren();
+        const add = (title, emoji) => { if (!emoji.length) return; const g = node('div', 'u-emo-grid'); for (const k of emoji) g.append(emojiButton(k)); list.append(node('h3', 'u-pick-head', title), g); };
+        const q = search.value.trim();
+        if (!q) add('Recent', emojiRecent());
+        const groups = kit ? kit.search(q) : [{label: 'Smileys', emoji: [...QUICK, ...MORE].filter(k => !q || k.includes(q))}];
+        for (const c of groups) add(c.label, [...c.emoji]);
+        if (!list.childElementCount) list.append(node('p', 'u-pick-empty', 'No emoji found'));
+      };
+      paint(window.WosTopicEmoji?.categories?.length ? window.WosTopicEmoji : null);
+      loadEmojiKit().then(kit => { if (kit) { search.oninput = () => paint(kit); paint(kit); } });
+      search.oninput = () => paint(null);
+    }
+    // A tile is a small preview; a GIF plays only while on screen (reduced motion keeps the still).
+    const playing = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+      for (const e of entries) {
+        const tile = e.target; if (!e.isIntersecting || tile.dataset.live || stillMotion()) continue;
+        tile.dataset.live = '1'; playing.unobserve(tile);
+        const v = node('video'); v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.setAttribute('muted', '');
+        v.src = pickURL(tile.pick.id, true); v.oncanplay = () => { tile.classList.add('live'); v.play().catch(() => {}); }; v.onerror = () => v.remove();
+        tile.append(v);
+      }
+    }, {root: body, threshold: 0.3}) : null;
+    function tile(item, kind) {
+      const b = node('button', 'u-pick-tile ' + kind); b.type = 'button'; b.pick = item;
+      b.setAttribute('aria-label', kind === 'gif' ? 'Send GIF' : 'Send sticker ' + (item.emoji || ''));
+      if (item.w && item.h && kind === 'gif') b.style.aspectRatio = item.w + ' / ' + item.h;
+      if (item.thumb) { const img = node('img'); img.alt = ''; img.loading = 'lazy'; img.decoding = 'async'; img.src = pickURL(item.id); b.append(img); }
+      else b.append(node('span', 'u-pick-alt', item.emoji || (kind === 'gif' ? 'GIF' : '🙂')));
+      b.onclick = () => { close(); o.send({id: item.id, kind, w: item.w, h: item.h, preview: item.thumb ? pickURL(item.id) : null}); };
+      if (kind === 'gif' && item.mime?.startsWith('video/')) playing?.observe(b);
+      return b;
+    }
+    const loading = () => { const p = node('p', 'u-pick-empty'); p.append(node('span', 'spinner'), node('span', '', ' Loading…')); return p; };
+    const failed = (box, e, retry) => { box.replaceChildren(node('p', 'u-pick-empty', e?.message && e.message.length < 90 ? e.message : 'Telegram did not answer'), button('Try again', retry, 'secondary u-pick-retry')); };
+    function gifTab(gen) {
+      const search = node('input', 'u-pick-search'); search.type = 'search'; search.placeholder = 'Search GIFs'; search.setAttribute('aria-label', 'Search GIFs'); search.enterKeyHint = 'search';
+      const grid = node('div', 'u-gif-grid');
+      body.append(search, grid);
+      let timer = null, more = null;
+      const run = async (q, offset = '') => {
+        const key = q + '\n' + offset, mine = ++state.gen; gen = mine;
+        if (!offset) grid.replaceChildren(loading());
+        try {
+          const r = pickerCache.gifs[key] || (pickerCache.gifs[key] = await api('api/unified/picker/gifs?' + new URLSearchParams(offset ? {q, offset} : {q})).catch(e => { delete pickerCache.gifs[key]; throw e; }));
+          if (mine !== state.gen) return;
+          if (!offset) grid.replaceChildren();
+          more?.remove(); more = null;
+          for (const it of r.items) grid.append(tile(it, 'gif'));
+          if (!grid.childElementCount) grid.append(node('p', 'u-pick-empty', q ? 'No GIFs found' : 'Your saved GIFs show here. Search to find more.'));
+          if (r.next && q) { more = button('More GIFs', () => run(q, r.next), 'secondary u-pick-more'); grid.after(more); }
+        } catch (e) { if (mine === state.gen) failed(grid, e, () => run(q, offset)); }
+      };
+      search.oninput = () => { clearTimeout(timer); timer = setTimeout(() => run(search.value.trim()), 450); };
+      search.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); run(search.value.trim()); } };
+      run('');
+    }
+    function stickerTab(gen) {
+      const packs = node('div', 'u-pack-row'); const grid = node('div', 'u-sticker-list');
+      body.append(packs, grid);
+      const paintPack = async (pack, chip) => {
+        for (const c of packs.children) c.classList.toggle('on', c === chip);
+        const mine = ++state.gen; grid.replaceChildren(loading());
+        try {
+          const r = pickerCache.packs[pack.id] || (pickerCache.packs[pack.id] = await api('api/unified/picker/stickers/' + encodeURIComponent(pack.id)).catch(e => { delete pickerCache.packs[pack.id]; throw e; }));
+          if (mine !== state.gen) return;
+          const g = node('div', 'u-sticker-grid'); for (const it of r.stickers) g.append(tile(it, 'sticker'));
+          grid.replaceChildren(node('h3', 'u-pick-head', r.title), g);
+        } catch (e) { if (mine === state.gen) failed(grid, e, () => paintPack(pack, chip)); }
+      };
+      const paintMine = (r, chip) => {
+        for (const c of packs.children) c.classList.toggle('on', c === chip);
+        state.gen++; grid.replaceChildren();
+        for (const [title, list] of [['Recent', r.recent], ['Favorites', r.favorites]]) {
+          if (!list.length) continue;
+          const g = node('div', 'u-sticker-grid'); for (const it of list) g.append(tile(it, 'sticker'));
+          grid.append(node('h3', 'u-pick-head', title), g);
+        }
+        if (!grid.childElementCount) grid.append(node('p', 'u-pick-empty', r.packs.length ? 'Choose a sticker pack above.' : 'Stickers you use or add in Telegram show here.'));
+      };
+      const load = async () => {
+        grid.replaceChildren(loading());
+        try {
+          const r = pickerCache.stickers || (pickerCache.stickers = await api('api/unified/picker/stickers').catch(e => { pickerCache.stickers = null; throw e; }));
+          if (gen !== state.gen) return;
+          const mineChip = button('Recent', () => paintMine(r, mineChip), 'u-pack');
+          packs.replaceChildren(mineChip, ...r.packs.map(pack => { const c = button(pack.title, () => paintPack(pack, c), 'u-pack'); return c; }));
+          paintMine(r, mineChip);
+        } catch (e) { if (gen === state.gen) failed(grid, e, load); }
+      };
+      load();
+    }
+    function open() {
+      if (state.open) return;
+      if (document.activeElement === o.draft) keep(); state.open = true; panel.hidden = false; o.button.classList.add('on'); o.button.setAttribute('aria-expanded', 'true'); o.form.classList.add('picking');
+      if (touch()) o.draft.blur(); // the panel takes the keyboard's place
+      show(state.tab);
+    }
+    function close() {
+      if (!state.open) return false;
+      state.open = false; state.gen++; panel.hidden = true; body.replaceChildren(); o.button.classList.remove('on'); o.button.setAttribute('aria-expanded', 'false'); o.form.classList.remove('picking');
+      return true;
+    }
+    panel.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); o.draft.focus(); } });
+    const handle = {panel, close, toggle: () => state.open ? close() : open(), get isOpen() { return state.open; }};
+    view.picker = handle;
+    return handle;
   }
   // WebM (Matroska) Opus -> Ogg Opus, packet for packet (RFC 7845). Throws on anything it does not understand.
   function webmToOgg(b) {
@@ -2652,10 +2825,12 @@
     const t = store.threads[id]; if (!t) return;
     const client_id = 'w' + uid();
     const m = {id: 'pending:' + client_id, client_id, outgoing: true, pending: true, original: job.text || '', timestamp: Date.now(), network: t.person.identities?.[0]?.network || 'telegram',
-      msgtype: job.photo || job.photos ? 'm.image' : job.voice ? 'm.audio' : job.file ? 'm.file' : 'm.text', reactions: [], reply_to: job.reply?.id || null,
+      msgtype: job.pick ? (job.pick.kind === 'sticker' ? 'm.sticker' : 'm.image') : job.photo || job.photos ? 'm.image' : job.voice ? 'm.audio' : job.file ? 'm.file' : 'm.text', reactions: [], reply_to: job.reply?.id || null,
       reply: job.reply ? {id: job.reply.id, sender: job.reply.sender, outgoing: job.reply.outgoing, text: job.reply.original, msgtype: job.reply.msgtype, voice: job.reply.media?.voice} : null};
     if (job.photos) { m.album = 'pending:' + client_id; m.photos = job.photos.map((photo, i) => ({...m, photos: undefined, id: m.id + ':' + i, original: i ? '' : m.original, local: photo.url, media: {w: photo.w, h: photo.h, mime: 'image/jpeg'}})); m.media = m.photos[0].media; }
     if (job.photo) { m.local = job.photo.url; m.media = {w: job.photo.w, h: job.photo.h, mime: 'image/jpeg'}; }
+    // A picked sticker or GIF shows its preview while Telegram receives the real one.
+    if (job.pick) { m.local = job.pick.preview || null; m.media = {w: job.pick.w, h: job.pick.h, mime: job.pick.kind === 'gif' ? 'image/gif' : 'image/webp'}; }
     if (job.file) m.media = {filename: job.file.name, size: job.file.bytes, mime: job.file.blob.type || 'application/octet-stream'};
     if (job.voice) { m.saveRecording = () => saveVoiceRecording(job.voice.blob, job.voice.take); m.local = job.voice.url; m.media = {voice: true, duration: job.voice.duration, waveform: job.voice.waveform.map(v => Math.round(v / 10.24))}; }
     t.messages.push(m); store.pending++; hold();
@@ -2671,7 +2846,8 @@
         if (job.photo) { upload_id = (await upload(id, 'image', job.photo.blob)).upload_id; media = {w: job.photo.w, h: job.photo.h}; }
         if (job.file) upload_id = (await upload(id, 'file', job.file.blob, job.file.name)).upload_id;
         if (job.voice) { await archiveVoiceOriginal(job.voice); upload_id = (await upload(id, 'voice', job.voice.blob)).upload_id; media = {duration: job.voice.duration, waveform: job.voice.waveform}; }
-        const r = await call('people/' + id + '/send', {text: job.text || '', client_id, reply_to: job.reply?.id || null, identity_id: job.identity_id || null, upload_id, upload_ids, media});
+        const r = await call('people/' + id + '/send', job.pick ? {pick: job.pick.id, client_id, reply_to: job.reply?.id || null, identity_id: job.identity_id || null}
+          : {text: job.text || '', client_id, reply_to: job.reply?.id || null, identity_id: job.identity_id || null, upload_id, upload_ids, media});
         if (r.message) mergeMessages(id, r.messages || [r.message]);
         job.onDelivered?.();
         if (job.voice?.take) WizardApp.capture.ack(job.voice.take).catch(() => {}); // sent: release the shared recorder's kept copy

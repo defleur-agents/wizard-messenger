@@ -181,9 +181,10 @@ class Connectors:
         except (OSError, ValueError, KeyError, TypeError):
             fail('connector_not_configured', p.label + ' is disabled or missing private provisioning configuration', 409)
 
-    def request(self, network, path, method='GET', body=None, txn_id=''):
+    def request(self, network, path, method='GET', body=None, txn_id='', query=None, timeout=15):
         base, token = self.config(network)
-        query = {'user_id': self.owner}
+        # Extra query fields are for reads only (picker search); writes keep the sender's fixed shape.
+        query = {**((query or {}) if method == 'GET' else {}), 'user_id': self.owner}
         if txn_id:
             query['txn_id'] = txn_id
         path = '/_matrix/provision/v3' + path + '?' + urlencode(query)
@@ -194,7 +195,7 @@ class Connectors:
             return self.writer(network=network, base=base, path=path,
                                method=method, body=body, token=token,
                                timeout=LOGIN_TIMEOUT if path.startswith('/_matrix/provision/v3/login/step/') else 65)
-        return self.reader(base, path, method, body, token, 15)
+        return self.reader(base, path, method, body, token, timeout)
 
     def status(self, network):
         p = self.provider(network)

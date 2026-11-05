@@ -29,7 +29,7 @@ From the repository root (Docker Engine / BuildKit):
 
 ```sh
 docker build -f plumbing/telegram-bridge/Dockerfile \
-  -t wizard-telegram-bridge:0.2610.0-albums1 .
+  -t wizard-telegram-bridge:0.2610.0-albums1-pickers1 .
 ```
 
 The builder checks upstream tag `v0.2610.0` against commit `6991248e6a573489d2d38d603b5dbed1627113bc`, applies `albums.patch`, runs `go test ./pkg/connector/...` and `go vet ./pkg/connector/...`, then builds the binary. The runtime is the pinned official image plus `olm` (required by this build's CGO-linked binary). The Dockerfile executes `--version` in the **final runtime image** to catch missing shared libraries. This modified upstream bridge is AGPL-3.0-or-later; `LICENSE.upstream` accompanies the source patch. Retain source availability when distributing/serving it.
@@ -58,6 +58,17 @@ The disposable preview Telegram database has no user login or portal, so no real
 Use the candidate `runtipi/config.json` (version `0.2.0-unified.11.15`, `tipi_version` 35) and `runtipi/docker-compose.yml` only after review and image verification. Required compose changes:
 
 - `services.unified-init.image`, `services.messenger.image`, `services.translation.image`: `${MESSENGER_IMAGE:-wizard-messenger:0.2.0-unified.11.15}`.
-- `services.telegram.image`: `${TELEGRAM_IMAGE:-wizard-telegram-bridge:0.2610.0-albums1}`, with `pull_policy: never` for the local build.
+- `services.telegram.image`: `${TELEGRAM_IMAGE:-wizard-telegram-bridge:0.2610.0-albums1-pickers1}`, with `pull_policy: never` for the local build.
 
 Check installation environment overrides: an existing `MESSENGER_IMAGE` or `TELEGRAM_IMAGE` overrides these defaults. Keep all volumes/configuration/credentials intact. Back up the SQLite database before promoting the safe additive migration. No gateway/Caddyfile or live app directory changes are required by this patch. The branch includes both the live QR-code work and the unified-inbox reuse-check workflow.
+
+## Composer pickers (`pickers.patch`, applied after `albums.patch`)
+
+Read-only provisioning routes (same shared secret, the owner's default login) for Messenger's sticker and GIF picker:
+
+- `GET /v3/wizard/stickers`: recent and favourite stickers (≤30 each, previews) plus installed sticker packs (not archived, not custom emoji).
+- `GET /v3/wizard/stickers/{short_name}`: one pack's stickers with previews; also warms the bridge's sticker-pack cache.
+- `GET /v3/wizard/gifs?q=&offset=`: saved GIFs when `q` is empty, else the official `@gif` inline bot's results (≤40, `next_offset` pages). The inline query is a read; nothing is posted.
+- `GET /v3/wizard/prepare/{sticker|gif}/{document_id}`: uploads the picked document whole to the private homeserver and returns `{url, info}`. Sticker `info` carries `fi.mau.bridged_sticker`, so Messenger's `m.sticker` is forwarded as the **original Telegram sticker** (`InputMediaDocument`, no reupload). GIF `info` carries `fi.mau.gif`, so Messenger's `m.video` is reuploaded with `DocumentAttributeAnimated` and shows in Telegram as a GIF.
+
+Previews are document thumbnails (or the whole small static WebP), cached by Telegram location so reopening is instant. No route sends a message; Messenger's normal send path does. Recording-API tests: `wizardpickers_test.go`.
