@@ -18,7 +18,7 @@ from engine import EngineError, vault_password
 
 HEADER = 'X-Messenger-Owner-Proof'
 DOMAIN = 'wizard-messenger-owner-v1'
-# Platform owner proof (wizard-os spec/OWNER_PROOF.md, DECISIONS #106 approved, amended by #107): the App Manager's owner edge signs with this header and
+# Platform owner proof (wizard-os spec/OWNER_PROOF.md, DECISIONS 106 approved, amended by 107): the App Manager's owner edge signs with this header and
 # domain, bound to the app id. The legacy header/domain above stay accepted for boxes still on a hand-built ingress.
 PLATFORM_HEADER = 'X-Wizard-App-Owner-Proof'
 PLATFORM_DOMAIN = 'wizard-app-owner-v1'
