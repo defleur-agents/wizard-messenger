@@ -293,5 +293,66 @@ class UnavailableMediaTests(Base):
         self.assertEqual(self.rows()['$r']['reply']['text'], '📷 Photo not available · our trip')
 
 
+class StatusBroadcastTests(Base):
+    """WhatsApp status posts land in the Status Broadcast chat as the bridge's decrypt notice: the bridge almost
+    never receives them, so they read as a status update to view on the phone, never "still sending"."""
+    def setUp(self):
+        super().setUp()
+        self.s = self.inbox.store.identity('whatsapp', '!s', 'WhatsApp Status Broadcast', 'group')
+        self.smeta = {'network': 'whatsapp', 'kind': 'group', 'label': 'WhatsApp Status Broadcast', 'channel_id': 'status@broadcast',
+                      'names': {GHOST: 'Eric'}}
+        self.inbox.rooms['!s'] = self.smeta
+        with self.inbox.store.db() as db:
+            db.execute('INSERT INTO room_meta VALUES (?,?)', ('!s', json.dumps(self.smeta)))
+
+    def test_mapping(self):
+        now = int(time.time() * 1000)
+        self.assertEqual(unavailable_media(WAITING, now, status=True), ('status', ''))
+        self.assertEqual(unavailable_media(WAITING, 1000, status=True), ('status', ''))
+        self.assertEqual(unavailable_media(WAITING, now), ('waiting', ''))
+        self.assertEqual(unavailable_media(WAITING, 1000), ('undecryptable', ''))
+        # Media in the status chat keeps its "not available" wording.
+        self.assertEqual(unavailable_media('Failed to bridge photo, please view it on the WhatsApp app', now, status=True), ('photo', ''))
+        self.assertEqual(unified.unavailable_label('status'), '🟢 Status update')
+
+    def test_status_chat_is_recognised_by_portal_id_then_title(self):
+        is_status = unified.is_status_chat
+        self.assertTrue(is_status('whatsapp', {'channel_id': 'status@broadcast', 'label': 'Renamed'}))
+        self.assertFalse(is_status('whatsapp', {'channel_id': '123@s.whatsapp.net', 'label': 'WhatsApp Status Broadcast'}))
+        self.assertTrue(is_status('whatsapp', {'label': 'WhatsApp Status Broadcast'}))  # older cached meta: title fallback
+        self.assertTrue(is_status('whatsapp', None, 'WhatsApp Status Broadcast'))
+        self.assertFalse(is_status('telegram', {'label': 'WhatsApp Status Broadcast'}))
+        self.assertFalse(is_status('whatsapp', {'label': 'Family'}))
+
+    def test_status_placeholder_everywhere_and_other_chats_unchanged(self):
+        now = int(time.time() * 1000)
+        self.inbox.ingest(self.s, self.smeta, self.event('$st', {'msgtype': 'm.notice', 'body': WAITING}, ts=now))
+        self.inbox.ingest(self.s, self.smeta, self.event('$old', {'msgtype': 'm.notice', 'body': WAITING}, ts=1000))
+        self.ingest(self.event('$w', {'msgtype': 'm.notice', 'body': WAITING}, ts=now))
+        rows = {m['id']: m for m in self.inbox.store.messages(self.s['person_id'])}
+        self.assertEqual((rows['$st']['unavailable'], rows['$st']['original']), ('status', ''))
+        self.assertEqual(rows['$old']['unavailable'], 'status')
+        self.assertEqual(self.rows()['$w']['unavailable'], 'waiting')
+        people = {p['id']: p for p in self.inbox.store.people('group')}
+        self.assertEqual(people[self.s['person_id']]['last']['unavailable'], 'status')
+        self.assertEqual(people[self.g['person_id']]['last']['unavailable'], 'waiting')
+        feed = {i['key']: i['text'] for i in inbox_feed.items(self.inbox.store)['items']}
+        self.assertTrue(feed['chat:' + self.s['person_id']].endswith('Eric: 🟢 Status update'), feed)
+        self.assertTrue(feed['chat:' + self.g['person_id']].endswith('⏳ Waiting for this message'), feed)
+        import agent_tools
+        handler = Mock(); handler.service.unified = self.inbox
+        thread = agent_tools.read_thread(handler, None, {'chat_id': self.s['person_id']})
+        self.assertEqual({m['id']: m.get('unavailable_media') for m in thread['messages']}, {'$st': 'status', '$old': 'status'})
+        thread = agent_tools.read_thread(handler, None, {'chat_id': self.g['person_id']})
+        self.assertEqual([m.get('unavailable_media') for m in thread['messages']], ['waiting'])
+
+    def test_title_fallback_without_portal_id(self):
+        with self.inbox.store.db() as db:
+            db.execute('DELETE FROM room_meta WHERE room=?', ('!s',))
+        self.inbox.ingest(self.s, self.smeta, self.event('$st', {'msgtype': 'm.notice', 'body': WAITING}, ts=int(time.time() * 1000)))
+        rows = {m['id']: m for m in self.inbox.store.messages(self.s['person_id'])}
+        self.assertEqual(rows['$st']['unavailable'], 'status')
+
+
 if __name__ == '__main__':
     unittest.main()

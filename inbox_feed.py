@@ -40,7 +40,7 @@ STORY = re.compile(r'^>\s*(Replied|Reacted) to @(.+?)[\'’]s story', re.S)
 
 UNREAD_SQL = '''
 SELECT * FROM (
-  SELECT i.person_id, p.display_name, i.kind, m.original, m.msgtype, m.media, m.sender, m.timestamp,
+  SELECT i.person_id, i.id AS identity_id, p.display_name, i.kind, m.original, m.msgtype, m.media, m.sender, m.timestamp,
          COUNT(*) OVER (PARTITION BY i.person_id) AS n,
          ROW_NUMBER() OVER (PARTITION BY i.person_id ORDER BY m.timestamp DESC, m.id DESC) AS rn
   FROM identity i
@@ -69,7 +69,8 @@ def preview(row):
     except ValueError:
         media = {}
     from unified import media_label, unavailable_label, unavailable_media
-    gone = row['msgtype'] == 'm.text' and unavailable_media(original, row['timestamp'] if 'timestamp' in row.keys() else None)
+    status = bool(row['status_chat']) if 'status_chat' in row.keys() else False  # the WhatsApp Status Broadcast chat
+    gone = row['msgtype'] == 'm.text' and unavailable_media(original, row['timestamp'] if 'timestamp' in row.keys() else None, status)
     if gone:
         original = gone[1]
     body = _plain(original)
@@ -84,9 +85,10 @@ def preview(row):
 def items(store):
     with store.db() as db:
         rows = db.execute(UNREAD_SQL, (ITEMS_MAX,)).fetchall()
+        status = store.status_identities(db)
     out = []
     for row in rows:
-        line = preview(row)
+        line = preview(dict(row, status_chat=row['identity_id'] in status))
         if row['n'] > 1:
             line = '%d new · %s' % (row['n'], line)
         out.append({

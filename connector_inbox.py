@@ -132,6 +132,8 @@ class ConnectorInbox(UnifiedInbox):
             meta['space'] = any(e['type'] == 'm.room.create' and e.get('content', {}).get('type') == 'm.space' for e in state) or room_type in ('space', 'personal_filtering_space')
             meta['kind'] = 'person' if room_type in ('dm', 'private') or (room_type is None and len(members) == 1) else 'group'
             meta['names'] = {e.get('state_key'): (e.get('content') or {}).get('displayname') for e in state if e['type'] == 'm.room.member' and (e.get('content') or {}).get('displayname')}
+            if network == 'whatsapp' and isinstance(channel.get('id'), str):
+                meta['channel_id'] = channel['id']  # the portal jid: tells the Status Broadcast chat apart
             # Profile pictures the bridges already copy in (mxc URIs stay on the box; the view gets them through a proxy).
             meta['avatars'] = {e.get('state_key'): (e.get('content') or {}).get('avatar_url') for e in joined if MXC.fullmatch((e.get('content') or {}).get('avatar_url') or '')}
             room_pic = next(((e.get('content') or {}).get('url') for e in state if e['type'] == 'm.room.avatar'), None)
@@ -307,6 +309,32 @@ class ConnectorInbox(UnifiedInbox):
                     self._picture_skip.add(room)
         self.store.changed()
 
+    def refresh_status_rooms(self):
+        """Once: re-read the bridge info of WhatsApp chats titled like the Status Broadcast chat whose cached meta
+        predates the portal id, so that chat is recognised by id (status@broadcast) rather than by its title."""
+        marker = 'meta_status_channel_v1'
+        if self.store.get(marker):
+            return
+        try:
+            with self.store.db() as db:
+                rooms = [r[0] for r in db.execute(
+                    "SELECT i.address FROM identity i LEFT JOIN room_meta m ON m.room=i.address "
+                    "WHERE i.network='whatsapp' AND i.label=? AND (m.json IS NULL OR m.json NOT LIKE '%\"channel_id\"%')", (STATUS_TITLE,))]
+            for room in rooms:
+                with self.store.db() as db:
+                    row = db.execute('SELECT json FROM room_meta WHERE room=?', (room,)).fetchone()
+                # An outdated cached copy makes room_meta re-read state; the stored row stays if that fails.
+                self.rooms[room] = dict(json.loads(row[0]) if row else {}, v=0)
+                try:
+                    self.room_meta(room, {})
+                except Exception:
+                    self.rooms.pop(room, None)
+                    raise
+        except Exception:
+            return  # retried after the next sync; the title still identifies the chat meanwhile
+        self.store.put(marker, '1')
+        self.store.changed()
+
     def rescan_dropped(self):
         """Once per META_VERSION: rooms an older release cached as non-bridged (LINE,
         Instagram) only reappear in an incremental /sync when they get new activity.
@@ -403,6 +431,7 @@ class ConnectorInbox(UnifiedInbox):
             self.store.put('sync_error', '')
             self.rescan_dropped()
             self.refresh_pictures()
+            self.refresh_status_rooms()
             self.repair_rows()
             return {'state': 'ready'}
         except EngineError as error:
