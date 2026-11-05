@@ -42,12 +42,14 @@ function fixture() {
 }
 
 (async () => {
-  const browser = await chromium.launch(), observations = [], failures = [], unexercised = [];
+  const browser = await chromium.launch(), observations = [], failures = [], unexercised = [], insertions = [];
+  const seqOnlyControl = process.env.MESSENGER_SCROLL_INSERTION_CONTROL === 'seq-only';
   try {
-  const scenes = process.env.MESSENGER_SCROLL_CAUSAL_ONLY === '1' ? [['dark',1280]] : [['dark',1280], ['light',1280], ['dark',390], ['light',390]];
+  const scenes = process.env.MESSENGER_SCROLL_CAUSAL_ONLY === '1' || seqOnlyControl ? [['dark',1280]] : [['dark',1280], ['light',1280], ['dark',390], ['light',390]];
   for (const [skin, width] of scenes) {
     const tokens = SKINS[skin], {people, threads} = fixture(), drafts = [], updates = [];
-    let draftSeq = 0;
+    let draftSeq = 0, peopleReads = 0;
+    let insertion = null;
     const ctx = await browser.newContext({viewport: {width, height: 860}, colorScheme: tokens.scheme});
     try {
     await ctx.addInitScript(([s, tk]) => {
@@ -78,7 +80,7 @@ function fixture() {
       if (p === 'api/invites') return ok({invites: []});
       if (p === 'api/dms') return ok({dms: [dm]});
       if (p.startsWith('api/dms/') && p.endsWith('/messages')) return ok({messages: PRIVATE, next_cursor: null});
-      if (p === 'api/unified/people') return ok({people, seq: 5});
+      if (p === 'api/unified/people') { peopleReads++; return ok({people, seq: 5}); }
       if (p === 'api/unified/groups') return ok({groups: [], seq: 5});
       if (p === 'api/unified/directory') return ok({people: people.map(({id, display_name, identities}) => ({id, display_name, identities})), groups: []});
       if (p === 'api/unified/search') {
@@ -164,20 +166,46 @@ function fixture() {
     }
     // A genuine synthetic feed inserts a row and changes content height; no app state is patched.
     await list.evaluate(el => { el.scrollTop = 400; }); await frames();
-    const oldHeight = await list.evaluate(el => el.scrollHeight), generation = await page.evaluate(() => window.__listRefreshes);
+    const geometry = () => list.evaluate(el => ({height: el.scrollHeight, top: el.scrollTop, clientHeight: el.clientHeight,
+      overflowY: getComputedStyle(el).overflowY, rows: [...el.querySelectorAll('.u-person')].map(r => r.dataset.pid),
+      filters: [...document.querySelectorAll('#u-filters [aria-pressed="true"]')].map(e => e.textContent.trim()),
+      extra: [...el.querySelectorAll('[data-pid="p-extra"]')].map(r => ({height: r.offsetHeight, connected: r.isConnected, text: r.textContent}))}));
+    const beforeInsertion = await geometry(), oldHeight = beforeInsertion.height;
+    insertion = {skin, width, seqOnlyControl, before: beforeInsertion, peopleReadsBefore: peopleReads};
+    insertions.push(insertion);
+    assert.ok(!beforeInsertion.rows.includes('p-extra'), 'feed row absent before insertion');
     // Oldest synthetic row: the owner's reading position stays above it, while document height genuinely grows.
     const extra = {...people[0], id:'p-extra', display_name:'Zed Synthetic Archive', identities:[{id:'p-extra-i',network:'telegram',kind:'person',label:'Zed Synthetic Archive'}],
       last:{text:'Older feed row',timestamp:now - 900 * min,outgoing:false}, unread:0};
-    people.push(extra); threads[extra.id]=[]; updates.push({seq:7});
-    await page.waitForFunction(generation => window.__listRefreshes > generation, generation, {timeout:6000});
-    assert.ok(await list.evaluate(el => el.scrollHeight) > oldHeight, 'feed insertion genuinely changes list height');
+    // apply(r) merges only r.people. A seq-only event redraws the cached list; mutating the server-side
+    // people array cannot update the client's already serialized copy. Deliver the row ONLY through the feed.
+    const event = seqOnlyControl ? {seq:7} : {seq:7, people:[extra]};
+    const delivered = page.waitForResponse(async r => new URL(r.url()).pathname === '/api/unified/updates'
+      && (await r.json()).result?.seq === 7, {timeout:6000});
+    updates.push(event);
+    insertion.response = await (await delivered).json();
+    assert.deepEqual(insertion.response, {ok:true, result:event}, 'exact synthetic feed response delivered');
+    if (!seqOnlyControl) assert.equal(insertion.response.result.people[0].id, extra.id);
+    try {
+      await page.waitForFunction(() => document.querySelector('.u-list [data-pid="p-extra"]')?.isConnected,
+        null, {timeout:6000});
+    } finally {
+      await frames(); insertion.after = await geometry(); insertion.peopleReadsAfter = peopleReads;
+      fs.writeFileSync(path.join(out, `insertion-${skin}-${width}.json`), JSON.stringify(insertion, null, 2));
+    }
+    assert.equal(insertion.peopleReadsAfter, insertion.peopleReadsBefore, 'insertion came from feed, not list refetch');
+    assert.equal(insertion.after.extra.length, 1, 'exactly one rendered feed row');
+    assert.equal(insertion.after.rows.length, beforeInsertion.rows.length + 1, 'feed adds one rendered row');
+    assert.equal(insertion.after.rows.at(-1), extra.id, 'oldest feed row rendered last');
+    assert.ok(insertion.after.height > oldHeight, 'feed insertion genuinely changes list height');
+    assert.ok(insertion.after.height - oldHeight >= insertion.after.extra[0].height - 1, 'height grows by rendered feed row');
     await snapshot('height-changing-feed-refresh');
     await page.screenshot({path: path.join(out, `scroll-${skin}-${width}.png`)});
     assert.deepEqual(errors, [], 'no page errors');
     } finally { await ctx.close(); }
   }
   } finally {
-    fs.writeFileSync(path.join(out, 'scroll-observations.json'), JSON.stringify({observations, failures, unexercised}, null, 2));
+    fs.writeFileSync(path.join(out, 'scroll-observations.json'), JSON.stringify({observations, failures, unexercised, insertions}, null, 2));
     await browser.close(); console.log('CLEANUP list_scroll browser closed');
   }
   assert.deepEqual(unexercised, [], 'scroll probe unexercised (not a reproduced regression)');
