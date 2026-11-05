@@ -35,7 +35,8 @@ def verify(binary_dir=None):
             digest = subprocess.check_output(prefix + ['sha256sum', image, executable], text=True, timeout=20).split()[0]
             assert digest == pin.get('image_binary_sha256', pin.get('binary_sha256')), name + ' binary checksum mismatch'
             version = json.loads(subprocess.check_output(prefix + [executable, image, '--version-json'], text=True, timeout=20))
-            if name != 'line':
+            # A hash-bound custom patched build (Signal native albums) is not the upstream release binary; its identity is the exact hash above.
+            if name != 'line' and not pin.get('custom_build'):
                 assert version['Tag'] == pin['tag'] and version['IsRelease'], name + ' release version mismatch'
             if binary_dir and 'binary_sha256' in pin:
                 binary = Path(binary_dir) / ('mautrix-' + name + '-amd64')
