@@ -490,6 +490,19 @@ class PeopleStore:
                 db.execute('DELETE FROM person WHERE id=?', (row[1],))
             return True
 
+    def status_identities(self, db):
+        """Identity ids of WhatsApp Status Broadcast chats (see is_status_chat); a cheap pre-filter, then the rule."""
+        out = set()
+        for r in db.execute("SELECT i.id,i.network,i.label,m.json FROM identity i LEFT JOIN room_meta m ON m.room=i.address "
+                            "WHERE i.network='whatsapp' AND (i.label=? OR m.json LIKE ?)", (STATUS_TITLE, '%' + STATUS_CHANNEL + '%')):
+            try:
+                meta = json.loads(r[3]) if r[3] else None
+            except ValueError:
+                meta = None
+            if is_status_chat(r[1], meta, r[2]):
+                out.add(r[0])
+        return out
+
     def person(self, person_id):
         with self.db() as db:
             row = db.execute('SELECT * FROM person WHERE id=?', (person_id,)).fetchone()
@@ -511,13 +524,14 @@ class PeopleStore:
             for r in db.execute('SELECT DISTINCT i.person_id,l.label FROM room_label l JOIN identity i ON i.id=l.identity_id ORDER BY l.label'):
                 labels.setdefault(r[0], []).append(r[1])
             last = {r['person_id']: r for r in db.execute(
-                'SELECT * FROM (SELECT m.original,m.outgoing,m.sender,m.timestamp,m.msgtype,m.deleted,m.media,i.person_id,'
+                'SELECT * FROM (SELECT m.original,m.outgoing,m.sender,m.timestamp,m.msgtype,m.deleted,m.media,i.person_id,m.identity_id,'
                 'ROW_NUMBER() OVER (PARTITION BY i.person_id ORDER BY m.timestamp DESC,m.id DESC) rn '
                 'FROM message m JOIN identity i ON i.id=m.identity_id WHERE i.kind=? AND m.deleted=0) WHERE rn=1', (kind,))}
             unread = dict(db.execute(
                 'SELECT i.person_id,COUNT(*) FROM message m JOIN identity i ON i.id=m.identity_id '
                 'WHERE i.kind=? AND m.outgoing=0 AND m.deleted=0 AND m.timestamp>i.last_read_ts GROUP BY i.person_id', (kind,)).fetchall())
             pictures = self.room_pictures(db)
+            status = self.status_identities(db)
             remote = self.room_accounts(db) if kind == 'person' else {}
         result = []
         for pid, ident in idents.items():
@@ -541,7 +555,7 @@ class PeopleStore:
                     if media.get('sticker'):
                         p['last']['sticker'] = True
                 elif not r['deleted']:
-                    gone = unavailable_media(r['original'], r['timestamp'])
+                    gone = unavailable_media(r['original'], r['timestamp'], r['identity_id'] in status)
                     if gone:
                         p['last'].update(text=gone[1][:140], unavailable=gone[0])
                 p['unread'] = unread.get(pid, 0)
@@ -863,11 +877,12 @@ class PeopleStore:
                     entry['count'] += 1
                     entry['mine'] = entry['mine'] or bool(r[2])
             quoted = {}
+            status = self.status_identities(db)
             if replies:
-                for r in db.execute('SELECT id,sender,outgoing,original,msgtype,deleted,media,timestamp FROM message WHERE id IN (%s)' % ','.join('?' * len(replies)), replies):
+                for r in db.execute('SELECT id,sender,outgoing,original,msgtype,deleted,media,timestamp,identity_id FROM message WHERE id IN (%s)' % ','.join('?' * len(replies)), replies):
                     media = json.loads(r['media']) if r['media'] else {}
                     text = '' if r['deleted'] else r['original'][:200]
-                    gone = r['msgtype'] == 'm.text' and unavailable_media(r['original'], r['timestamp'])
+                    gone = r['msgtype'] == 'm.text' and unavailable_media(r['original'], r['timestamp'], r['identity_id'] in status)
                     if gone:
                         text = unavailable_label(gone[0]) + (' · ' + gone[1][:160] if gone[1] else '')
                     quoted[r['id']] = {'id': r['id'], 'sender': OWN_SENDER if r['outgoing'] else r['sender'], 'outgoing': bool(r['outgoing']), 'text': text,
@@ -890,7 +905,7 @@ class PeopleStore:
             else:
                 r['media'] = None
             if r.get('msgtype') == 'm.text' and not r['deleted']:
-                gone = unavailable_media(r.get('original'), r.get('timestamp'))
+                gone = unavailable_media(r.get('original'), r.get('timestamp'), r.get('identity_id') in status)
                 if gone:
                     # Media the bridge could not deliver: the view shows a quiet placeholder plus any caption.
                     r['unavailable'], r['original'], r['translated'] = gone[0], gone[1], None
@@ -1054,13 +1069,16 @@ WAITING_PREFIX = 'Decrypting message from WhatsApp failed'
 WAITING_MAX_MS = 3600 * 1000
 
 
-def unavailable_media(original, stamp=None):
+def unavailable_media(original, stamp=None, status=False):
     """('photo'|'video'|..., caption) for a bridge's "Failed to bridge ..." line, ('waiting', '') for a WhatsApp
     message the bridge is still waiting to decrypt ('undecryptable' once it is older than WAITING_MAX_MS, when the
-    message time is given), else None."""
+    message time is given), else None. In the WhatsApp Status Broadcast chat (status=True) that decrypt notice is
+    ('status', ''): the bridge almost never receives status posts, so it is not "still sending" anything."""
     if not isinstance(original, str) or not original.startswith(('Failed to bridge ', WAITING_PREFIX)):
         return None
     if original.startswith(WAITING_PREFIX):
+        if status:
+            return 'status', ''
         old = isinstance(stamp, (int, float)) and stamp > 0 and stamp < time.time() * 1000 - WAITING_MAX_MS
         return ('undecryptable' if old else 'waiting'), ''
     match = UNAVAILABLE.match(original)
@@ -1074,7 +1092,26 @@ def unavailable_label(kind):
         return '⏳ Waiting for this message'
     if kind == 'undecryptable':
         return "🔒 Message couldn't be decrypted"
+    if kind == 'status':
+        return STATUS_LABEL
     return UNAVAILABLE_LABELS.get(kind, '📎 Media') + ' not available'
+
+
+# WhatsApp's status posts arrive in one bridge room per account: the portal for the jid status@broadcast. The
+# bridge info (m.bridge channel.id) names it; rooms cached before that id was kept fall back to the bridge's title.
+STATUS_CHANNEL = 'status@broadcast'
+STATUS_TITLE = 'WhatsApp Status Broadcast'
+STATUS_LABEL = '🟢 Status update'
+
+
+def is_status_chat(network, meta=None, label=None):
+    """True for the WhatsApp Status Broadcast chat. Prefers the bridge's portal id; the title only without one."""
+    if network != 'whatsapp':
+        return False
+    meta = meta if isinstance(meta, dict) else {}
+    if isinstance(meta.get('channel_id'), str) and meta['channel_id']:
+        return meta['channel_id'] == STATUS_CHANNEL
+    return (label or meta.get('label')) == STATUS_TITLE
 
 
 def media_label(msgtype, media):
@@ -1437,6 +1474,8 @@ class UnifiedInbox:
             meta['kind'] = 'person' if room_type in ('dm', 'private') or (room_type is None and len(members) == 1) else 'group'
             meta['label'] = next((e['content'].get('name') for e in state if e['type'] == 'm.room.name'), None) or channel.get('displayname') or network.title() + ' conversation'
             meta['names'] = {e.get('state_key'): (e.get('content') or {}).get('displayname') for e in state if e['type'] == 'm.room.member' and (e.get('content') or {}).get('displayname')}
+            if network == 'whatsapp' and isinstance(channel.get('id'), str):
+                meta['channel_id'] = channel['id']  # the portal jid: tells the Status Broadcast chat apart
         with self.store.db() as db:
             db.execute('INSERT OR REPLACE INTO room_meta VALUES (?,?)', (room, json.dumps(meta, ensure_ascii=False)))
         self.rooms[room] = meta

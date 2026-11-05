@@ -117,8 +117,21 @@ put(tg, '!devs',
                'formatted_body': '<strong>Install Wizard OS</strong> today, then run <code>wam doctor</code> and ping <a href="https://matrix.to/#/@telegram_9:messenger.internal">@zoe_dev</a>',
                'm.mentions': {'user_ids': ['@telegram_9:messenger.internal']}}, sender='@telegram_8:messenger.internal'),
 )
+# WhatsApp Status Broadcast (bridge portal status@broadcast): a status post the bridge could not decrypt reads as a
+# status update to view on the phone; an ordinary chat's fresh decrypt failure still waits for the re-send.
+WAIT_BODY = 'Decrypting message from WhatsApp failed, waiting for sender to re-send... ([learn more](https://faq.whatsapp.com/))'
+status = inbox.store.identity('whatsapp', '!status', 'WhatsApp Status Broadcast', 'group')
+ana = inbox.store.identity('whatsapp', '!ana', 'Ana')
+more = {'!status': {'network': 'whatsapp', 'kind': 'group', 'label': 'WhatsApp Status Broadcast', 'channel_id': 'status@broadcast', 'names': {'@whatsapp_lid-222:messenger.internal': 'Eric (WA)'}},
+        '!ana': {'network': 'whatsapp', 'kind': 'person', 'label': 'Ana', 'channel_id': '111@s.whatsapp.net', 'names': {ANA: 'Ana (WA)'}}}
+with inbox.store.db() as db:
+    for room, meta in more.items():
+        db.execute('INSERT OR REPLACE INTO room_meta VALUES (?,?)', (room, json.dumps(meta)))
+inbox.rooms.update(more); metas.update(more)
+put(status, '!status', dict(ev('$status', {'msgtype': 'm.notice', 'body': WAIT_BODY}, sender='@whatsapp_lid-222:messenger.internal'), origin_server_ts=now - 60000))
+put(ana, '!ana', dict(ev('$ana-wait', {'msgtype': 'm.notice', 'body': WAIT_BODY}), origin_server_ts=now - 30000))
 token, session = server.auth.create()
-state = {'port': port, 'origin': origin, 'cookie': token, 'family': group['person_id'], 'devs': tg['person_id'], 'data': tmp}
+state = {'port': port, 'origin': origin, 'cookie': token, 'family': group['person_id'], 'devs': tg['person_id'], 'status': status['person_id'], 'ana': ana['person_id'], 'data': tmp}
 open(os.path.join(OUT, 'state.json'), 'w').write(json.dumps(state))
 print('ready', flush=True)
 server.serve_forever()
