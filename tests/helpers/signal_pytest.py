@@ -22,7 +22,8 @@ if __name__ == '__main__':
     expected = json.loads((Path(__file__).with_name('signal_pytest_expected.json')).read_text())[module]
     statuses = [{'id': c.attrib.get('name'), 'classname': c.attrib.get('classname'),
                  'status': 'fail' if list(c) else 'pass'} for c in cases]
-    ok = (code == 0 and ids == expected and len(ids) > 0 and len(cases) == len(ids)
+    junit_ids = [c.get('classname', '').replace('.', '/') + '.py::' + c.get('name', '') for c in cases]
+    ok = (code == 0 and ids == expected and junit_ids == expected and len(ids) > 0 and len(cases) == len(ids)
           and len({(c.get('classname'), c.get('name')) for c in cases}) == len(ids)
           and all(s['status'] == 'pass' for s in statuses)
           and sum(int(s.get('tests', 0)) for s in suites) == len(ids)
