@@ -86,7 +86,10 @@ def settings_hash(rt):
     obj = rt.req('GET', '/user-config/messenger:wizardapps')
     assert obj['isEnabled'] is True
     # Deliberately do not expose or persist values; no PUT/PATCH of settings exists in this tool.
-    return h(json.dumps(obj, sort_keys=True, separators=(',', ':')).encode())
+    # sourceCompose is generated from the recipe and must legitimately change on update.
+    # Guard every owner-controlled field exactly; public generated recipe bytes have their own strict guards.
+    owner = {key: obj[key] for key in ('isEnabled', 'appEnv', 'dockerCompose')}
+    return h(json.dumps(owner, sort_keys=True, separators=(',', ':')).encode())
 
 
 def pins():

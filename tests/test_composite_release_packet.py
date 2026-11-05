@@ -49,6 +49,21 @@ class PacketGuards(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 worker.check_loaded(bad, frozen)
 
+    def test_owner_settings_not_generated_recipe_hash(self):
+        class Fake:
+            obj = {'isEnabled': True, 'appEnv': '', 'dockerCompose': 'services: {slack: {}, instagram: {}}', 'sourceCompose': 'old source'}
+            def req(self, method, path):
+                return self.obj
+        rt = Fake()
+        prior = lifecycle.settings_hash(rt)
+        rt.obj['sourceCompose'] = 'new generated image recipe'
+        self.assertEqual(lifecycle.settings_hash(rt), prior)
+        rt.obj['dockerCompose'] += '\n# owner edit'
+        self.assertNotEqual(lifecycle.settings_hash(rt), prior)
+        rt.obj['dockerCompose'] = 'services: {slack: {}, instagram: {}}'
+        rt.obj['appEnv'] = 'SYNTHETIC=changed'
+        self.assertNotEqual(lifecycle.settings_hash(rt), prior)
+
     def test_node20_native_tap_counts_not_summary_event(self):
         text = 'TAP version 13\n1..4\n# tests 4\n# suites 0\n# pass 3\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n'
         self.assertEqual(worker.tap_counts(text), {'tests':4, 'pass':3, 'fail':1, 'cancelled':0, 'skipped':0})
