@@ -1,6 +1,6 @@
 services:
   unified-init:
-    image: ${MESSENGER_IMAGE:-ghcr.io/humanitylabs-org/wizard-messenger:sha-ce1ad8f3729d489fa7f6be59aa77ad368a5db319@sha256:d49d3ae06f81a8ca0e3c96ac3428bf4eaf1772c2e467fa14a9fc5de4236c348e}
+    image: ${MESSENGER_IMAGE:-ghcr.io/humanitylabs-org/wizard-messenger:sha-6ab2ed06c48787acb22828b6296597f6f1dfe1a7@sha256:71f6f4e003456273179a84245fd1f8019b36c67e26d74c9b2018b9e68d841736}
     user: "0:0"
     entrypoint: [python3, /app/unified_setup.py]
     read_only: true
@@ -17,7 +17,7 @@ services:
     labels:
       runtipi.managed: 'false'
   messenger:
-    image: ${MESSENGER_IMAGE:-ghcr.io/humanitylabs-org/wizard-messenger:sha-ce1ad8f3729d489fa7f6be59aa77ad368a5db319@sha256:d49d3ae06f81a8ca0e3c96ac3428bf4eaf1772c2e467fa14a9fc5de4236c348e}
+    image: ${MESSENGER_IMAGE:-ghcr.io/humanitylabs-org/wizard-messenger:sha-6ab2ed06c48787acb22828b6296597f6f1dfe1a7@sha256:71f6f4e003456273179a84245fd1f8019b36c67e26d74c9b2018b9e68d841736}
     read_only: true
     cap_drop: [ALL]
     user: "1000:1000"
@@ -79,7 +79,7 @@ services:
     restart: unless-stopped
   telegram:
     # Upstream bridgev2 + reproducible album patch; see plumbing/telegram-bridge.
-    image: ${TELEGRAM_IMAGE:-ghcr.io/humanitylabs-org/wizard-telegram-bridge:sha-9217753b7699ec3f259b00cdc56c79c63f61cc5f@sha256:4d5aa04648fa8ec6fb04c5e0221816504716905ee512202febdc3bc62a18747e}
+    image: ${TELEGRAM_IMAGE:-ghcr.io/humanitylabs-org/wizard-telegram-bridge:sha-6ab2ed06c48787acb22828b6296597f6f1dfe1a7@sha256:287f91f541f9def26a8c6cae80abce108056f505a763cc6c7f95ea9b359b4acd}
     user: "1000:1000"
     entrypoint: [/bin/sh, -c]
     command:
@@ -103,7 +103,7 @@ services:
       retries: 10
     restart: unless-stopped
   translation:
-    image: ${MESSENGER_IMAGE:-ghcr.io/humanitylabs-org/wizard-messenger:sha-ce1ad8f3729d489fa7f6be59aa77ad368a5db319@sha256:d49d3ae06f81a8ca0e3c96ac3428bf4eaf1772c2e467fa14a9fc5de4236c348e}
+    image: ${MESSENGER_IMAGE:-ghcr.io/humanitylabs-org/wizard-messenger:sha-6ab2ed06c48787acb22828b6296597f6f1dfe1a7@sha256:71f6f4e003456273179a84245fd1f8019b36c67e26d74c9b2018b9e68d841736}
     entrypoint: [python3, /app/translation.py]
     user: "1000:1000"
     read_only: true
@@ -126,7 +126,7 @@ services:
       retries: 3
     restart: unless-stopped
   connector-init:
-    image: ${MESSENGER_IMAGE:-ghcr.io/humanitylabs-org/wizard-messenger:sha-ce1ad8f3729d489fa7f6be59aa77ad368a5db319@sha256:d49d3ae06f81a8ca0e3c96ac3428bf4eaf1772c2e467fa14a9fc5de4236c348e}
+    image: ${MESSENGER_IMAGE:-ghcr.io/humanitylabs-org/wizard-messenger:sha-6ab2ed06c48787acb22828b6296597f6f1dfe1a7@sha256:71f6f4e003456273179a84245fd1f8019b36c67e26d74c9b2018b9e68d841736}
     user: 0:0
     entrypoint:
     - python3
