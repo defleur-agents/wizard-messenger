@@ -121,6 +121,7 @@ def main():
     ENV = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=str(deps) + ':' + str(ROOT) + ':' + str(ROOT / 'tests'),
                PLAYWRIGHT_MODULE='/srv/work/morning-diff-deps-r4/node_modules/playwright',
                SHELL_DIR=str(S / 'attachment-shell' if (S / 'attachment-shell').exists() else S / 'shell'), AGENT_STAGE_DIR=str(OUT / 'synthetic-state'),
+               ATTACHMENT_FIXTURE_MOUNT='/app/',
                EVIDENCE_DIR=str(OUT / 'attachment-browser'), STATIC_DIR=str(ROOT / 'static'))
     Path(ENV['AGENT_STAGE_DIR']).mkdir()
     inherited = manifest.get('inherited')
@@ -130,6 +131,15 @@ def main():
         for rel, h in inherited['files'].items():
             assert sha(prior / rel) == h, 'inherited evidence drift: ' + rel
         prior_manifest = json.loads((prior / 'stage-manifest.json').read_text())
+        closure = manifest['inherited_source_closure']
+        unchanged = closure['unchanged_files']
+        allowed = set(closure['allowed_changed_or_added'])
+        current_paths = set(subprocess.check_output(['git', 'ls-files'], cwd=ROOT, text=True).splitlines())
+        prior_paths = {p[len('source/'):] for p in prior_manifest['files'] if p.startswith('source/')}
+        assert current_paths - allowed == prior_paths - allowed == set(unchanged), 'inherited source membership drift'
+        for rel, h in unchanged.items():
+            assert sha(ROOT / rel) == sha(prior / 'source' / rel) == h, 'inherited source closure drift: ' + rel
+            assert (ROOT / rel).stat().st_mode & 0o111 == (prior / 'source' / rel).stat().st_mode & 0o111
         for name in FILES:
             assert sha(ROOT / 'static' / name) == prior_manifest['files']['source/static/' + name]
         historical = json.loads((prior / 'evidence/historical-exact-case-comparison.json').read_text())
@@ -199,6 +209,9 @@ def main():
         # Complete merged account/layout browser, actual shared palettes, stable decoded opacity + injected-negative gate.
         run('merged-account-layout', ['node', 'tests/account_setup_browser.cjs', str(OUT / 'account-layout')], timeout=240)
         run('existing-connectors-browser', ['node', 'tests/new_connectors_browser.cjs', str(OUT / 'existing-connectors')])
+    # Only the demonstrated fixture seam changes; execute its real-parser contract
+    # before the unchanged attachment assertions and exact-base packaging phases.
+    run('native-attachment-mount-contract', [sys.executable, 'tests/test_attachment_fixture_mount.py', '-v'])
     # Real disposable ViewServer, only synthetic cookie/CSRF/data and provider mocks.
     sock = socket.socket(); sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]; sock.close()
     with (OUT / 'synthetic-server.log').open('x') as log:

@@ -27,12 +27,10 @@ const until = async (fn, label) => { for (let i = 0; i < 120; i++) { if (await f
     return route.fulfill({status: fs.existsSync(p) ? 200 : 404, contentType: p.endsWith('.js') ? 'text/javascript' : 'text/css', body: fs.existsSync(p) ? fs.readFileSync(p) : ''});
   });
   // Real Appearance host admission requires a .win iframe and a registered non-root app prefix.
-  // Mount only this disposable ViewServer under /app/; no owner app or endpoint is contacted.
-  await ctx.route(st.origin + '/app/**', async route => {
-    const u = new URL(route.request().url());
-    const response = await route.fetch({url: st.origin + u.pathname.slice('/app'.length) + u.search});
-    return route.fulfill({response});
-  });
+  // The disposable server strips /app/ after its native HTTP parser to reach
+  // ViewHandler's actual root routes. Do not proxy these through route.fetch: its uncaught
+  // ECONNRESET killed r3 outside the browser's failure collector. All real methods,
+  // request bodies, owner/CSRF checks and attachment fault fallbacks stay intact.
   await ctx.route('**/hosted-draft-qa', r => r.fulfill({contentType: 'text/html', body: `<!doctype html><html data-skin="nebula"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><script>window.WizCore={apps:()=>({APPS:[{url:'/app/'}]})};window.setFixtureSkin=id=>{const s=${JSON.stringify(palettes)}.find(s=>s.id===id);if(!s)throw Error('Unknown palette');for(const [k,v] of Object.entries(s.t))document.documentElement.style.setProperty('--'+k,v);document.documentElement.dataset.skin=id;window.WizAppearance?.sync()};setFixtureSkin('nebula')</script><script src="/wizard-os-home/core/appearance-host.js" defer></script><style>html,body{margin:0;width:100%;height:100%;background:var(--bg,#05030c)}.st-embed,iframe{display:block;width:100%;height:100%;border:0}</style></head><body><div class="st-embed win"><iframe title="Synthetic Messenger" src="/app/"></iframe></div></body></html>`}));
   await ctx.route(/\/api\/drafts\/[^/]+\/attachments(?:\/[^/?]+)?(?:\?.*)?$/, async route => {
     const req = route.request(), u = new URL(req.url()); network.push({event:'attachment-route', method:req.method(), path:u.pathname});
@@ -46,6 +44,9 @@ const until = async (fn, label) => { for (let i = 0; i < 120; i++) { if (await f
   await ctx.route(/\/api\/unified\/people\/[^/]+\/send$/, async route => { sends.push(route.request().postDataJSON()); await pause(200); return route.fallback(); });
   const page = await ctx.newPage(); page.on('pageerror', e => errors.push(safeText(e.message))); page.on('console', m => consoleMessages.push({type:m.type(), text:safeText(m.text())})); page.on('request', r => network.push({event:'request',method:r.method(),path:safeURL(r.url())})); page.on('response', r => network.push({event:'response',method:r.request().method(),path:safeURL(r.url()),status:r.status()})); page.on('requestfailed', r => network.push({event:'requestfailed',method:r.method(),path:safeURL(r.url()),error:safeText(r.failure()?.errorText)}));
   try {
+    const mount = await fetch(st.origin + '/app/api/view/session', {headers: {Cookie: 'wizard_messenger_session=' + st.cookie}});
+    assert.equal(mount.status, 200, 'native disposable /app/ mount required');
+    assert.equal((await mount.json()).result.authenticated, true);
     await page.goto(st.origin + '/hosted-draft-qa');
     const frame = page.frameLocator('iframe');
     await frame.locator('.u-person', {hasText: 'Alice Example'}).first().click();
@@ -104,6 +105,7 @@ const until = async (fn, label) => { for (let i = 0; i < 120; i++) { if (await f
     assert.equal(await page.locator('html').evaluate(e => e.classList.contains('wz-hosted')), false);
     await page.screenshot({path: path.join(evidence, 'standalone-draft-dark.png')});
     assert.deepEqual(errors, []);
+    fs.writeFileSync(path.join(evidence, 'network.json'), JSON.stringify(network, null, 2));
     fs.writeFileSync(path.join(evidence, 'browser-receipt.json'), JSON.stringify({pass: true, syntheticOnly: true, hostedProxy: true, checks, sends, pageErrors: errors}, null, 2));
     console.log(JSON.stringify({pass: true, checks: checks.length, syntheticSends: sends.length, pageErrors: errors}));
   } catch (e) {
