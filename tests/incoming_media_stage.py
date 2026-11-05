@@ -3,7 +3,7 @@ Disposable staging for incoming media display: real ViewServer + real UnifiedInb
 chats fed through the real ingest path (GIF, animated sticker, static GIF, @mentions, expired media, a decrypt-retry
 edit that becomes a photo). Media bytes are generated with ffmpeg and pre-seeded into the media cache: no homeserver,
 no provider, no real account. Writes <dir>/state.json."""
-import hashlib, json, os, subprocess, sys, tempfile, time
+import hashlib, itertools, json, os, subprocess, sys, tempfile, time
 from unittest.mock import Mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, 'tests'))
 OUT = os.environ.get('AGENT_STAGE_DIR', '/home/oscar/.hermes/cache/scratch/incoming-stage'); os.makedirs(OUT, exist_ok=True)
@@ -27,7 +27,8 @@ port = int(sys.argv[1]) if len(sys.argv) > 1 else 18951
 origin = 'http://127.0.0.1:%d' % port
 server = ViewServer(('127.0.0.1', port), engine, fx.TOKEN, [origin])
 inbox = UnifiedInbox(tmp, engine); server.unified = inbox
-inbox.mx = Mock(return_value={'event_id': '$sent'})
+_sent = itertools.count(1)
+inbox.mx = Mock(side_effect=lambda *a, **k: {'event_id': '$sent%d' % next(_sent)})  # unique: a reaction swap redacts the old one
 inbox.matrix_token = lambda: 'staged'
 server.drafts = Drafts(tmp)
 
@@ -102,6 +103,10 @@ put(group, '!family', ev('$wait-edit', {'msgtype': 'm.image', 'body': '* sunset'
 # A decrypt failure WhatsApp never re-sent (two days old): "couldn't be decrypted", not "waiting" forever.
 put(group, '!family', dict(ev('$lost', {'msgtype': 'm.notice', 'body': 'Decrypting message from WhatsApp failed, waiting for sender to re-send... ([learn more](https://faq.whatsapp.com/))'}, sender=BRAM),
                            origin_server_ts=now - 2 * 86400000))
+# A photo with no caption (bubble-less) and an incoming reaction on the GIF: both must stay reactable (react_media_browser).
+put(group, '!family', ev('$photo', {'msgtype': 'm.image', 'body': 'IMG_2041.png', 'url': 'mxc://messenger.internal/photo',
+                                    'info': {'mimetype': 'image/png', 'w': 640, 'h': 480, 'size': 9000}}, sender=BRAM),
+    ev('$gif-heart', {'m.relates_to': {'rel_type': 'm.annotation', 'event_id': '$gif', 'key': '❤️'}}, sender=BRAM, etype='m.reaction'))
 put(group, '!family', ev('$expired2', {'msgtype': 'm.notice', 'body': 'Failed to bridge voice message, please view it on the WhatsApp app'}, sender=BRAM))
 put(tg, '!devs',
     ev('$sticker', {'msgtype': 'm.video', 'body': 'sticker.webm', 'url': 'mxc://messenger.internal/sticker',
