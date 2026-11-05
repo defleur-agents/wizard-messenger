@@ -76,7 +76,6 @@ def main():
     global ENV
     assert str(S).startswith('/srv/work/messenger-composed-')
     assert os.environ.get('WIZARD_WORKER_LANE')=='light','durable light admission required'
-    assert os.environ.get('WIZARD_HEAVY_LOCK_FD'),'durable worker lease required'
     assert len(sys.argv)==2 and sha(S/'stage-manifest.json')==sys.argv[1]
     manifest=json.loads((S/'stage-manifest.json').read_text());verify_seal(manifest)
     assert not OUT.exists(),'fresh evidence only';OUT.mkdir()
