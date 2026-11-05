@@ -42,9 +42,10 @@ function fixture() {
 }
 
 (async () => {
-  const browser = await chromium.launch(), observations = [], failures = [];
+  const browser = await chromium.launch(), observations = [], failures = [], unexercised = [];
   try {
-  for (const [skin, width] of [['dark',1280], ['light',1280], ['dark',390], ['light',390]]) {
+  const scenes = process.env.MESSENGER_SCROLL_CAUSAL_ONLY === '1' ? [['dark',1280]] : [['dark',1280], ['light',1280], ['dark',390], ['light',390]];
+  for (const [skin, width] of scenes) {
     const tokens = SKINS[skin], {people, threads} = fixture(), drafts = [], updates = [];
     let draftSeq = 0;
     const ctx = await browser.newContext({viewport: {width, height: 860}, colorScheme: tokens.scheme});
@@ -118,8 +119,10 @@ function fixture() {
         for (const r of records) if (r.type === 'childList' && r.target.classList?.contains('u-list')) window.__listRefreshes++;
       }).observe(document, {childList: true, subtree: true});
     });
+    const checkSource = require('./browser_source_custody.cjs')(page, root, out, skin+'-'+width);
     await page.goto('https://messenger.test/');
     await page.locator('.u-list .u-person', {hasText: 'Kira Novak'}).waitFor();
+    await checkSource();
     const list = page.locator('.u-list');
     await list.evaluate(el => { el.scrollTop = 400; });
     const frames = () => page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
@@ -141,25 +144,43 @@ function fixture() {
     await list.evaluate(el => { el.scrollTop = 400; }); await frames();
     await page.locator('.u-list .u-person', {hasText: 'Kira Novak'}).click();
     await page.locator('.u-who-text strong', {hasText: 'Kira Novak'}).waitFor();
-    const save = page.waitForResponse(r => new URL(r.url()).pathname === '/api/drafts' && r.request().method() === 'POST');
-    await page.locator('textarea[aria-label="Message"]').fill('Synthetic retained scroll draft'); await save;
+    const save = page.waitForResponse(r => new URL(r.url()).pathname === '/api/drafts' && r.request().method() === 'POST', {timeout:6000});
+    await page.locator('textarea[aria-label="Message"]').fill('Synthetic retained scroll draft');
+    try { await save; }
+    catch (error) {
+      unexercised.push({skin,width,step:'draft-save',reason:'Selected source did not issue the fixture draft POST',
+        pageErrors:errors,composer:await page.locator('textarea[aria-label="Message"]').inputValue()});
+      continue;
+    }
     assert.equal(drafts.find(d => d.person_id === 'p10')?.text, 'Synthetic retained scroll draft');
     if (width >= 640) {
       await snapshot('draft-save');
+      if (process.env.MESSENGER_SCROLL_CAUSAL_ONLY === '1') continue;
       await page.locator('.u-list .u-person', {hasText: 'Maya Cohen'}).click();
       await page.locator('.u-who-text strong', {hasText: 'Maya Cohen'}).waitFor();
       await snapshot('switch-after-draft');
     } else {
       await page.locator('.u-back').click(); await list.waitFor(); await snapshot('phone-back-after-draft');
     }
+    // A genuine synthetic feed inserts a row and changes content height; no app state is patched.
+    await list.evaluate(el => { el.scrollTop = 400; }); await frames();
+    const oldHeight = await list.evaluate(el => el.scrollHeight), generation = await page.evaluate(() => window.__listRefreshes);
+    // Oldest synthetic row: the owner's reading position stays above it, while document height genuinely grows.
+    const extra = {...people[0], id:'p-extra', display_name:'Zed Synthetic Archive', identities:[{id:'p-extra-i',network:'telegram',kind:'person',label:'Zed Synthetic Archive'}],
+      last:{text:'Older feed row',timestamp:now - 900 * min,outgoing:false}, unread:0};
+    people.push(extra); threads[extra.id]=[]; updates.push({seq:7});
+    await page.waitForFunction(generation => window.__listRefreshes > generation, generation, {timeout:6000});
+    assert.ok(await list.evaluate(el => el.scrollHeight) > oldHeight, 'feed insertion genuinely changes list height');
+    await snapshot('height-changing-feed-refresh');
     await page.screenshot({path: path.join(out, `scroll-${skin}-${width}.png`)});
     assert.deepEqual(errors, [], 'no page errors');
     } finally { await ctx.close(); }
   }
   } finally {
-    fs.writeFileSync(path.join(out, 'scroll-observations.json'), JSON.stringify({observations, failures}, null, 2));
+    fs.writeFileSync(path.join(out, 'scroll-observations.json'), JSON.stringify({observations, failures, unexercised}, null, 2));
     await browser.close(); console.log('CLEANUP list_scroll browser closed');
   }
+  assert.deepEqual(unexercised, [], 'scroll probe unexercised (not a reproduced regression)');
   assert.deepEqual(failures, [], 'list-scroll position changed');
   console.log('ALL PASS list_scroll_browser (two skins, desktop and phone; feed, draft, switch/Back)');
 })().catch(e => { console.error(e); process.exitCode = 1; });

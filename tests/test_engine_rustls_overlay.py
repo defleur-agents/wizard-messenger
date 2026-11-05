@@ -42,7 +42,13 @@ class RustlsSecurityOverlay(unittest.TestCase):
         self.assertIn("git apply --check /engine-patches/0001-rustls-0.23.46.patch", dockerfile)
         self.assertIn("git apply --whitespace=error /engine-patches/0001-rustls-0.23.46.patch", dockerfile)
         self.assertIn("dac950e433d49280ebb9f8c46cfe4432287e0812186115e077bf83fee953377a  Cargo.lock", dockerfile)
-        self.assertIn("cargo build --locked -p wn-cli --bins -j1", dockerfile)
+        # The offered 16.22 source deliberately parameterizes memory-bounded build parallelism.
+        # Keep the locked source build and conservative default; do not accept a prebuilt engine.
+        self.assertIn("ARG CARGO_JOBS=1", dockerfile)
+        self.assertIn("CARGO_BUILD_JOBS=${CARGO_JOBS}", dockerfile)
+        self.assertIn("cargo build --locked -p wn-cli --bins -j${CARGO_JOBS}", dockerfile)
+        self.assertLess(dockerfile.index("git apply --check /engine-patches/0001"),
+                        dockerfile.index("cargo build --locked"))
         self.assertIn("unproven prebuilt wn/wnd carrier refused", dockerfile)
 
 

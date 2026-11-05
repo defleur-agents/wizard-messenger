@@ -28,6 +28,8 @@ class Element {
   replaceChildren(...els){this.children=[];this._text='';this.append(...els);}
   setAttribute(k,v){this.attrs[k]=v;}
   getAttribute(k){return this.attrs[k];}
+  removeAttribute(k){delete this.attrs[k];}
+  toggleAttribute(k,force){const on=force===undefined?!(k in this.attrs):!!force;if(on)this.attrs[k]='';else delete this.attrs[k];return on;}
   addEventListener(){}
   focus(){}
   querySelector(selector){return this.querySelectorAll(selector)[0];}
@@ -37,7 +39,7 @@ test('message search calls authenticated API, pages text results and ignores sta
   const root=new Element('main');root.id='messenger';const inbox=new Element('section');inbox.id='unified-inbox';root.append(inbox);
   const tabs=new Element('nav');tabs.id='inbox-tabs';
   const all=()=>{const out=[];const walk=e=>{out.push(e);e.children.forEach(walk);};walk(root);return out;};
-  const document={querySelector(){return null;},hidden:true,activeElement:null,documentElement:{dataset:{}},addEventListener(){},getElementById:id=>id==='inbox-tabs'?tabs:all().find(e=>e.id===id),createElement:tag=>new Element(tag),createElementNS:(_,tag)=>new Element(tag)};
+  const document={querySelector:selector=>root.querySelector(selector)||null,querySelectorAll:selector=>root.querySelectorAll(selector),hidden:true,activeElement:null,documentElement:new Element('html'),addEventListener(){},getElementById:id=>id==='inbox-tabs'?tabs:all().find(e=>e.id===id),createElement:tag=>new Element(tag),createElementNS:(_,tag)=>new Element(tag)};
   const calls=[], pending=[];
   const api=async path=>{
     calls.push(path);
@@ -46,8 +48,9 @@ test('message search calls authenticated API, pages text results and ignores sta
     if(path.startsWith('api/unified/search?'))return new Promise(resolve=>pending.push({path,resolve}));
     throw Error('Unexpected '+path);
   };
-  const timers=[];
-  const ctx={addEventListener(){},document,AbortController,Audio:class{},navigator:{},URLSearchParams,console,setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){},requestAnimationFrame:fn=>fn(),localStorage:{getItem(){return null;}},sessionStorage:{getItem(){return null;}}};ctx.window=ctx;
+  const timers=[], intervals=[];
+  // Explicit narrow/touch browser environment: node:vm does not inherit browser globals from Node.
+  const ctx={crypto:require('node:crypto').webcrypto,matchMedia:query=>({matches:false,media:query,addEventListener(){},removeEventListener(){},addListener(){},removeListener(){}}),MutationObserver:class{observe(){}disconnect(){}},innerWidth:390,location:new URL('https://messenger.test/'),history:{replaceState(){}},addEventListener(){},document,AbortController,Audio:class{},navigator:{},URLSearchParams,console,setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){},setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval(){},requestAnimationFrame:fn=>fn(),localStorage:{getItem(){return null;}},sessionStorage:{getItem(){return null;}}};ctx.window=ctx;
   vm.runInNewContext(fs.readFileSync('static/unified.js','utf8'),ctx);
   ctx.MessengerUnified.mount({api});ctx.MessengerUnified.authenticated();
   const flush=async()=>{for(let n=0;n<5;n++)await new Promise(r=>setImmediate(r));};await flush();

@@ -116,24 +116,25 @@ function fixture() {
       if (!file.startsWith(root) || !fs.existsSync(file)) return route.fulfill({status: 404, body: ''});
       return route.fulfill({status: 200, contentType: TYPES[path.extname(file)] || 'application/octet-stream', body: fs.readFileSync(file)});
     });
+    // No replaceChildren wrapper: synchronous layout reads there perturb native scroll anchoring.
     if (process.env.MESSENGER_SCROLL_TRACE === '1') await page.addInitScript(() => {
       window.__listScrollTrace = [];
-      const orig = Element.prototype.replaceChildren;
-      Element.prototype.replaceChildren = function (...rows) {
-        const record = this.classList.contains('u-list') ? {before: this.scrollTop, height: this.scrollHeight, at: performance.now()} : null;
-        const result = orig.apply(this, rows);
-        if (record) { record.afterReplace = this.scrollTop; window.__listScrollTrace.push(record); requestAnimationFrame(() => { record.nextFrame = this.scrollTop; }); }
-        return result;
-      };
+      new MutationObserver(records => {
+        for (const r of records) if (r.type === 'childList' && r.target.classList?.contains('u-list'))
+          window.__listScrollTrace.push({top:r.target.scrollTop, height:r.target.scrollHeight, at:performance.now()});
+      }).observe(document, {childList:true,subtree:true});
     });
     const trace = async step => {
+      if (process.env.MESSENGER_SCROLL_TRACE !== '1') return;
       const row = await page.evaluate(step => ({step, trace: window.__listScrollTrace, top: document.querySelector('.u-list')?.scrollTop,
         selected: document.querySelector('.u-person.selected')?.dataset.pid}), step);
       fs.writeFileSync(path.join(out, 'scroll-trace-' + skin + '.json'), JSON.stringify(row, null, 2));
       console.log('SCROLL', JSON.stringify(row));
     };
+    const checkSource = require('./browser_source_custody.cjs')(page, root, out, skin);
     await page.goto('https://messenger.test/');
     await page.locator('#u-pane-list .u-person', {hasText: 'Ana Souza'}).waitFor(); await page.waitForTimeout(400);
+    await checkSource();
     const box = sel => page.locator(sel).first().boundingBox();
     assert.ok(await page.evaluate(() => document.documentElement.hasAttribute('data-split')), skin + ': split on at 1280');
     // List and detail (Miguel, 31 Oct 2026): nothing open = the list fills the window, no right pane, compact rows.
@@ -194,6 +195,13 @@ function fixture() {
       await trace('after-switch');
       assert.equal(await list.evaluate(el => el.__kept === true), true, 'list still not rebuilt');
       assert.ok(Math.abs(await list.evaluate(el => el.scrollTop) - scrolled) < 2, 'list scroll kept after switching');
+      console.log('SCROLL_ASSERT PASS list scroll kept after switching');
+      if (process.env.MESSENGER_STOP_AFTER_SCROLL === '1') {
+        await page.screenshot({path:path.join(out,'scroll-assertion-pass.png')});
+        await ctx.close();
+        console.log('ALL PASS desktop_scroll_causal (original strict assertion; no prototype instrumentation)');
+        return;
+      }
       assert.equal(await rowA.getAttribute('aria-current'), null); assert.equal(await rowB.getAttribute('aria-current'), 'true');
       // typing then switching at once still saves (the pending save is flushed, not dropped)
       await field.fill('Quick note for Maya'); await rowA.click(); await page.locator('#u-pane-thread .u-who-text strong', {hasText: 'Kira Novak'}).waitFor(); await page.waitForTimeout(1200);
