@@ -37,6 +37,18 @@ class ComposedLifecycle(unittest.TestCase):
         with patch.object(L,'files',return_value={}),patch.object(L,'settings_hash',return_value='settings'),patch.object(L,'pins',return_value={}),patch.object(L,'service_metadata',return_value=now),patch.object(L,'public_static',side_effect=AssertionError('must not read assets after drift')):
             with self.assertRaisesRegex(AssertionError,'unrelated service restarted slack'):
                 L.verify_state(plan,None,{},'new',{},'sig')
+    def test_signal_target_digest_kind_is_archive_qualified(self):
+        import copy
+        import subprocess
+        d=json.loads((ROOT/'tests/fixtures/docker_imported_signal.json').read_text())
+        i=copy.deepcopy(d['loaded']);i['Id']=d['frozen']['manifest_digest']
+        with patch.object(L,'image_info',return_value=i):
+            self.assertEqual(L.resolve_signal(d['frozen']),i['Id'])
+        with patch.object(L,'image_info',side_effect=[subprocess.CalledProcessError(1,['docker']),d['loaded']]):
+            self.assertEqual(L.resolve_signal(d['frozen']),d['loaded']['Id'])
+        i['Config']['User']='root'
+        with patch.object(L,'image_info',return_value=i):
+            with self.assertRaises(AssertionError):L.resolve_signal(d['frozen'])
     def test_five_file_payload_has_no_gateway_pinned_changes(self):
         import run_composed_overlay_forum as R
         self.assertEqual(set(R.PATHS),{'unified.py','static/unified.js','static/unified.css','static/connectors.js','plumbing/connectors-provenance.json'})

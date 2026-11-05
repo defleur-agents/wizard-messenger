@@ -125,8 +125,19 @@ def verify_image(ref, identity):
 def verify_signal(ref, identity):
     i = image_info(ref)
     check_loaded(i, identity)
-    assert i['Id'] == SIGNAL_IMAGE and i['Architecture'] == 'amd64'
+    assert identity['config_digest'] == SIGNAL_IMAGE and i['Architecture'] == 'amd64'
     return i['Id']
+
+
+def resolve_signal(identity):
+    # A containerd daemon may address only the manifest, not the classic config ID.
+    # Only archive-qualified references; no registry fallback or mutation.
+    for ref in [identity['manifest_digest'], identity['config_digest']]:
+        try:
+            return verify_signal(ref, identity)
+        except subprocess.CalledProcessError:
+            pass
+    raise AssertionError('frozen Signal not addressable by either qualified digest')
 
 
 def public_static(expected):
@@ -189,7 +200,7 @@ def main():
     candidate = verify_image(identity['tag'], identity)
     assert receipt['signal_identity_sha256'] == h((E / 'signal-image-identity.json').read_bytes())
     signal_identity = json.loads((E / 'signal-image-identity.json').read_text())
-    signal_candidate = verify_signal(SIGNAL_IMAGE, signal_identity)
+    signal_candidate = resolve_signal(signal_identity)
     planfile = PKT / 'activation-plan.json'
     with LOCK.open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -210,7 +221,7 @@ def main():
             assert h((ROOT/'plumbing/connectors-provenance.json').read_bytes()) == receipt['overlay_files']['plumbing/connectors-provenance.json']
             public_static(baseline)
             tipi = json.loads(before['config.json'])['tipi_version']
-            wanted = target(before, receipt['revision'], candidate, tipi + 1)
+            wanted = target(before, receipt['revision'], candidate, tipi + 1, signal_candidate)
             rollback_files = dict(before)
             cfg = json.loads(before['config.json']); cfg['tipi_version'] = tipi + 2
             rollback_files['config.json'] = json.dumps(cfg, indent=2) + '\n'
