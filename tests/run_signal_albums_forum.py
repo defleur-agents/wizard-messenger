@@ -19,7 +19,7 @@ STAGE = ROOT.parent
 OUT = STAGE / 'evidence'
 BASE = STAGE / 'baseline'
 ENV = dict(os.environ, PYTHONPATH=str(ROOT)+':'+str(ROOT/'tests'),
-           TMPDIR=str(STAGE/'scratch'), PYTHONDONTWRITEBYTECODE='1',
+           TMPDIR='/srv/work/sa-'+STAGE.name.rsplit('-',1)[-1][:10], PYTHONDONTWRITEBYTECODE='1',
            NODE_PATH='/srv/work/morning-diff-deps-r4/node_modules',
            SIGNAL_SHELL_WEB=str(STAGE/'shell-web'), OUT=str(OUT/'browser'),
            SIGNAL_CONVERTER_FIXTURES='', SIGNAL_INGRESS_PROOF='')
@@ -42,6 +42,27 @@ def checkpoint(phase, **values):
     receipt.update(phase=phase,**values);save('qa-receipt',receipt)
     print(json.dumps({'phase':phase,**values}),flush=True)
 
+def marked_children():
+    marker=('TMPDIR='+ENV['TMPDIR']).encode()
+    found=[]
+    for proc in Path('/proc').glob('[0-9]*'):
+        pid=int(proc.name)
+        if pid<=1 or pid==os.getpid():continue
+        try:
+            if proc.stat().st_uid==os.geteuid() and marker in (proc/'environ').read_bytes().split(b'\0'):
+                found.append(pid)
+        except (FileNotFoundError,ProcessLookupError,PermissionError):pass
+    return found
+
+def cleanup_children():
+    import signal
+    for sig in [signal.SIGTERM,signal.SIGKILL]:
+        for pid in marked_children():
+            try:os.kill(pid,sig)
+            except ProcessLookupError:pass
+        if marked_children():time.sleep(0.2)
+    assert not marked_children(),'owned marked processes survived cleanup'
+
 def run(name, argv, extra=None, timeout=600, required=True, cwd=ROOT):
     log=OUT/(name+'.log');started=time.monotonic()
     item={'name':name,'argv':list(map(str,argv)),'cwd':str(cwd),'state':'running','log':str(log)}
@@ -51,7 +72,9 @@ def run(name, argv, extra=None, timeout=600, required=True, cwd=ROOT):
             p=subprocess.run(argv,cwd=cwd,env=dict(ENV,PYTHONPATH=str(cwd)+':'+str(cwd/'tests'),**(extra or {})),
                              stdout=f,stderr=subprocess.STDOUT,timeout=timeout)
         code=p.returncode
-    except subprocess.TimeoutExpired:code=124
+    except subprocess.TimeoutExpired:
+        code=124
+        cleanup_children()
     item.update(state='complete',returncode=code,seconds=round(time.monotonic()-started,2),log_sha256=digest(log))
     save('runs',records);save('qa-receipt',receipt);print(json.dumps(item),flush=True)
     if required and code:raise RuntimeError('Failed '+name+'; inspect '+str(log))
@@ -80,7 +103,7 @@ try:
     assert str(ROOT).startswith('/srv/work/'), 'Linux work belongs on admitted forum /srv/work'
     assert os.environ.get('WIZARD_HEAVY_LOCK_FD'), 'must run through durable heavy admission'
     OUT.mkdir(exist_ok=False)
-    (STAGE/'scratch').mkdir(exist_ok=True)
+    Path(ENV['TMPDIR']).mkdir(exist_ok=False)
     manifest=json.loads((STAGE/'stage.json').read_text())
     receipt.update(source_revision=manifest['source_revision'],baseline_live_revision=manifest['baseline_live_revision'],
                    product_revision=manifest['product_revision'],shell_revision=manifest['shell_revision'],
@@ -196,6 +219,10 @@ finally:
             assert check.returncode!=0,'owned container survived cleanup'
             receipt['owned_container_removed']=True
         except Exception as error:receipt.update(result='fail',cleanup_error=str(error))
+    try:
+        cleanup_children()
+        receipt['owned_marked_processes_remaining']=[]
+    except Exception as error:receipt.update(result='fail',cleanup_error=str(error))
     if OUT.is_dir():save('qa-receipt',receipt)
     print(json.dumps(receipt),flush=True)
 sys.exit(0 if receipt['result']=='scoped_pass' else 1)
