@@ -5,7 +5,7 @@
     if (state.overlay) return {...state, overlay: null, handled: true};
     if (state.person) return {...state, person: null, handled: true};
     if (state.search != null) return {...state, search: null, handled: true};
-    if (state.low) return {...state, low: false, handled: true}; // Low priority folder → Inbox
+    if (state.low || state.seg === 'medium') return {...state, low: false, seg: 'all', handled: true}; // Low/Medium folder → All
     return {...state, handled: false}; // Shared WizardApp owns the root guard.
   }
   async function fetchOlder(t, id, call) {
@@ -63,7 +63,7 @@
   if (typeof module !== 'undefined') module.exports = {backState, fetchOlder, notificationSettings};
   if (typeof document === 'undefined') return;
   const $ = id => document.getElementById(id);
-  const s = {tab: 'people', person: null, overlay: null, search: null, low: (() => { try { return sessionStorage.getItem('messenger-inbox-low') === '1'; } catch { return false; } })(), ready: false, epoch: 0, busy: false, drafts: {}, people: [], login: null};
+  const s = {tab: 'people', person: null, overlay: null, search: null, low: false, seg: (() => { try { const v = sessionStorage.getItem('messenger-inbox-seg') || (sessionStorage.getItem('messenger-inbox-low') === '1' ? 'low' : 'all'); return ['all', 'unread', 'medium', 'low'].includes(v) ? v : 'all'; } catch { return 'all'; } })(), ready: false, epoch: 0, busy: false, drafts: {}, people: [], login: null};
   let api, timer, lastFocus, updateHold, connectorController, native;
   let nativeRows = [], nativeFocus = null;
   // A letter outside the Latin script (Thai, Cyrillic, CJK…) offers Translate; English never does.
@@ -83,11 +83,13 @@
     down: ['M12 5v14', 'm5 12 7 7 7-7'], up: ['M12 19V5', 'm5 12 7-7 7 7'], plus: ['M12 5v14', 'M5 12h14'],
     mic: ['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M19 11a7 7 0 0 1-14 0', 'M12 18v3'],
     play: ['M7 4.5v15l12-7.5z'], reply: ['M9 14 4 9l5-5', 'M4 9h10a6 6 0 0 1 6 6v4'],
+    forward: ['M15 14l5-5-5-5', 'M20 9H10a6 6 0 0 0-6 6v4'], textsel: ['M5 6h14', 'M5 11h14', 'M5 16h8', 'M17 14v7', 'M15 14h4', 'M15 21h4'],
     copy: ['M9 9h11v11H9z', 'M5 15H4V4h11v1'], trash: ['M4 7h16', 'M10 11v6', 'M14 11v6', 'M6 7l1 13h10l1-13', 'M9 7V4h6v3'],
-    download: ['M12 4v11', 'm7 10 5 5 5-5', 'M5 20h14'], check: ['m5 12.5 4.5 4.5L19 7'],
+    download: ['M12 4v11', 'm7 10 5 5 5-5', 'M5 20h14'], check: ['m5 12.5 4.5 4.5L19 7'], none: [],
     bell: ['M6 9a6 6 0 0 1 12 0c0 6 2.5 7.5 2.5 7.5h-17S6 15 6 9z', 'M10 20a2 2 0 0 0 4 0'],
     belloff: ['M6 9a6 6 0 0 1 9.4-4.9', 'M18 9c0 6 2.5 7.5 2.5 7.5H8', 'M10 20a2 2 0 0 0 4 0', 'M3 3l18 18'],
     lowpri: ['M3 4h18v4H3z', 'M5 8v11h14V8', 'M10 12h4'], unread: ['M21 12a9 9 0 1 1-6-8.5', 'M19 7a2 2 0 1 0 0-.01'], inbox: ['M3 13h5l2 3h4l2-3h5', 'M5.5 5h13L21 13v6H3v-6z'],
+    smile: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M8.5 14.5s1.3 2 3.5 2 3.5-2 3.5-2', 'M9 9.5v.01', 'M15 9.5v.01'],
     qr: ['M4 4h6v6H4z', 'M14 4h6v6h-6z', 'M4 14h6v6H4z', 'M14 14h2v2h-2z', 'M18 14h2', 'M14 18v2', 'M18 18h2v2h-2z'],
   };
   function icon(name) {
@@ -159,7 +161,95 @@
     if (updateHold && updateHold.reason !== reason) { updateHold.h.release(); updateHold = null; }
     if (reason && !updateHold) updateHold = {reason, h: window.WizardApp.update.hold(reason)};
   }
-  function inChat(on) { if (on) document.documentElement.dataset.inChat = ''; else delete document.documentElement.dataset.inChat; }
+  function inChat(on) { if (on) document.documentElement.dataset.inChat = ''; else delete document.documentElement.dataset.inChat; syncKeys(); }
+  // ---------- keyboard (Wizard app-key contract, 16.15; ⌥ anchor 16.18) ----------
+  // Gmail-style keys, each held with left ⌥ (16.18: Wizard's one anchor): j/k = next/previous chat in the order the
+  // list shows, r = reply (focus the open chat's composer), / = search chats, n = new chat (on the compose button). Each key is a real control marked
+  // data-wz-key; the shared Wizard client (WizardApp.keys) clicks the first visible, enabled match and draws
+  // keycaps while ⌥ is held. j/k/r and a spare / live in one visually quiet row so they work from the list and
+  // from an open chat alike (phone-width Messenger shows only one of them). Escape stays Back.
+  const hotkeys = {nav: null, order: []}, KEYBOARD = matchMedia('(any-hover: hover) and (any-pointer: fine)');
+  function keyButton(key, label, fn) { const b = button(label, fn, 'u-key'); b.dataset.wzKey = key; b.dataset.wzKeyLabel = label; b.tabIndex = -1; return b; }
+  const openKey = () => s.native && s.nativeGroup ? 'native:' + s.nativeGroup : s.person;
+  function stepChat(dir) {
+    const order = hotkeys.order; if (!order.length || s.overlay) return;
+    const at = order.findIndex(r => r.key === openKey());
+    const next = order[at < 0 ? (dir > 0 ? 0 : order.length - 1) : Math.max(0, Math.min(order.length - 1, at + dir))];
+    if (!next || next.key === openKey()) return;
+    // The row itself when it is on screen (same tap path), else open it from memory (phone width, chat open).
+    const row = [...document.querySelectorAll('.u-person[data-pid]')].find(el => el.dataset.pid === next.key);
+    if (row) { row.click(); row.scrollIntoView?.({block: 'nearest'}); return; }
+    if (next.p.native) openNative(next.p.group_id); else openPerson(next.p.id, next.p);
+  }
+  function replyKey() {
+    const field = s.native ? $('draft') : document.querySelector('#unified-inbox .u-composer textarea');
+    if (!field || field.disabled) return;
+    field.focus(); const end = field.value.length; try { field.setSelectionRange(end, end); } catch { /* not a text field */ }
+  }
+  function searchKey() {
+    if (s.overlay) return;
+    if (s.native) returnNative();
+    if (s.person && !split.on) { s.person = null; view.id = null; inChat(false); }
+    s.search = ''; s.epoch++; renderList();
+  }
+  function syncKeys() {
+    if (!hotkeys.nav) {
+      const host = $('messenger'); if (!host) return;
+      hotkeys.nav = node('div', 'u-keys'); hotkeys.nav.setAttribute('aria-label', 'Keyboard shortcuts');
+      hotkeys.nav.append(keyButton('j', 'Next chat', () => stepChat(1)), keyButton('k', 'Previous chat', () => stepChat(-1)),
+        keyButton('r', 'Reply', replyKey), keyButton('/', 'Search chats', searchKey));
+      host.append(hotkeys.nav);
+      new MutationObserver(keysSoon).observe(host, {childList: true, subtree: true});   // a chat or the list redrawn
+    }
+    hotkeys.nav.hidden = !s.ready || s.tab === 'messenger';
+    const [j, k, r] = hotkeys.nav.children;
+    j.disabled = k.disabled = !hotkeys.order.length;
+    r.disabled = !(s.person || s.native);
+    keysSoon();
+  }
+  // 16.17 (Miguel: no hints while holding ⌥): the keycaps sit ON what the key does, like the shell's ↓ / ↑ on Ready
+  // rows: j on the next chat's row, k on the previous one, r on the reply box, / on the visible Search. The quiet
+  // row's own j/k/r/'/' carry the key only while that target is not on screen (phone width with a chat open).
+  function keysSoon() { if (!hotkeys.pend) { hotkeys.pend = true; requestAnimationFrame(() => { hotkeys.pend = false; placeKeys(); }); } }
+  function placeKeys() {
+    if (!hotkeys.nav) return;
+    const [j, k, r, sl] = hotkeys.nav.children, seen = el => !!el && wzVisible(el) && wzEnabled(el) && el.getBoundingClientRect().width > 8;
+    for (const el of document.querySelectorAll('.u-person[data-wz-key], .u-step[data-wz-key]')) { delete el.dataset.wzKey; delete el.dataset.wzKeyLabel; }
+    const rows = [...document.querySelectorAll('.u-person[data-pid]')].filter(seen), order = hotkeys.order.map(o => o.key);
+    const at = order.indexOf(openKey()), rowOf = key => key != null && rows.find(el => el.dataset.pid === key);
+    const step = k => [...document.querySelectorAll(`.u-step[data-step="${k}"]`)].find(seen);
+    const nx = rowOf(order[at < 0 ? 0 : at + 1]) || (at < order.length - 1 && step('j')), pv = (at > 0 && rowOf(order[at - 1])) || (at > 0 && step('k'));
+    const put = (row, key, label, own) => { if (row) { row.dataset.wzKey = key; row.dataset.wzKeyLabel = label; delete own.dataset.wzKey; } else own.dataset.wzKey = key; };
+    put(nx, 'j', 'Next chat', j); put(pv, 'k', 'Previous chat', k);
+    const field = s.native ? $('draft') : document.querySelector('#unified-inbox .u-composer textarea');
+    for (const el of document.querySelectorAll('textarea[data-wz-key="r"], input[data-wz-key="r"]')) if (el !== field) delete el.dataset.wzKey;
+    if (seen(field) && (s.person || s.native)) { field.dataset.wzKey = 'r'; field.dataset.wzKeyLabel = 'Reply'; delete r.dataset.wzKey; } else r.dataset.wzKey = 'r';
+    const find = [...document.querySelectorAll('[data-wz-key="/"]')].find(el => el !== sl && seen(el));
+    if (find) delete sl.dataset.wzKey; else sl.dataset.wzKey = '/';
+  }
+  // Fallback for a plain browser tab only (16.18, one anchor: left ⌥ for every Wizard key). data-wz-key="j" means ⌥J.
+  // Inside Wizard the shell routes ⌥+key to the marked control, so a framed Messenger never acts here, and it stands
+  // down whenever the shared client brings WizardApp.keys. Plain keys never act. The key comes from e.code (⌥J on a
+  // Mac types ∆), so only KeyA..KeyZ and / , . ; map; a held key does not repeat; ⌥ in the composer still acts.
+  const wzVisible = el => !!el.getClientRects().length && (el.checkVisibility ? el.checkVisibility({visibilityProperty: true}) : getComputedStyle(el).visibility !== 'hidden');
+  const wzEnabled = el => !el.disabled && el.getAttribute('aria-disabled') !== 'true' && !el.closest('[inert],[hidden],fieldset[disabled]');
+  const WZ_CODE_KEYS = {Slash: '/', Comma: ',', Period: '.', Semicolon: ';'};
+  const wzKeyName = e => /^Key[A-Z]$/.test(e.code || '') ? e.code.slice(3).toLowerCase() : WZ_CODE_KEYS[e.code] || '';
+  function wzKeyFallback(e) {
+    if (window.parent !== window || window.WizardApp?.keys) return;   // in Wizard (or a client with keys): the shell's
+    if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.defaultPrevented || e.isComposing) return;
+    const key = wzKeyName(e); if (!key) return;
+    const modals = [...document.querySelectorAll('dialog[open],[aria-modal="true"]')].filter(wzVisible);
+    const scope = modals.at(-1) || document;
+    const hit = [...scope.querySelectorAll('[data-wz-key]')].find(el => el.dataset.wzKey === key && wzVisible(el) && wzEnabled(el));
+    if (!hit) return;
+    e.preventDefault(); e.stopPropagation();   // ⌥ in a field would type ∆ / ˚ on a Mac
+    if (e.repeat) return;
+    if (hit.matches('textarea,input,select,[contenteditable]:not([contenteditable=false])')) { replyKey(); return; } // the reply box: focus it
+    hit.click();
+  }
+  document.addEventListener('keydown', wzKeyFallback);
+  window.__messengerKeys = {fallback: wzKeyFallback, sync: () => syncKeys()}; // test hook
   // Phone-width Inbox inside Wizard: QR, Search and Settings ride the window's own title bar
   // (WizardApp.titlebar.set), so the Inbox drops its bottom toolbar and the filter chips sit right on the
   // Wizard dock. Published only on the plain list (no chat, search or sheet open); a host without title-bar
@@ -203,19 +293,22 @@
   function closeOverlay() {
     connectorController?.close().catch(() => {}); connectorController = null;
     const answered = s.answer; s.answer = null; answered?.(false);
+    const closed = s.menuClosed; s.menuClosed = null; closed?.();
     s.login = null; s.overlay = null; $('u-overlay')?.remove(); view.lifted?.classList.remove('lifted'); view.lifted = null; lastFocus?.focus(); hold(); syncBar();
   }
   function back() {
+    if (!s.overlay && view.picker?.isOpen) { view.picker.close(); return true; }
     if (!s.overlay && view.selection?.active) { view.selection.clear(); return true; }
     if (s.overlay === 'Edit QR codes') { myCodes(); return true; }
     if (s.overlay === 'Suggested merges') { accounts(); return true; } // nested: Back returns to the codes, not the list
     if (s.overlay === 'Advanced' || s.overlay === 'Agent drafts') { accounts(); return true; } // pages opened from Settings return to it
+    if (!s.overlay && !s.person && detailOpen()) { closePane(); return true; } // New message beside the list
     const next = backState(s);
     if (!next.handled) return false;
     if (s.overlay) closeOverlay();
-    else if (s.person) { s.person = null; view.id = null; s.epoch++; inChat(false); if (split.on && hasListPane()) { emptyPane(); markSelected(); } else renderList(); }
+    else if (s.person) { s.person = null; view.id = null; s.epoch++; inChat(false); if (split.on && hasListPane()) { closePane(); markSelected(); } else { renderList(); keepListTop(); } }
     else if (s.search != null) { s.search = null; s.epoch++; renderList(); }
-    else { setLowView(false); s.epoch++; renderList(); }
+    else { setSeg('all'); s.epoch++; renderList(); }
     return true;
   }
   function overlay(title) {
@@ -240,7 +333,9 @@
   // Chats' session list beside its thread: the list stays put (scroll, filters, search) while chats open on the
   // right. Sized by Messenger's own window (#messenger), never the device. Narrower windows keep the one-pane
   // Inbox exactly as before (list or thread), including the phone title-bar tools.
-  const SPLIT_MIN = 900;
+  // 16.3 (Miguel, 2 Nov 2026: "even at the biggest size it only shows the chat"): the split starts at 640px of Messenger's
+  // window, the narrowest list (260px) beside the narrowest readable chat (380px), not at 900px.
+  const SPLIT_MIN = 640, THREAD_MIN = 380;
   const split = {on: false, threadGen: 0, listGen: 0};
   const wideNow = () => { const m = $('messenger'); return !!m && (m.clientWidth || innerWidth) >= SPLIT_MIN; };
   function panes() {
@@ -250,7 +345,7 @@
       root.replaceChildren();
       list = node('div', 'u-pane u-pane-list'); list.id = 'u-pane-list'; list.setAttribute('aria-label', 'Chats');
       thread = node('section', 'u-pane u-pane-thread'); thread.id = 'u-pane-thread'; thread.setAttribute('aria-label', 'Conversation');
-      root.append(list, divider(), thread); fillEmpty(thread);
+      root.append(list, divider(), thread); thread.dataset.view = 'closed'; root.dataset.detail = 'none';
     }
     return {root, list, thread};
   }
@@ -260,7 +355,9 @@
   const LIST_W = {min: 260, max: 640, key: 'messenger.listW'};
   const listW = () => { let v = 0; try { v = +localStorage.getItem(LIST_W.key); } catch { /* blocked */ } return v >= LIST_W.min && v <= LIST_W.max ? v : 0; };
   function setListW(px) {
-    const m = $('messenger'), cap = Math.min(LIST_W.max, Math.round((m?.clientWidth || innerWidth) * 0.6));
+    // The list stays 260-640px and at most 60% of the window, and always leaves the chat THREAD_MIN (unified.css
+    // clamps the painted width the same way, so a width saved on a big window still fits a small one).
+    const mw = $('messenger')?.clientWidth || innerWidth, cap = Math.max(LIST_W.min, Math.min(LIST_W.max, Math.round(mw * 0.6), mw - THREAD_MIN));
     if (px) px = Math.round(Math.max(LIST_W.min, Math.min(cap, px)));
     try { if (px) localStorage.setItem(LIST_W.key, String(px)); else localStorage.removeItem(LIST_W.key); } catch { /* private mode: this visit only */ }
     paintListW(px); return px;
@@ -297,12 +394,12 @@
   // With no chat open, the right side is New message (Miguel, 31 Oct 2026): "the list of chats without one selected",
   // reached from the New chat button or the ✕ on an open chat. Picking someone opens that chat in the same place.
   function fillEmpty(thread, focus = false) {
-    thread.replaceChildren(); thread.dataset.view = 'empty';
+    thread.replaceChildren(); thread.dataset.view = 'empty'; $('unified-inbox').dataset.detail = 'open';
     // Calm and centred (Miguel): a title, one "To:" field and New Wizard chat. Names appear only once he types.
     const box = node('div', 'u-newmsg'), token = {}; thread.__pick = token;
     const search = node('input', 'u-search'); search.type = 'search'; search.placeholder = 'To: name or group'; search.setAttribute('aria-label', 'Search people and groups');
     const list = node('div', 'u-newmsg-results'), wizard = button('New Wizard chat', () => { showNative(); native?.newChat(); }, 'link u-newmsg-wizard');
-    box.append(node('h2', '', 'New message'), search, list, wizard); thread.append(box);
+    box.append(node('h2', '', 'New message'), search, list, wizard); thread.append(iconButton('close', 'Close', closeDetail, 'u-close u-newmsg-close'), box);
     if (focus) requestAnimationFrame(() => search.focus());
     let all = null;
     const draw = () => {
@@ -327,7 +424,21 @@
   }
   // The right pane with nothing open. The old composer's pending draft save still runs (see composer()).
   function emptyPane(focus = false) { if (!split.on) return; view.id = null; view.scroll = null; view.root = null; const {root, thread} = panes(); fillEmpty(thread, focus); root.dataset.view = s.search != null ? 'search' : 'list'; }
-  // New chat / ✕ in the split: leave the open chat (same path as Back) and show New message on the right.
+  // List and detail (Miguel, 31 Oct 2026): with nothing open the list fills the window; a chat or New message opens
+  // beside it, and ✕ / Back / Escape close that pane so the full-width list comes back (scroll and filters kept).
+  function closePane() {
+    if (!split.on) return; view.id = null; view.scroll = null; view.root = null;
+    const {root, thread} = panes(); thread.__pick = null; thread.replaceChildren(); thread.dataset.view = 'closed';
+    root.dataset.detail = 'none'; root.dataset.view = s.search != null ? 'search' : 'list';
+  }
+  const detailOpen = () => split.on && $('u-pane-thread')?.dataset.view === 'empty';
+  function closeDetail() {
+    if (s.native) returnNative();
+    if (s.person) { s.person = null; view.id = null; s.epoch++; inChat(false); }
+    if (!hasListPane()) renderList();
+    closePane(); markSelected(); syncBar();
+  }
+  // New chat in the split: leave the open chat (same path as Back) and show New message on the right.
   function newMessagePane() {
     if (s.native) returnNative();
     if (s.person) { s.person = null; view.id = null; s.epoch++; inChat(false); }
@@ -341,6 +452,17 @@
       const on = !!(split.on && (el.dataset.nativeGroup ? s.native && s.nativeGroup === el.dataset.nativeGroup : el.dataset.pid === s.person));
       el.classList.toggle('selected', on); if (on) el.setAttribute('aria-current', 'true'); else el.removeAttribute('aria-current');
     }
+  }
+  // Narrow windows: the chat slides in over the list; Back puts the list back where it was scrolled.
+  function slideIn() {
+    const r = $('unified-inbox'); if (!r || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    r.classList.remove('u-enter'); void r.offsetWidth; r.classList.add('u-enter');
+    r.addEventListener('animationend', () => r.classList.remove('u-enter'), {once: true});
+  }
+  function keepListTop() {
+    const top = split.listTop || 0; split.listTop = 0; if (!top) return;
+    const put = () => { const l = $('unified-inbox')?.querySelector(':scope > .u-list'); if (l && !s.person) l.scrollTop = top; };
+    put(); requestAnimationFrame(put);
   }
   // Crossing the width line keeps the open chat: wide shows list + chat, narrow shows just that chat.
   function relayout() {
@@ -365,14 +487,15 @@
     if (split.on) { const r = $('unified-inbox'); r.dataset.split = ''; if (!s.person) r.dataset.view = root.dataset.view; }
     const head = node('header', 'u-header');
     if (s.search != null) {
-      const field = node('input', 'u-search'); field.type = 'search'; field.placeholder = 'Search'; field.setAttribute('aria-label', 'Search ' + title.toLowerCase()); field.value = s.search;
+      const field = node('input', 'u-search'); field.type = 'search'; field.placeholder = 'Search messages'; field.setAttribute('aria-label', 'Search ' + title.toLowerCase()); field.value = s.search;
       field.oninput = () => { s.search = field.value; scheduleSearch(); };
       head.append(iconButton('back', 'Close search', back), field);
       requestAnimationFrame(() => field.focus());
     } else {
       // On a phone-width window these controls sit at the bottom, in thumb reach (unified.css @container messenger).
       const actions = node('div', 'u-head-actions');
-      actions.append(iconButton('qr', 'My QR codes', () => myCodes()), iconButton('search', 'Search', () => { s.search = ''; renderList(); }), iconButton('settings', 'Settings', () => accounts(), 'u-settings-btn'));
+      const find = iconButton('search', 'Search', () => { s.search = ''; renderList(); }); find.dataset.wzKey = '/'; find.dataset.wzKeyLabel = 'Search chats';
+      actions.append(iconButton('qr', 'My QR codes', () => myCodes()), find, iconButton('settings', 'Settings', () => accounts(), 'u-settings-btn'));
       head.append(node('h1', '', title), actions);
     }
     root.append(head); const notice = node('p', 'error'); notice.id = 'u-error'; notice.setAttribute('role', 'status'); root.append(notice); return root;
@@ -387,8 +510,13 @@
     const face = node('span', 'u-av-wrap small'); face.append(withPicture(avatar(name, 'small'), picture));
     if (network) { const b = netBadge(network, 'u-net'); b.setAttribute('aria-hidden', 'true'); face.append(b); }
     who.append(face, text); head.append(who);
+    // 16.17: with a keyboard and no list beside the chat, ↑ / ↓ step to the previous / next chat (j / k sit on them)
+    if (!split.on && KEYBOARD.matches && hotkeys.order.length > 1) {
+      const up = iconButton('up', 'Previous chat', () => stepChat(-1), 'u-step'), dn = iconButton('down', 'Next chat', () => stepChat(1), 'u-step');
+      up.dataset.step = 'k'; dn.dataset.step = 'j'; head.append(up, dn);
+    }
     if (onInfo) { const more = iconButton('more', 'Chat options', () => (view.menu || onInfo)(more)); head.append(more); }
-    if (split.on) head.append(iconButton('close', 'Close chat', newMessagePane, 'u-close'));
+    if (split.on) { $('unified-inbox').dataset.detail = 'open'; head.append(iconButton('close', 'Close chat', closeDetail, 'u-close')); }
     root.append(head); const notice = node('p', 'error'); notice.id = 'u-error'; notice.setAttribute('role', 'status'); root.append(notice); return root;
   }
   function when(ms) {
@@ -439,7 +567,7 @@
     return settled;
   }
   // ---------- live store: lists and open threads stay in memory and follow the change feed ----------
-  const store = {seq: 0, lists: {people: null, groups: null}, threads: {}, typing: {}, pending: 0};
+  const store = {seq: 0, lists: {people: null, groups: null}, threads: Object.create(null), typing: {}, pending: 0};
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const uid = () => (crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2) + Date.now().toString(36)).slice(0, 32);
   const listKey = p => (p.identities || []).some(i => i.kind === 'group') ? 'groups' : 'people';
@@ -456,7 +584,7 @@
   function persist() {
     syncBadge(); shareTargets(); clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      const threads = {};
+      const threads = Object.create(null);
       for (const id of savedOrder.slice(0, THREADS_KEPT)) { const t = store.threads[id]; if (t) threads[id] = {person: t.person, has_more: true, messages: t.messages.filter(m => !m.pending && !m.failed).slice(-MESSAGES_KEPT).map(({retry, local, ...m}) => m)}; }
       try { localStorage.setItem(CACHE_KEY, JSON.stringify({lists: store.lists, threads, order: savedOrder.slice(0, THREADS_KEPT)})); } catch { /* storage full or blocked: still works online */ }
     }, 400);
@@ -470,9 +598,9 @@
     } catch { return false; }
   }
   // App badge: the total unread across chats and groups goes on Messenger's desk mark, like the phone's app badge.
-  const unreadById = {}, kindById = {}, mutedById = {}, lowById = {}; let nativeUnread = 0;
+  const unreadById = {}, kindById = {}, mutedById = {}, lowById = {}, mediumById = {}; let nativeUnread = 0;
   let badgeShown = -1;
-  function noteUnread(rows) { for (const p of rows || []) { unreadById[p.id] = Math.max(0, p.unread | 0); kindById[p.id] = listKey(p); mutedById[p.id] = !!p.muted; lowById[p.id] = !!p.low_priority; } }
+  function noteUnread(rows) { for (const p of rows || []) { unreadById[p.id] = Math.max(0, p.unread | 0); kindById[p.id] = listKey(p); mutedById[p.id] = !!p.muted; lowById[p.id] = !!p.low_priority; mediumById[p.id] = !!p.medium_priority; } }
   // Each bottom tab carries its own unread count (Chats, Groups, Messenger), like Signal's tab badges.
   function paintTabBadges(counts) {
     for (const [tab, n] of Object.entries(counts)) {
@@ -486,10 +614,10 @@
   function syncBadge() {
     noteUnread(store.lists.people); noteUnread(store.lists.groups);
     const twins = wizardTwins();
-    const counts = {people: nativeRows.length ? twins.visible.reduce((n, p) => n + (p.muted || p.low_priority || !(p.unread > 0) ? 0 : 1), 0) : nativeUnread, groups: 0};
+    const counts = {people: nativeRows.length ? twins.visible.reduce((n, p) => n + (p.muted || p.low_priority || p.medium_priority || !(p.unread > 0) ? 0 : 1), 0) : nativeUnread, groups: 0};
     // The app badge counts unread chats (the same number as the Unread chip), not messages: one busy group
-    // must not push it to 99+. Muted and Low priority chats never count.
-    for (const [id, n] of Object.entries(unreadById)) { const t = twins.twinOf.get(id); if (n > 0 && !mutedById[id] && !lowById[id] && !twins.hideMirror.has(id) && !(t && (t.muted || t.low_priority))) counts.people += 1; }
+    // must not push it to 99+. Muted, Medium and Low priority chats never count.
+    for (const [id, n] of Object.entries(unreadById)) { const t = twins.twinOf.get(id); if (n > 0 && !mutedById[id] && !lowById[id] && !mediumById[id] && !twins.hideMirror.has(id) && !(t && (t.muted || t.low_priority || t.medium_priority))) counts.people += 1; }
     paintTabBadges(counts);
     const n = counts.people + counts.groups;
     if (n === badgeShown) return; badgeShown = n;
@@ -513,16 +641,24 @@
     return null;
   }
   // Plain words for previews: Markdown links show their text (or the site), bare links show the site.
-  const plainText = text => (text || '').replace(MD_LINK, (_, label, url) => /^https?:\/\//.test(label) ? siteOf(url) : label)
+  const plainText = text => (text || '').replace(MD_LINK, (_, label, url) => /^https?:\/\//.test(label) ? siteOf(url) : label).replace(/\*\*([^*\n]+)\*\*/g, '$1')
     .replace(/https?:\/\/[^\s)]+/g, url => siteOf(url)).replace(/^>\s?/gm, '').replace(/\s*\n+\s*/g, ' ').trim();
   function siteOf(url) { try { return new URL(url).hostname.replace(/^www\./, '') + (new URL(url).pathname.length > 1 ? '/…' : ''); } catch { return url; } }
+  // Media a bridge could not deliver (WhatsApp keeps old media only on the sender's phone for a while) and
+  // messages it is still decrypting: a quiet placeholder instead of the bridge's own sentence. Same words as unified.unavailable_label.
+  function unavailableLabel(kind) {
+    if (kind === 'waiting') return '⏳ Waiting for this message';
+    if (kind === 'undecryptable') return "🔒 Message couldn't be decrypted";
+    return ({photo: '📷 Photo', gif: 'GIF', voice: '🎤 Voice message', video: '🎬 Video', file: '📎 File', sticker: 'Sticker', audio: '🎵 Audio'}[kind] || '📎 Media') + ' not available';
+  }
   function snippet(last) {
     if (!last) return '';
     if (last.deleted) return 'This message was deleted';
     const story = storyOf(last.text, false);
     if (story) return (story.verb === 'reacted' ? '❤️ ' : story.verb === 'replied' ? '↩︎ ' : '📖 ') + story.label;
     last = {...last, text: plainText(last.text)};
-    const label = last.voice ? '🎤 Voice message' : {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.audio': '🎵 Audio', 'm.file': '📎 File', 'm.sticker': 'Sticker', 'm.location': '📍 Location'}[last.msgtype];
+    const label = last.unavailable ? unavailableLabel(last.unavailable) : last.voice ? '🎤 Voice message' : last.sticker ? 'Sticker' : last.gif ? 'GIF'
+      : {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.audio': '🎵 Audio', 'm.file': '📎 File', 'm.sticker': 'Sticker', 'm.location': '📍 Location'}[last.msgtype];
     return label ? label + (last.text ? ' · ' + last.text : '') : last.text;
   }
   function mergeList(people) {
@@ -546,11 +682,11 @@
     t.messages.sort((a, b) => (a.pending ? 1 : 0) - (b.pending ? 1 : 0) || a.timestamp - b.timestamp || ((a.timeline_order || 0) - (b.timeline_order || 0)) || (a.id < b.id ? -1 : 1));
   }
   function apply(r) {
-    if (r.reset) { for (const k in unreadById) delete unreadById[k]; store.seq = r.seq; store.lists = {people: null, groups: null}; store.threads = {}; if (s.person) openPerson(s.person); else renderList(); return; }
+    if (r.reset) { for (const k in unreadById) delete unreadById[k]; store.seq = r.seq; store.lists = {people: null, groups: null}; store.threads = Object.create(null); if (s.person) openPerson(s.person); else renderList(); return; }
     store.seq = Math.max(store.seq, r.seq);
     for (const id of r.removed || []) {
       for (const k of ['people', 'groups']) if (store.lists[k]) store.lists[k] = store.lists[k].filter(p => p.id !== id);
-      delete unreadById[id]; delete mutedById[id]; delete lowById[id]; delete kindById[id];
+      delete unreadById[id]; delete mutedById[id]; delete lowById[id]; delete mediumById[id]; delete kindById[id];
     }
     if (r.removed?.length) syncBadge();
     if (r.people?.length) { noteUnread(r.people); mergeList(r.people); }
@@ -594,11 +730,12 @@
   const listLive = (epoch, gen) => split.on ? gen === split.listGen && s.ready : s.epoch === epoch && !s.person;
   async function renderList() {
     const epoch = ++s.epoch, gen = ++split.listGen;
+    $('messenger')?.classList.toggle('u-compact', !previewsOn());
     const root = listBase('Inbox');
-    if (split.on && !s.person && !s.native && $('u-pane-thread')?.dataset.view !== 'empty') emptyPane();
+    if (split.on && !s.person && !s.native && !detailOpen()) closePane();
     if (s.search == null) root.append(filterChips()); // account status lives in Settings, not on top of the Inbox
     const list = node('div', 'u-list'); list.addEventListener('filter', drawList); root.append(list);
-    if (s.search == null) root.append(iconButton('compose', 'New chat', () => split.on ? newMessagePane() : newChat(), 'u-fab'));
+    if (s.search == null) { const fab = iconButton('compose', 'New chat', () => split.on ? newMessagePane() : newChat(), 'u-fab'); fab.dataset.wzKey = 'n'; fab.dataset.wzKeyLabel = 'New chat'; root.append(fab); }
     refreshAccounts();
     if (store.lists.people && store.lists.groups) { drawList(); if (!store.seq && s.ready) freshen(null, epoch); return; }
     if (store.lists.people) drawList(); else list.append(skeleton(8, 'list'));
@@ -652,47 +789,118 @@
     open.append(strip, node('span', 'u-acct-text', text));
     box.append(open);
   }
-  const FILTER_KEY = 'messenger-inbox-filter';
-  const filterOf = () => { try { return sessionStorage.getItem(FILTER_KEY) || 'all'; } catch { return 'all'; } };
-  function filterChips() {
-    const chips = node('div', 'u-chips'); chips.id = 'u-filters'; chips.setAttribute('role', 'group'); chips.setAttribute('aria-label', 'Filter chats');
-    return chips;
+  // Inbox filters (Miguel, 2 Nov 2026: "no scrolling sideways"). Two rows that always fit the window:
+  //  1. One segmented control: All · Unread · Medium · Low (exactly one on). Low is the Low priority folder; Medium
+  //     lists the chats that stay in All but never ping.
+  //  2. One icon-only button per network (narrows the row-1 view), then Filters (Type, Labels) on the right. Networks
+  //     that do not fit fold into a "+N" button opening the same menu, never a scroll.
+  const SEG_KEY = 'messenger-inbox-seg', NET_KEY = 'messenger-inbox-net', TYPE_KEY = 'messenger-inbox-type', LABEL_KEY = 'messenger-inbox-label';
+  const SEGMENTS = [['all', 'All'], ['unread', 'Unread'], ['medium', 'Medium'], ['low', 'Low']];
+  const TYPES = [['all', 'All chats'], ['direct', 'Direct'], ['groups', 'Groups'], ['merged', 'Merged']];
+  const kept = key => { try { return sessionStorage.getItem(key) || ''; } catch { return ''; } };
+  const keep = (key, value) => { try { if (value) sessionStorage.setItem(key, value); else sessionStorage.removeItem(key); } catch { /* memory only */ } };
+  const filterState = {net: kept(NET_KEY), type: kept(TYPE_KEY) || 'all', label: kept(LABEL_KEY), nets: [], labels: [], merged: false};
+  function setSeg(seg) { s.seg = SEGMENTS.some(x => x[0] === seg) ? seg : 'all'; setLowView(s.seg === 'low'); keep(SEG_KEY, s.seg === 'all' ? '' : s.seg); }
+  function setNarrow(key, value) {
+    if (key === 'net') { filterState.net = value; keep(NET_KEY, value); }
+    if (key === 'type') { filterState.type = value || 'all'; keep(TYPE_KEY, value === 'all' ? '' : value); }
+    if (key === 'label') { filterState.label = value; keep(LABEL_KEY, value); }
+    drawList();
   }
-  // One row of chips: All, Unread, one chip per platform (with its icon), then quieter Direct/Groups and labels.
-  function paintFilters(all, shown = all, lowCount = 0) {
-    const chips = $('u-filters'); if (!chips) return;
+  function filterChips() {
+    const box = node('div', 'u-chips u-filter-rows'); box.id = 'u-filters'; box.setAttribute('role', 'group'); box.setAttribute('aria-label', 'Filter chats');
+    const seg = node('div', 'u-seg'); seg.setAttribute('role', 'radiogroup'); seg.setAttribute('aria-label', 'Show');
+    for (const [value, text] of SEGMENTS) {
+      const b = button('', () => { setSeg(value); drawList(); }, 'u-seg-btn'); b.dataset.seg = value; b.setAttribute('role', 'radio');
+      b.append(node('span', 'u-seg-text', text), node('span', 'u-seg-count')); seg.append(b);
+    }
+    const row = node('div', 'u-netrow'), nets = node('div', 'u-nets');
+    const more = button('', e => filterMenu(e.currentTarget, true), 'u-chip net u-more-nets'); more.hidden = true; more.setAttribute('aria-haspopup', 'menu');
+    const filters = button('', e => filterMenu(e.currentTarget, false), 'u-chip u-filter-btn'); filters.setAttribute('aria-haspopup', 'menu'); filters.setAttribute('aria-expanded', 'false');
+    filters.append(node('span', 'u-filter-text', 'Filters'), node('span', 'u-filter-dot'));
+    row.append(nets, more, filters); box.append(seg, row);
+    try { new ResizeObserver(() => fitNets(box)).observe(row); } catch { /* old browsers: fitNets runs on every paint */ }
+    return box;
+  }
+  const isMedium = p => !!p.medium_priority && !p.low_priority;
+  // Row 2 narrows whatever row 1 shows: one network, a chat type and a label.
+  function narrowed(p) {
+    const f = filterState;
+    if (f.net && !matchesFilter(p, 'net:' + f.net)) return false;
+    if (f.type !== 'all' && !matchesFilter(p, f.type)) return false;
+    if (f.label && !matchesFilter(p, 'label:' + f.label)) return false;
+    return true;
+  }
+  function inSegment(p, seg) {
+    if (seg === 'unread') return p.unread > 0 && !isMedium(p); // Medium never counts as unread
+    if (seg === 'medium') return isMedium(p);
+    return true;
+  }
+  // all = every listed chat (Low included), returns the chats row 1 + row 2 select.
+  function paintFilters(all) {
+    const box = $('u-filters'); if (!box) return all;
     const connected = (accountsSeen || []).filter(p => p.state === 'connected' || p.state === 'degraded').map(p => p.network);
-    const nets = [...new Set([...all.flatMap(networksOf), ...connected])].filter(n => n !== 'private' && n !== 'messenger').sort((a, b) => netLabel(a).localeCompare(netLabel(b)));
-    const labels = [...new Set(all.flatMap(p => p.labels || []))].sort();
-    const options = [['all', 'All'], ['unread', 'Unread'], ...nets.map(n => ['net:' + n, netLabel(n)]), ['net:private', 'Wizard'],
-      ['direct', 'Direct', 'sub'], ['groups', 'Groups', 'sub'], ...(all.some(p => networksOf(p).length > 1) ? [['merged', 'Merged', 'sub']] : []), ...labels.map(l => ['label:' + l, l, 'sub label'])];
-    if (lowCount || s.low) options.push(['low', 'Low priority', 'sub low']);
-    const sig = options.map(o => o.join('=')).join('|');
-    let current = filterOf(); if (!options.some(o => o[0] === current)) current = 'all';
-    if (chips.dataset.sig !== sig) {
-      chips.dataset.sig = sig; chips.replaceChildren(); let divided = false;
-      for (const [value, text, kind] of options) {
-        if (kind && !divided) { divided = true; const d = node('span', 'u-chip-divider'); d.setAttribute('aria-hidden', 'true'); chips.append(d); }
-        const chip = button('', () => { if (value === 'low') setLowView(!s.low); else try { sessionStorage.setItem(FILTER_KEY, value); } catch { /* memory only */ } drawList(); }, 'u-chip' + (kind ? ' ' + kind : ''));
-        chip.dataset.filter = value; chip.setAttribute('aria-label', text);
-        // Platforms are icon-only (the name lives in the label and tooltip): the row stays compact.
-        if (value.startsWith('net:')) { chip.classList.add('net'); chip.append(netBadge(value.slice(4), 'u-chip-icon')); }
-        else chip.append(node('span', 'u-chip-text', text));
-        chip.append(node('span', 'u-chip-count'));
-        chips.append(chip);
+    const nets = [...new Set([...all.flatMap(networksOf), ...connected])].filter(n => n !== 'private' && n !== 'messenger').sort((a, b) => netLabel(a).localeCompare(netLabel(b))).concat('private');
+    const labels = [...new Set(all.flatMap(p => p.labels || []))].sort(), merged = all.some(p => networksOf(p).length > 1);
+    const f = Object.assign(filterState, {nets, labels, merged});
+    if (f.net && !nets.includes(f.net)) setNarrowQuiet('net', '');
+    if (!TYPES.some(t => t[0] === f.type) || (f.type === 'merged' && !merged)) setNarrowQuiet('type', 'all');
+    if (f.label && !labels.includes(f.label)) setNarrowQuiet('label', '');
+    // Row 1: exactly one segment. Counts are quiet text: unread chats that would ping (never muted, Medium or Low).
+    const inbox = all.filter(p => !isLow(p) && narrowed(p));
+    const counts = {unread: inbox.filter(p => p.unread > 0 && !p.muted && !isMedium(p)).length, medium: inbox.filter(p => isMedium(p) && p.unread > 0 && !p.muted).length};
+    for (const b of box.querySelectorAll('.u-seg-btn')) {
+      const v = b.dataset.seg, n = counts[v] || 0, c = b.querySelector('.u-seg-count');
+      b.setAttribute('aria-checked', String(v === s.seg)); b.tabIndex = v === s.seg ? 0 : -1;
+      c.textContent = n ? (n > 99 ? '99+' : String(n)) : ''; c.hidden = !n;
+      const name = SEGMENTS.find(x => x[0] === v)[1]; b.setAttribute('aria-label', n ? name + ', ' + n + ' unread' : name); b.title = b.getAttribute('aria-label');
+    }
+    // Row 2: one icon per network.
+    const row = box.querySelector('.u-nets'), sig = nets.join('|');
+    if (row.dataset.sig !== sig) {
+      row.dataset.sig = sig; row.replaceChildren();
+      for (const n of nets) {
+        const label = n === 'private' ? 'Wizard' : netLabel(n);
+        const chip = button('', () => setNarrow('net', filterState.net === n ? '' : n), 'u-chip net');
+        chip.dataset.filter = 'net:' + n; chip.setAttribute('aria-label', label); chip.title = label;
+        chip.append(netBadge(n, 'u-chip-icon')); row.append(chip);
       }
     }
-    // Unread chats per chip (muted and Low priority chats do not count), cheap enough to recompute on every paint.
-    for (const c of chips.querySelectorAll('.u-chip')) {
-      const f = c.dataset.filter;
-      if (f === 'low') { c.setAttribute('aria-pressed', String(s.low)); c.querySelector('.u-chip-count').hidden = true; continue; }
-      const n = f === 'all' ? 0 : shown.filter(p => p.unread > 0 && !p.muted && matchesFilter(p, f)).length;
-      const count = c.querySelector('.u-chip-count'), show = f !== 'all' && !c.classList.contains('sub') && n > 0;
-      count.textContent = show ? (n > 99 ? '99+' : String(n)) : ''; count.hidden = !show;
-      c.title = show ? c.getAttribute('aria-label') + ' · ' + n + ' unread' : c.getAttribute('aria-label');
-      c.setAttribute('aria-pressed', String(f === current));
-    }
-    return current;
+    for (const c of row.querySelectorAll('.u-chip')) c.setAttribute('aria-pressed', String(c.dataset.filter === 'net:' + f.net));
+    const btn = box.querySelector('.u-filter-btn'), on = f.type !== 'all' || !!f.label;
+    btn.classList.toggle('on', on); btn.setAttribute('aria-label', on ? 'Filters, ' + [f.type !== 'all' ? TYPES.find(t => t[0] === f.type)[1] : '', f.label].filter(Boolean).join(', ') + ' on' : 'Filters');
+    btn.title = btn.getAttribute('aria-label');
+    fitNets(box);
+    const seg = s.seg || 'all';
+    return (seg === 'low' ? all.filter(isLow) : all.filter(p => !isLow(p))).filter(p => narrowed(p) && inSegment(p, seg));
+  }
+  function setNarrowQuiet(key, value) { filterState[key] = value; keep({net: NET_KEY, type: TYPE_KEY, label: LABEL_KEY}[key], value === 'all' ? '' : value); }
+  // Fold networks that do not fit into "+N". The chosen network always stays visible.
+  function fitNets(box = $('u-filters')) {
+    const row = box?.querySelector('.u-netrow'); if (!row || !row.clientWidth) return;
+    const chips = [...row.querySelectorAll('.u-nets .u-chip')], more = row.querySelector('.u-more-nets'), filters = row.querySelector('.u-filter-btn');
+    if (!chips.length) { more.hidden = true; return; }
+    for (const c of chips) c.hidden = false;
+    const gap = parseFloat(getComputedStyle(row).columnGap) || 0, w = chips[0].offsetWidth + gap;
+    const room = row.clientWidth - filters.offsetWidth - gap, fit = Math.max(1, Math.floor((room + gap) / w));
+    if (chips.length <= fit) { more.hidden = true; return; }
+    const show = new Set(chips.slice(0, fit - 1)), chosen = chips.find(c => c.getAttribute('aria-pressed') === 'true');
+    if (chosen && !show.has(chosen)) { show.delete(chips[fit - 2]); show.add(chosen); }
+    for (const c of chips) c.hidden = !show.has(c);
+    const n = chips.length - show.size; more.hidden = false; more.textContent = '+' + n;
+    more.setAttribute('aria-label', n + ' more networks'); more.title = chips.filter(c => !show.has(c)).map(c => c.getAttribute('aria-label')).join(', ');
+  }
+  // The Filters popover (and "+N"): Type, Labels and, when networks folded away, every network.
+  function filterMenu(anchor, netsFirst) {
+    const f = filterState, folded = !!$('u-filters')?.querySelector('.u-more-nets:not([hidden])');
+    const pick = (key, value) => () => setNarrow(key, value);
+    const radio = (label, checked, run) => ({label, icon: checked ? 'check' : 'none', checked, run});
+    const netItems = folded ? [{head: 'Networks'}, radio('All networks', !f.net, pick('net', '')),
+      ...f.nets.map(n => radio(n === 'private' ? 'Wizard' : netLabel(n), f.net === n, pick('net', n)))] : [];
+    const typeItems = [{head: 'Type'}, ...TYPES.filter(t => t[0] !== 'merged' || f.merged).map(([v, t]) => radio(t, f.type === v, pick('type', v)))];
+    const labelItems = f.labels.length ? [{head: 'Labels'}, radio('Any label', !f.label, pick('label', '')), ...f.labels.map(l => radio(l, f.label === l, pick('label', l)))] : [];
+    anchor.setAttribute('aria-expanded', 'true');
+    actionMenu(anchor, netsFirst ? 'Networks' : 'Filters', netsFirst ? [...netItems, ...typeItems, ...labelItems] : [...typeItems, ...labelItems, ...netItems], {cls: 'u-filter-menu', flip: true, side: 'right', onClose: () => anchor.setAttribute('aria-expanded', 'false')});
   }
   function matchesFilter(p, f) {
     if (f === 'all') return true;
@@ -750,7 +958,7 @@
       row.append(info); list.append(row);
     }
     if (searchView.loading) list.append(node('p', 'u-empty', 'Searching stored messages…'));
-    else if (!searchView.rows.length) list.append(node('p', 'u-empty', s.search.trim() ? 'No stored messages match' : 'Search all stored message text'));
+    else if (!searchView.rows.length) list.append(node('p', 'u-empty', s.search.trim() ? 'No stored messages match' : 'Type any words from a message. Every network is searched at once.'));
     if (searchView.cursor) {
       const more = button('More results', () => { more.disabled = true; loadSearch(searchGeneration, searchView.cursor); }); list.append(more);
     }
@@ -764,34 +972,42 @@
     const list = (split.on ? $('u-pane-list') : $('unified-inbox'))?.querySelector('.u-list'); if (!list || (s.person && !split.on)) return;
     const twins = wizardTwins();
     const everyone = [...(store.lists.people || []), ...(store.lists.groups || [])].filter(p => !twins.hideMirror.has(p.id))
-      .map(p => { const t = twins.twinOf.get(p.id); return t ? {...p, muted: !!(p.muted || t.muted), low_priority: !!(p.low_priority || t.low_priority), twin: t} : p; })
+      .map(p => { const t = twins.twinOf.get(p.id); if (!t) return p; const low = !!(p.low_priority || t.low_priority); return {...p, muted: !!(p.muted || t.muted), low_priority: low, medium_priority: !low && !!(p.medium_priority || t.medium_priority), twin: t}; })
       .concat(twins.visible)
       .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.last?.timestamp || 0) - (a.last?.timestamp || 0));
-    // Low priority (Beeper's name; WhatsApp's Archive): out of the Inbox, chips, unread counts and notifications,
-    // and a new message never brings a chat back. They live in one folder reached from the top of the Inbox.
-    // A quiet "Low priority" toggle at the end of the chips swaps the list to those chats, and every other chip
-    // (a platform, Direct, Groups, Unread) still narrows it: Instagram + Low priority = Instagram's quiet chats.
-    const low = everyone.filter(isLow);
-    if (s.low && !low.length) setLowView(false);
-    const people = s.low ? low : everyone.filter(p => !isLow(p));
-    const filter = paintFilters(everyone, people, low.length) || 'all';
-    const q = (s.search || '').trim().toLowerCase(), frag = document.createDocumentFragment();
-    for (const p of people.filter(p => matchesFilter(p, filter) && (!q || p.display_name.toLowerCase().includes(q) || (p.last?.text || '').toLowerCase().includes(q)))) {
+    // Low priority (Beeper's name; WhatsApp's Archive): out of All/Unread, unread counts and notifications, and a new
+    // message never brings a chat back. Medium priority stays in All but never pings (no push, badge or Unread).
+    // Row 1 picks the folder (All, Unread, Medium, Low); row 2 (network, Filters) narrows it.
+    const people = paintFilters(everyone);
+    const q = (s.search || '').trim().toLowerCase(), frag = document.createDocumentFragment(), compact = !previewsOn();
+    $('messenger')?.classList.toggle('u-compact', compact);
+    const shown = people.filter(p => (!q || p.display_name.toLowerCase().includes(q) || (p.last?.text || '').toLowerCase().includes(q)));
+    hotkeys.order = shown.map(p => ({key: p.native ? 'native:' + p.group_id : p.id, p})); syncKeys(); // j/k walk exactly these rows
+    for (const p of shown) {
       const groups = listKey(p) === 'groups';
       const card = button('', () => { if (card.dataset.held) { delete card.dataset.held; return; } p.native ? openNative(p.group_id, card) : openPerson(p.id, p); }, 'u-person' + (p.unread ? ' unread' : '') + (p.muted ? ' muted' : ''));
       holdToMenu(card, () => chatMenu(p, card));
       if (p.native) card.dataset.nativeGroup = p.group_id;
       card.dataset.pid = p.native ? 'native:' + p.group_id : p.id;
       if (split.on && (p.native ? s.native && s.nativeGroup === p.group_id : p.id === s.person)) { card.classList.add('selected'); card.setAttribute('aria-current', 'true'); }
-      card.append(netAvatar(p)); card.dataset.network = networksOf(p)[0] || '';
+      card.append(netAvatar(p, compact ? 'small' : '')); card.dataset.network = networksOf(p)[0] || '';
       const info = node('span', 'u-person-info');
       const top = node('span', 'u-chat-top'); const name = node('strong', '', p.display_name);
       if (p.muted) { const m = icon('belloff'); m.classList.add('u-muted-mark'); m.setAttribute('aria-label', 'Muted'); m.removeAttribute('aria-hidden'); name.append(m); }
       top.append(name);
-      if (p.last) top.append(node('time', 'u-when', when(p.last.timestamp)));
-      const bottom = node('span', 'u-chat-bottom');
       const typing = (store.typing[p.id] || []).length;
       const dr = s.person !== p.id && !p.native ? (s.draftIndex?.[p.id] || ((s.drafts[p.id] || '').trim() ? {text: s.drafts[p.id]} : null)) : null;
+      if (compact) {
+        // Compact list (Miguel's default): the name, a one-word state, the time and the unread count. No last line.
+        if (typing) top.append(node('span', 'u-state typing', 'typing…'));
+        else if (dr) top.append(node('span', 'u-state draft', 'Draft'));
+        if (p.last) top.append(node('time', 'u-when', when(p.last.timestamp)));
+        if (p.unread) top.append(node('span', 'u-badge' + (p.muted || isLow(p) || isMedium(p) ? ' muted' : ''), p.unread > 99 ? '99+' : String(p.unread)));
+        info.append(top); card.append(info); frag.append(card);
+        continue;
+      }
+      if (p.last) top.append(node('time', 'u-when', when(p.last.timestamp)));
+      const bottom = node('span', 'u-chat-bottom');
       if (typing) bottom.append(node('span', 'u-snippet typing', 'typing…'));
       else if (dr) {
         // A waiting draft (yours or your Wizard's) leads the row, like every messenger shows an unsent reply.
@@ -806,7 +1022,7 @@
         if (who) line.append(node('span', 'u-snippet-who', who + ': '));
         line.append(snippet(p.last) || ''); bottom.append(line);
       }
-      if (p.unread) bottom.append(node('span', 'u-badge' + (p.muted || isLow(p) ? ' muted' : ''), p.unread > 99 ? '99+' : String(p.unread)));
+      if (p.unread) bottom.append(node('span', 'u-badge' + (p.muted || isLow(p) || isMedium(p) ? ' muted' : ''), p.unread > 99 ? '99+' : String(p.unread)));
       else if (p.last?.outgoing) bottom.append(node('span', 'u-ticks' + (p.peer_read_ts >= p.last.timestamp ? ' read' : ''), p.peer_read_ts >= p.last.timestamp ? '✓✓' : '✓'));
       info.append(top, bottom);
       const extra = networksOf(p).length > 1 ? networksOf(p).map(netLabel) : []; // labels live in the filter chips
@@ -815,8 +1031,18 @@
     }
     if (!frag.children.length) {
       const empty = node('div', 'u-empty');
-      if (s.low) empty.append(node('p', '', 'No low priority chats here'));
-      else if (q || filter !== 'all') empty.append(node('p', '', q ? 'No matches' : 'Nothing here with this filter'));
+      const narrow = !!(filterState.net || filterState.type !== 'all' || filterState.label);
+      // 16.14: an empty folder says what it is for and how a chat gets there (hold on touch, right-click with a mouse);
+      // a filter that hides every chat offers one tap back to all chats.
+      const how = matchMedia('(hover: none)').matches ? 'Hold a chat' : 'Right-click a chat';
+      const hint = text => node('p', 'u-empty-hint', text);
+      if (s.seg === 'low' && !narrow) empty.append(node('p', '', 'No low priority chats here'), hint('Low chats stay out of All and never notify you. ' + how + ', then Priority → Low.'));
+      else if (s.seg === 'medium' && !narrow) empty.append(node('p', '', 'No medium priority chats here'), hint('Medium chats stay in All but never notify you. ' + how + ', then Priority → Medium.'));
+      else if (s.seg === 'unread' && !narrow && !q) empty.append(node('p', '', 'No unread chats'), hint('You are all caught up.'));
+      else if (q || narrow || s.seg !== 'all') {
+        empty.append(node('p', '', q ? 'No matches' : 'Nothing here with this filter'));
+        if (narrow) empty.append(button('Clear filters', () => { setNarrowQuiet('net', ''); setNarrowQuiet('type', 'all'); setNarrowQuiet('label', ''); drawList(); }, 'u-chip u-empty-clear'));
+      }
       else {
         empty.append(node('p', '', 'No chats yet. Connect WhatsApp, Telegram, Slack, LINE or Instagram and their chats land here.'));
         empty.append(button('Connect an account', () => accounts('accounts'), 'primary'));
@@ -846,7 +1072,8 @@
   }
   const mirrorOf = group => group ? wizardTwins().mirror.get(group) : null;
   const LOW_KEY = 'messenger-inbox-low';
-  function setLowView(on) { s.low = !!on; try { if (on) sessionStorage.setItem(LOW_KEY, '1'); else sessionStorage.removeItem(LOW_KEY); } catch { /* memory only */ } }
+  function setLowView(on) { s.low = !!on; if (!on && s.seg === 'low') s.seg = 'all'; try { if (on) sessionStorage.setItem(LOW_KEY, '1'); else sessionStorage.removeItem(LOW_KEY); } catch { /* memory only */ } }
+  s.low = s.seg === 'low';
   // Long-press (or right-click) a chat row: Mute / Unmute, Low priority / Inbox. A held press never also opens the chat.
   // A phone turns the finger lifting off a long-press into a click, which lands on the menu's backdrop and closes
   // it at once. Swallow exactly that click.
@@ -884,20 +1111,22 @@
   document.addEventListener('contextmenu', e => { lastPointer = {x: e.clientX, y: e.clientY, t: performance.now(), mouse: !e.sourceCapabilities?.firesTouchEvents && (e.pointerType ? e.pointerType === 'mouse' : e.button === 2 || e.buttons === 2 || !('ontouchstart' in window))}; }, true);
   // Coordinates relative to Messenger's own box (inside Wizard it is a window, not the page corner).
   // A mouse right-click opens the menu at the pointer; on wide screens it sits under the bubble; phones keep the full-width sheet.
-  function placeMenu(panel, card, right) {
+  function placeMenu(panel, card, right, flip = false) {
     const host = $('messenger').getBoundingClientRect(), r = card.getBoundingClientRect(), H = host.height, W = host.width;
-    const at = lastPointer && performance.now() - lastPointer.t < 800 && lastPointer.mouse ? lastPointer : null;
+    const at = !flip && lastPointer && performance.now() - lastPointer.t < 800 && lastPointer.mouse ? lastPointer : null; // flip menus belong to their button
     if (at || W > 600) { panel.classList.remove('right', 'left'); panel.classList.add('at'); panel.style.right = 'auto'; }
     const ph = panel.offsetHeight || 300, pw = Math.min(panel.offsetWidth || 300, W - 24);
     const clampY = y => Math.max(12, Math.min(y, H - ph - 12)), clampX = x => Math.max(12, Math.min(x, W - pw - 12));
     if (at) { panel.style.left = clampX(at.x - host.left) + 'px'; const y = at.y - host.top; panel.style.top = (y + ph > H - 12 ? clampY(y - ph) : clampY(y)) + 'px'; }
     else if (W > 600) { panel.style.left = clampX((right ? r.right - pw : r.left) - host.left) + 'px'; panel.style.top = (r.bottom + 4 - host.top + ph > H - 12 ? clampY(r.top - host.top - ph - 4) : clampY(r.bottom + 4 - host.top)) + 'px'; }
-    else panel.style.top = clampY(r.bottom + 4 - host.top) + 'px';
+    // flip: a control near the bottom (the phone's filter rows) opens its menu above itself, not over it.
+    else panel.style.top = (flip && r.bottom + 4 - host.top + ph > H - 12 ? clampY(r.top - host.top - ph - 4) : clampY(r.bottom + 4 - host.top)) + 'px';
   }
   function actionMenu(card, title, actions, opts = {}) {
     closeOverlay(); lastFocus = document.activeElement; s.overlay = 'Chat';
     const layer = node('div', 'u-overlay u-menu-layer'); layer.id = 'u-overlay';
-    const panel = node('div', 'u-menu ' + (opts.side === 'right' ? 'right' : 'left')); panel.setAttribute('role', 'menu'); panel.setAttribute('aria-label', title);
+    const panel = node('div', 'u-menu ' + (opts.side === 'right' ? 'right' : 'left') + (opts.cls ? ' ' + opts.cls : '')); panel.setAttribute('role', 'menu'); panel.setAttribute('aria-label', title);
+    s.menuClosed = opts.onClose || null;
     const pick = k => { recent = [k, ...recent.filter(x => x !== k)].slice(0, 8); closeOverlay(); opts.quick.pick(k); };
     if (opts.quick) {
       const strip = node('div', 'u-quick');
@@ -906,19 +1135,29 @@
       panel.append(strip);
     }
     const list = node('div', 'u-actions');
-    for (const a of actions) { const it = button('', () => { closeOverlay(); a.run(); }, 'u-act' + (a.danger ? ' danger' : '')); it.setAttribute('role', 'menuitem'); it.append(icon(a.icon), node('span', '', a.label)); list.append(it); }
+    for (const a of actions) {
+      // {head} is a small sentence-case section title; {checked} makes a radio item (Filters, Priority).
+      if (a.head) { const h = node('div', 'u-menu-head', a.head); h.setAttribute('role', 'presentation'); list.append(h); continue; }
+      const it = button('', () => { closeOverlay(); a.run(); }, 'u-act' + (a.danger ? ' danger' : '') + (a.checked ? ' checked' : ''));
+      it.setAttribute('role', 'checked' in a ? 'menuitemradio' : 'menuitem'); if ('checked' in a) it.setAttribute('aria-checked', String(!!a.checked));
+      it.append(icon(a.icon), node('span', '', a.label)); list.append(it);
+    }
     panel.append(list); layer.append(panel);
     outsideCloses(layer, panel);
     $('messenger').append(layer);
-    placeMenu(panel, card, opts.side === 'right');
-    panel.querySelector('button')?.focus(); hold();
+    placeMenu(panel, card, opts.side === 'right', opts.flip);
+    (panel.querySelector('button.checked') || panel.querySelector('button'))?.focus(); hold();
   }
   const muteAction = (muted, run) => ({label: muted ? 'Unmute' : 'Mute', icon: muted ? 'bell' : 'belloff', run});
-  const lowAction = (low, run) => ({label: low ? 'Move to Inbox' : 'Move to Low priority', icon: low ? 'inbox' : 'lowpri', run});
+  // Priority (Miguel, 2 Nov 2026): Normal, Medium (listed, never pings) or Low (out of the Inbox). One choice.
+  const priorityOf = p => isLow(p) ? 'low' : isMedium(p) ? 'medium' : 'normal';
+  const PRIORITIES = [['normal', 'Normal'], ['medium', 'Medium'], ['low', 'Low']];
+  const priorityAction = (p, card, side) => ({label: 'Priority: ' + PRIORITIES.find(x => x[0] === priorityOf(p))[1], icon: 'lowpri',
+    run: () => actionMenu(card, 'Priority', PRIORITIES.map(([v, t]) => ({label: t, icon: priorityOf(p) === v ? 'check' : 'none', checked: priorityOf(p) === v, run: () => setPriority(p, v)})), side ? {side} : {})});
   function chatMenu(p, card) {
     actionMenu(card, p.display_name, [
       muteAction(p.muted, () => p.native ? p.setMuted() : setMuted(p, !p.muted)),
-      lowAction(isLow(p), () => setLow(p, !isLow(p))),
+      priorityAction(p, card),
       ...(p.native || listKey(p) === 'groups' ? [] : [{label: 'Merge with…', icon: 'merge', run: () => mergePicker(p)}]),
       ...(contacts.ok && !p.native && listKey(p) !== 'groups' && !p.contact && p.accounts?.length ? [{label: 'Add to Contacts', icon: 'compose', run: () => action(async () => { const r = await saveToContacts(p); if (r) { toast('Added to Contacts'); drawList(); } })}] : []),
       ...(p.native || !p.last ? [] : [p.unread ? {label: 'Mark as read', icon: 'check', run: () => setUnread(p, false)} : {label: 'Mark as unread', icon: 'unread', run: () => setUnread(p, true)}]),
@@ -932,13 +1171,16 @@
     catch (e) { flip(before); error(e); }
   }
   // The row leaves the list in place (no extra screen); hold it again in the other folder to move it back.
-  async function setLow(p, low) {
-    if (p.twin && !!p.twin.low_priority !== low) { p.twin.setLowPriority(low); p.twin.low_priority = low; }
-    if (p.native) { p.setLowPriority(low); p.low_priority = low; syncBadge(); drawList(); toast(low ? 'Moved to Low priority' : 'Moved to Inbox'); return; }
-    const flip = v => { for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if (x.id === p.id) x.low_priority = v; p.low_priority = v; drawList(); syncBadge(); };
-    flip(low);
-    try { await call('people/' + encodeURIComponent(p.id), {low_priority: low}); toast(low ? 'Moved to Low priority' : 'Moved to Inbox'); persist(); }
-    catch (e) { flip(!low); toast(e.message || 'Could not move this chat', 3000); }
+  async function setPriority(p, level) {
+    const low = level === 'low', medium = level === 'medium', before = priorityOf(p);
+    if (before === level) return;
+    const said = low ? 'Moved to Low priority' : medium ? 'Medium priority: listed, never notifies' : before === 'low' ? 'Moved to Inbox' : 'Normal priority';
+    if (p.twin) { if (!!p.twin.low_priority !== low) p.twin.setLowPriority(low); if (!!p.twin.medium_priority !== medium) p.twin.setMediumPriority?.(medium); Object.assign(p.twin, {low_priority: low, medium_priority: medium}); }
+    if (p.native) { p.setLowPriority(low); p.setMediumPriority?.(medium); Object.assign(p, {low_priority: low, medium_priority: medium}); syncBadge(); drawList(); toast(said); return; }
+    const flip = v => { const set = {low_priority: v === 'low', medium_priority: v === 'medium'}; for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if (x.id === p.id) Object.assign(x, set); Object.assign(p, set); drawList(); syncBadge(); };
+    flip(level);
+    try { await call('people/' + encodeURIComponent(p.id), {low_priority: low, medium_priority: medium}); toast(said); persist(); }
+    catch (e) { flip(before); toast(e.message || 'Could not change priority', 3000); }
   }
   async function setMuted(p, muted) {
     if (p.twin && !!p.twin.muted !== muted) { p.twin.setMuted(); p.twin.muted = muted; }
@@ -1094,10 +1336,13 @@
   async function openPerson(id, hint) {
     view.selection?.clear();
     if (split.on && s.native) native?.close?.(); // the native Wizard thread on the right gives way
+    const fromList = !split.on && !s.person ? $('unified-inbox')?.querySelector(':scope > .u-list') : null;
+    if (fromList) split.listTop = fromList.scrollTop;
     s.person = id; const epoch = ++s.epoch, gen = ++split.threadGen; inChat(true); els.clear(); view.reply = view.edit = view.attach = null;
     if (split.on) { if (!hasListPane()) renderList(); markSelected(); }
     const cached = store.threads[id];
     buildThread(id, cached?.person || hint || {display_name: '', identities: []});
+    if (fromList) slideIn();
     savedOrder = [id, ...savedOrder.filter(x => x !== id)];
     if (cached) { paintThread(true); if (!cached.stale) { markRead(); persist(); return; } }
     else view.scroll.append(skeleton(6, 'bubbles'));
@@ -1132,7 +1377,7 @@
       {label: 'Mark as unread', icon: 'unread', run: async () => { await setUnread(cur, true); back(); }},
       {label: 'Merge with…', icon: 'merge', run: () => mergePicker(cur)},
       muteAction(cur.muted, () => setMuted(cur, !cur.muted)),
-      lowAction(isLow(cur), () => setLow(cur, !isLow(cur))),
+      priorityAction(cur, anchor, 'right'),
     ], {side: 'right'}); };
     view.sub = root.querySelector('.u-who-text span') || node('span'); if (!view.sub.parentNode) root.querySelector('.u-who-text').append(view.sub);
     const t = store.threads[id];
@@ -1219,16 +1464,57 @@
     call('people/' + view.id + '/read', {timestamp: last.timestamp}).catch(() => {});
   }
   const URL_RE = /\bhttps?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]]/g;
-  function richText(cls, text) {
-    const p = node('p', cls); let at = 0;
-    // Markdown links from bridges ("[label](url)"): show the label as the link text.
-    if (MD_LINK.test(text)) {
-      MD_LINK.lastIndex = 0;
-      for (const m of text.matchAll(MD_LINK)) { p.append(text.slice(at, m.index)); const a = node('a', '', /^https?:\/\//.test(m[1]) ? siteOf(m[2]) : m[1]); a.href = m[2]; a.target = '_blank'; a.rel = 'noopener noreferrer'; p.append(a); at = m.index + m[0].length; }
-      p.append(text.slice(at)); return p;
+  // Bubble text, built as nodes (never innerHTML): @mention chips, links, and the light formatting the networks
+  // write as plain text (**bold** / *bold*, _italic_, ~strike~, `code`, ```blocks```).
+  const INLINE = /```([\s\S]+?)```|`([^`\n]+)`|\[([^\]\n]{1,300})\]\((https?:\/\/[^)\s]+)\)|(\bhttps?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]])|\*\*([^*\n]+?)\*\*|(^|[^\w*])\*([^\s*][^*\n]*?)\*(?![\w*])|(^|[^\w_])_([^\s_][^_\n]*?)_(?![\w_])|~~([^~\n]+?)~~|(^|[^\w~])~([^\s~][^~\n]*?)~(?![\w~])/g;
+  const TG_USER = /(^|[\s(])(@[A-Za-z][A-Za-z0-9_]{3,31})(?![\w@])/g;
+  function contactName(net, acc) { try { return contacts.map.get(accKey(net, acc))?.name || ''; } catch { return ''; } }
+  function mentionMarks(text, m) {
+    const marks = []; let at = 0;
+    for (const x of m?.mentions || []) {
+      if (!x?.text) continue;
+      const i = text.indexOf(x.text, at); if (i < 0) continue;
+      const saved = x.acc && !x.me && contactName(x.net, x.acc);
+      marks.push({start: i, end: i + x.text.length, label: saved && !x.text.startsWith('@' + saved) && !/^@[A-Za-z0-9_]+$/.test(x.text) ? '@' + saved : x.text, me: !!x.me});
+      at = i + x.text.length;
     }
-    for (const m of text.matchAll(URL_RE)) { p.append(text.slice(at, m.index)); const a = node('a', '', m[0]); a.href = m[0]; a.target = '_blank'; a.rel = 'noopener noreferrer'; p.append(a); at = m.index + m[0].length; }
-    p.append(text.slice(at)); return p;
+    if (m?.network === 'telegram') for (const x of text.matchAll(TG_USER)) {
+      const start = x.index + x[1].length, end = start + x[2].length;
+      if (!marks.some(k => start < k.end && end > k.start)) marks.push({start, end, label: x[2], me: false});
+    }
+    return marks.sort((a, b) => a.start - b.start);
+  }
+  function inline(parent, text, depth) {
+    let at = 0;
+    for (const x of text.matchAll(INLINE)) {
+      const pre = x[8] != null ? x[7] : x[10] != null ? x[9] : x[13] != null ? x[12] : '';
+      const inner = x[8] ?? x[10] ?? x[13] ?? x[6] ?? x[11];
+      if (inner != null && /\s$/.test(inner)) continue;
+      parent.append(text.slice(at, x.index) + pre); at = x.index + x[0].length;
+      let el;
+      if (x[1] != null) el = node('code', 'u-code-block', x[1].replace(/^\n/, ''));
+      else if (x[2] != null) el = node('code', 'u-code', x[2]);
+      else if (x[4] != null) { el = node('a', '', /^https?:\/\//.test(x[3]) ? siteOf(x[4]) : x[3]); el.href = x[4]; }
+      else if (x[5] != null) { el = node('a', '', x[5]); el.href = x[5]; }
+      else {
+        el = node(x[6] != null || x[8] != null ? 'strong' : x[10] != null ? 'em' : 's');
+        if (depth < 2) inline(el, inner, depth + 1); else el.textContent = inner;
+      }
+      if (el.tagName === 'A') { el.target = '_blank'; el.rel = 'noopener noreferrer'; }
+      parent.append(el);
+    }
+    parent.append(text.slice(at));
+  }
+  function richText(cls, text, m) {
+    const p = node('p', cls); let at = 0;
+    for (const k of mentionMarks(text || '', m)) {
+      if (k.start < at) continue;
+      inline(p, text.slice(at, k.start), 0);
+      const chip = node('span', 'u-mention' + (k.me ? ' me' : ''), k.label); if (k.me) chip.title = 'Mentions you';
+      p.append(chip); at = k.end;
+    }
+    inline(p, (text || '').slice(at), 0);
+    return p;
   }
   // The sender's own link preview (what WhatsApp/Telegram/Signal showed them), as a tidy card.
   function linkCard(m, l, i) {
@@ -1248,13 +1534,19 @@
     const b = node('article', 'u-message' + (m.outgoing ? ' outgoing' : '') + (m.deleted ? ' deleted' : '') + (m.pending ? ' pending' : '') + (m.failed ? ' failed' : ''));
     const visual = !m.deleted && ['m.image', 'm.sticker', 'm.video'].includes(m.msgtype);
     if (visual && !m.original) b.classList.add('bare');
+    if (visual && isSticker(m) && !m.original) b.classList.add('sticker-only');
     if (ctx.group && !m.outgoing && m.sender && (pos === 'first' || pos === 'single')) b.append(node('p', 'u-sender tone-text-' + toneOf(m.sender), nameOf(m.sender)));
     if (m.reply) {
       const q = button('', () => jumpTo(m.reply.id), 'u-quote' + (m.reply.outgoing ? ' mine' : ''));
-      q.append(node('strong', '', m.reply.outgoing ? 'You' : nameOf(m.reply.sender) || 'Them'), node('span', '', m.reply.deleted ? 'Deleted message' : m.reply.voice ? '🎤 Voice message' : m.reply.text || {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.file': '📎 File', 'm.sticker': 'Sticker'}[m.reply.msgtype] || ''));
+      q.append(node('strong', '', m.reply.outgoing ? 'You' : nameOf(m.reply.sender) || 'Them'), node('span', '', m.reply.deleted ? 'Deleted message' : m.reply.voice ? '🎤 Voice message' : m.reply.text || (m.reply.gif ? 'GIF' : {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.file': '📎 File', 'm.sticker': 'Sticker'}[m.reply.msgtype]) || ''));
       b.append(q);
     }
     if (m.deleted) b.append(node('p', 'u-deleted', m.outgoing ? 'You deleted this message' : 'This message was deleted'));
+    else if (m.unavailable) {
+      const gone = node('p', 'u-unavailable'); gone.append(node('span', '', unavailableLabel(m.unavailable)));
+      gone.append(node('small', '', m.unavailable === 'waiting' ? '(' + netLabel(m.network) + ' is still sending it)' : m.unavailable === 'undecryptable' ? '(on ' + netLabel(m.network) + ')' : '(expired on ' + netLabel(m.network) + ')'));
+      b.append(gone);
+    }
     else if (visual && m.photos?.length > 1) {
       b.classList.add('has-album'); row.dataset.album = m.album;
       const photos = m.photos.filter(p => !p.deleted);
@@ -1275,12 +1567,12 @@
     }
     if (!story && !m.deleted && m.original && m.msgtype !== 'm.location') {
       if (ctx.auto || m.outgoing) {
-        b.append(richText('u-text', m.translated || m.original));
+        b.append(richText('u-text', m.translated || m.original, m));
         if (m.translated && m.translated !== m.original) b.append(node('p', 'u-original', m.original));
         if (m.translation_error) b.append(node('p', 'u-original error', m.translation_error));
       } else {
         const translated = shown[m.id] === 'translated' && m.translated;
-        b.append(richText('u-text', translated ? m.translated : m.original));
+        b.append(richText('u-text', translated ? m.translated : m.original, m));
         if (foreignScript(m.original)) b.append(button(translated ? 'Show original' : 'Translate', () => translate(m), 'u-translate link'));
       }
     }
@@ -1292,7 +1584,10 @@
     if (m.outgoing) meta.append(m.failed ? node('span', 'u-status-ic fail', '!') : m.pending ? node('span', 'u-status-ic clock', '◷') : node('span', 'u-status-ic' + (ctx.read ? ' read' : ''), ctx.read ? '✓✓' : '✓'));
     b.append(meta);
     row.append(b);
-    if (m.failed) row.append(button(m.failed === true ? 'Not sent · Tap to retry' : 'Not sent · ' + m.failed + ' · Retry', () => m.retry ? m.retry() : null, 'u-retry link'));
+    if (m.failed) {
+      row.append(button(m.failed === true ? 'Not sent · Tap to retry' : 'Not sent · ' + m.failed + ' · Retry', () => m.retry ? m.retry() : null, 'u-retry link'));
+      if (m.saveRecording) row.append(button('Save recording', () => m.saveRecording(), 'u-voice-save link'));
+    }
     if (m.reactions?.length) {
       const strip = node('div', 'u-reactions');
       for (const r of m.reactions) strip.append(button(r.key + (r.count > 1 ? ' ' + r.count : ''), () => react(m, r.key), 'u-react' + (r.mine ? ' mine' : '')));
@@ -1391,28 +1686,58 @@
   }
 
   function toneOf(name) { let h = 0; for (const ch of name || '?') h = (h * 31 + ch.codePointAt(0)) >>> 0; return h % TONES; }
+  // Bridged GIFs (WhatsApp/Telegram send them as short looping videos) and animated stickers play by themselves,
+  // muted and inline, only while on screen; with reduced motion they hold the first frame until tapped.
+  const isSticker = m => m.msgtype === 'm.sticker' || (m.msgtype === 'm.video' && !!m.media?.sticker);
+  const stillMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const loopSeen = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+    for (const e of entries) {
+      const v = e.target.querySelector('video'); if (!v) continue;
+      if (e.isIntersecting && !e.target.dataset.still) v.play().catch(() => {}); else v.pause();
+    }
+  }, {threshold: 0.15}) : null;
   function visualMedia(m) {
-    const box = node('button', 'u-media'); box.type = 'button'; box.setAttribute('aria-label', m.msgtype === 'm.video' ? 'Play video' : 'Open photo');
+    const box = node('button', 'u-media'); box.type = 'button';
+    const sticker = isSticker(m), loop = m.msgtype === 'm.video' && (m.media?.gif || m.media?.sticker);
+    box.setAttribute('aria-label', sticker ? 'Sticker' : m.media?.gif ? 'GIF' : m.msgtype === 'm.video' ? 'Play video' : 'Open photo');
     const w = m.media?.w, h = m.media?.h;
     if (w && h) box.style.aspectRatio = w + ' / ' + h; else box.classList.add('unsized');
+    let v = null;
     if (m.msgtype === 'm.video') {
-      const v = node('video'); v.preload = 'metadata'; v.playsInline = true; v.src = m.local || mediaURL(m.id); v.muted = true; box.append(v, node('span', 'u-play', '▶'));
-      if (m.media?.duration) box.append(node('span', 'u-vdur', fmtDur(m.media.duration)));
+      v = node('video'); v.playsInline = true; v.muted = true; v.setAttribute('muted', ''); v.setAttribute('playsinline', '');
+      if (m.media?.thumb && !m.local) v.poster = mediaURL(m.id, 'thumb');
+      if (loop) {
+        const still = stillMotion();
+        v.loop = true; v.preload = 'auto'; v.disablePictureInPicture = true; v.autoplay = !still;
+        v.src = m.local || mediaURL(m.id) + (still && !m.media?.thumb ? '#t=0.001' : '');
+        box.classList.add(sticker ? 'sticker' : 'gif'); box.append(v);
+        if (!sticker) box.append(node('span', 'u-gif-tag', 'GIF'));
+        if (still) { box.dataset.still = '1'; box.append(node('span', 'u-play', '▶')); }
+        if (sticker && m.media?.thumb) v.onerror = () => { const img = node('img', 'in'); img.alt = 'Sticker'; img.src = mediaURL(m.id, 'thumb'); v.replaceWith(img); };
+        loopSeen?.observe(box);
+      } else {
+        v.preload = 'metadata'; v.src = m.local || mediaURL(m.id) + (m.media?.thumb ? '' : '#t=0.1'); box.append(v, node('span', 'u-play', '▶'));
+        if (m.media?.duration) box.append(node('span', 'u-vdur', fmtDur(m.media.duration)));
+      }
     } else {
-      const img = node('img'); img.alt = m.original || 'Photo'; img.decoding = 'async'; img.loading = 'lazy';
+      const img = node('img'); img.alt = m.original || (sticker ? 'Sticker' : 'Photo'); img.decoding = 'async'; img.loading = 'lazy';
       img.onload = () => { img.classList.add('in'); if (!w && view.scroll && nearBottom()) view.scroll.scrollTop = view.scroll.scrollHeight; };
       img.onerror = () => { box.classList.add('broken'); box.append(node('span', 'u-broken', 'Photo unavailable')); };
       img.src = m.local || mediaURL(m.id, 'thumb'); box.append(img);
-      if (m.msgtype === 'm.sticker') box.classList.add('sticker');
+      if (sticker) box.classList.add('sticker');
+      else if (m.media?.mime === 'image/gif') { box.classList.add('gif'); box.append(node('span', 'u-gif-tag', 'GIF')); }
     }
     box.message = m;
-    if (!m.pending) box.onclick = () => viewer(m, box); else box.append(node('span', 'u-spin'));
+    if (!m.pending) box.onclick = () => {
+      if (box.dataset.still && v) { delete box.dataset.still; box.querySelector('.u-play')?.remove(); v.play().catch(() => {}); return; }
+      if (!sticker) viewer(m, box); // stickers are part of the conversation, not photos to open
+    }; else box.append(node('span', 'u-spin'));
     return box;
   }
   // Tapping a photo or video opens Wizard's own media viewer, the one Chats uses: pinch and double-tap zoom, pan,
   // swipe through every photo in this chat, Save/Share, Back closes (James, 26 Oct 2026). Messenger keeps no viewer.
   function viewer(m, box) {
-    const boxes = [...(box.closest('.u-thread-body') || document).querySelectorAll('.u-media')].filter(b => b.message && !b.message.pending && b.message.msgtype !== 'm.sticker');
+    const boxes = [...(box.closest('.u-thread-body') || document).querySelectorAll('.u-media')].filter(b => b.message && !b.message.pending && !isSticker(b.message));
     const list = boxes.map(b => b.message), at = Math.max(0, list.indexOf(m));
     const who = x => (x.outgoing ? 'You' : nameOf(x.sender) || 'Photo') + (x.original ? ' · ' + x.original : '');
     window.WizardApp?.media?.view(list.map(x => ({url: mediaURL(x.id), kind: x.msgtype === 'm.video' ? 'video' : 'image', name: who(x)})), at);
@@ -1465,8 +1790,13 @@
   // Shared by both message renderers. Chat-row holdToMenu deliberately stays separate.
   function messageGestures(row, bubble, {selection, id, menu, reply, album}) {
     const interactive = 'a,button,input,textarea,select,img,video,audio,.u-media,.u-reply,.u-wave,.reply-quote';
-    const holdInteractive = album ? 'a,button:not(.u-media),input,textarea,select,video,audio,.u-reply,.u-wave,.reply-quote' : interactive;
-    let timer = null, x0 = 0, y0 = 0, dx = 0, swiping = false, firstHold = false, suppressTap = false, touch = false;
+    // A photo, video, GIF or sticker IS the message when it has no caption (16.16 drew them without bubble chrome), so
+    // holding or right-clicking it must reach the same menu, reactions first (Miguel, 5 Nov 2026: "I couldn't react
+    // to a GIF"). A tap still opens the viewer / plays a held GIF. Albums keep their hold-to-select.
+    const holdInteractive = album ? 'a,button:not(.u-media),input,textarea,select,video,audio,.u-reply,.u-wave,.reply-quote'
+      : 'a,button:not(.u-media),input,textarea,select,audio,.u-reply,.u-wave,.reply-quote';
+    const onMedia = e => !album && !!e.target.closest('.u-media');
+    let timer = null, x0 = 0, y0 = 0, dx = 0, swiping = false, firstHold = false, suppressTap = false, touch = false, heldMenu = false;
     // Text is selectable like any page (Miguel, 30 Oct 2026): a mouse drag highlights part of any bubble, sent or
     // received, and a plain click never opens a menu (right-click does). A phone's hold still picks messages, so its
     // menu offers "Select text": that bubble then takes native selection handles, preselected, ready to Copy.
@@ -1481,18 +1811,23 @@
       document.addEventListener('selectionchange', watch);
     };
     const textMode = () => bubble.classList.contains('u-textsel');
-    const open = () => menu(touch ? {selectText} : {select: () => { window.getSelection()?.removeAllRanges(); selection()?.begin(id); }});
+    const select = () => { window.getSelection()?.removeAllRanges(); selection()?.begin(id); };
+    const open = () => menu(touch ? {selectText} : {select});
+    const openMedia = () => menu(touch ? {select, selectText} : {select});
     const cancel = () => { clearTimeout(timer); timer = null; };
     // Only a finger's first hold is kept from starting a native selection (it picks messages instead).
     bubble.addEventListener('selectstart', e => { if (touch && !textMode() && (!selection()?.active || firstHold)) e.preventDefault(); });
     bubble.addEventListener('pointerdown', e => {
-      firstHold = false; suppressTap = false; touch = e.pointerType === 'touch' || e.pointerType === 'pen';
+      firstHold = false; suppressTap = false; heldMenu = false; touch = e.pointerType === 'touch' || e.pointerType === 'pen';
       if (textMode() || selection()?.active || e.button > 0 || e.target.closest(holdInteractive)) return;
       cancel(); x0 = e.clientX; y0 = e.clientY; dx = 0; swiping = false;
       if (e.pointerType !== 'touch') return;
+      const media = onMedia(e);
       timer = setTimeout(() => {
-        timer = null; firstHold = true; navigator.vibrate?.(10);
-        window.getSelection()?.removeAllRanges(); swallowRelease(); selection()?.begin(id);
+        timer = null; navigator.vibrate?.(10); window.getSelection()?.removeAllRanges(); swallowRelease();
+        // Holding media opens the menu at once (a tap there belongs to the viewer); Select is in it.
+        if (media) { heldMenu = true; openMedia(); return; }
+        firstHold = true; selection()?.begin(id);
       }, 450);
     });
     bubble.addEventListener('pointermove', e => {
@@ -1508,6 +1843,8 @@
       if (swiping) { row.style.transform = ''; row.classList.remove('arm'); suppressTap = true; if (dx > 56) reply(); swiping = false; }
     };
     for (const type of ['pointerup','pointercancel','pointerleave']) bubble.addEventListener(type, end);
+    // A swipe-to-reply that started on a photo must not also open the viewer (its own click handler runs first).
+    bubble.addEventListener('click', e => { if (suppressTap && onMedia(e)) { suppressTap = false; e.preventDefault(); e.stopPropagation(); } }, true);
     bubble.addEventListener('click', e => {
       if (suppressTap) { suppressTap = false; e.preventDefault(); e.stopPropagation(); return; }
       if (selection()?.active || textMode() || e.target.closest(interactive)) return;
@@ -1517,10 +1854,11 @@
     });
     bubble.addEventListener('contextmenu', e => {
       // The first hold selects messages; the next hold is left entirely to native text selection.
+      if (heldMenu) { e.preventDefault(); return; } // the hold already opened it
       if ((selection()?.active && !firstHold) || textMode()) return;
       if (e.target.closest(holdInteractive)) return;
       e.preventDefault(); cancel();
-      if (!selection()?.active) open();
+      if (!selection()?.active) (onMedia(e) ? openMedia : open)();
     });
   }
   function gestures(row, b, m) {
@@ -1542,12 +1880,12 @@
     }
     const list = node('div', 'u-actions');
     const item = (label, ic, fn, cls = '') => { const it = button('', () => { closeOverlay(); fn(); }, 'u-act ' + cls); it.setAttribute('role', 'menuitem'); it.append(icon(ic), node('span', '', label)); list.append(it); };
-    if (!m.deleted) item('Forward to Wizard', 'reply', () => view.selection.forward([m.id]));
+    if (!m.deleted) item('Forward to Wizard', 'forward', () => view.selection.forward([m.id]));
     if (!m.deleted) item('Reply', 'reply', () => startReply(m));
     if (m.original && !m.deleted) item('Copy', 'copy', () => navigator.clipboard?.writeText(m.translated && shown[m.id] === 'translated' ? m.translated : m.original)?.then(() => toast('Copied')).catch(() => toast('Copy is not available here')));
     if (m.media && !m.deleted) item(m.photos?.length > 1 ? 'Save photos' : 'Save', 'download', () => { for (const photo of m.photos || [m]) if (!photo.deleted) { const a = node('a'); a.href = mediaURL(photo.id); a.download = photo.media?.filename || ''; a.click(); } });
     if (m.outgoing && telegram && m.msgtype === 'm.text' && !m.deleted) item('Edit', 'compose', () => startEdit(m));
-    if (opts.selectText && m.original && !m.deleted) item('Select text', 'copy', opts.selectText);
+    if (opts.selectText && m.original && !m.deleted) item('Select text', 'textsel', opts.selectText);
     if (opts.select && !m.deleted && !m.pending) item('Select', 'check', opts.select);
     item('Delete for me', 'trash', () => del(m, false), 'danger');
     if (m.outgoing && telegram && !m.deleted) item('Delete for everyone', 'trash', () => del(m, true), 'danger');
@@ -1629,7 +1967,8 @@
     return done;
   }
   async function del(m, everyone) {
-    if (everyone && !confirm('Delete this message for everyone?')) return;
+    // Never window.confirm: the Mac app's web view has no confirm panel, so it silently answers no.
+    if (everyone && !await ask({title: 'Delete for everyone?', body: 'It is removed from the chat for both of you.', yes: 'Delete', no: 'Keep'})) return;
     try { const r = await call('messages/' + encodeURIComponent(m.id) + '/delete', {everyone}); mergeMessages(view.id, r.messages || [r.message]); paintThread(); } catch (e) { error(e); }
   }
   function startReply(m) { view.edit = null; view.reply = m; if (m.network) view.useNetwork?.(m.network); view.paintBar?.(); view.draft?.focus(); }
@@ -1878,6 +2217,11 @@
     const send = iconButton('send', reviewed ? 'Preview send' : 'Send', () => submit(), 'u-send');
     const mic = iconButton('mic', 'Record voice message', () => record(), 'u-mic'); mic.hidden = !telegramOnly;
     const field = node('div', 'u-field'); field.append(draft);
+    // One button opens Emoji / GIFs / Stickers, like Telegram (Miguel, 5 Nov 2026: "I don't know how to send emojis").
+    const pickerBtn = iconButton('smile', 'Emoji, GIFs and stickers', () => mediaPicker.toggle(), 'u-pick-btn'); pickerBtn.setAttribute('aria-expanded', 'false');
+    field.append(pickerBtn);
+    const mediaPicker = picker({id, draft, button: pickerBtn, form, telegram: () => ((p.identities || []).find(i => i.id === channel.value) || p.identities?.[0])?.network === 'telegram',
+      send: pick => { if (s.person !== id) return; const reply = view.reply; view.reply = null; paintBar(); queueSend(id, {pick, reply, identity_id: channel.value}); }});
     const row = node('div', 'u-compose-row'); row.append(attach, field, send, mic, file);
     const paintBar = () => {
       bar.replaceChildren(); const target = view.edit || view.reply; const a = view.attach || [];
@@ -1894,6 +2238,7 @@
         bar.hidden = false;
         const chip = node('div', 'u-unsent-voice');
         chip.append(node('span', '', 'Unsent voice note'),
+          button('Save recording', () => saveVoiceRecording(take.blob, take.id), 'u-voice-keep-save'),
           button('Send', () => sendKeptVoice(take), 'u-voice-keep-send'),
           button('Discard', async () => {
             try { await window.WizardApp.capture.ack(take.id); voiceKept.delete(take.id); view.paintBar?.(); }
@@ -1990,6 +2335,44 @@
       const url = URL.createObjectURL(take.blob); localAudio.set(url, take.blob);
       queueSend(take.meta.person, {voice: {blob: take.blob, take: take.id, duration: take.durationMs, waveform: [], url}, identity_id: take.meta.identity});
     }
+    // Without WebCodecs (Safari before 26, the Mac app) record plain PCM WAV through the shared recorder: Messenger's
+    // server turns it into Ogg Opus. Safari's fragmented MP4 lost its header on long takes (Miguel, 3 Nov 2026:
+    // a 1:40 note failed with "(moof)"), and its WebM did not rewrap either.
+    // How much audio a take really holds: PCM WAV is 32 bytes per ms after its 44-byte header. Other formats carry
+    // the recorder's own clock, which cannot show lost audio, so they are not checked.
+    function captured(take) {
+      const wav = take?.mime === 'audio/wav' || take?.blob?.type === 'audio/wav';
+      return wav && take.blob?.size > 44 ? Math.round((take.blob.size - 44) / 32) : null;
+    }
+    // While recording, compare captured audio with the clock and note when the window was hidden or unfocused,
+    // so a stalled microphone is shown at once and the notice can name the likely cause.
+    function watchCapture(r) {
+      const now = Date.now(), step = now - (r.seen || now); r.seen = now;
+      if (document.visibilityState === 'hidden') r.hiddenMs = (r.hiddenMs || 0) + step;
+      else if (!document.hasFocus()) r.blurMs = (r.blurMs || 0) + step;
+      if (!r.pcm || r.stallShown || now - (r.checked || 0) < 1000) return;
+      r.checked = now;
+      let got; try { got = r.session?.getInfo?.()?.durationMs; } catch { got = null; }
+      if (typeof got !== 'number') return;
+      const wall = now - r.started;
+      if (wall - got > 3000) { r.stallShown = true; voiceNotice('The microphone stopped reaching Wizard ' + fmtDur(got) + ' in.' + captureCause(r) + ' Keep Wizard in front while you record.'); }
+    }
+    function captureCause(r) {
+      if ((r.hiddenMs || 0) > 2000) return ' Wizard was out of sight for ' + fmtDur(r.hiddenMs) + '.';
+      if ((r.blurMs || 0) > 2000) return ' Another app was in front for ' + fmtDur(r.blurMs) + '.';
+      return '';
+    }
+    function voiceMime() {
+      if (window.AudioEncoder) return {};
+      // Safari's WebM recorder keeps recording while Wizard is hidden; its Web Audio (the shared recorder's PCM mode)
+      // stops then (WebKit bug 231105), which clipped a 2-minute note to 7 s. Messenger's server rewraps WebM.
+      const has = m => { try { return !!window.MediaRecorder?.isTypeSupported?.(m); } catch { return false; } };
+      if (has('audio/webm;codecs=opus') || has('audio/webm')) return {};
+      let pcm = false; try { pcm = !!window.WizardApp?.capture?.capabilities?.({kind: 'audio', pcm: true})?.pcm; } catch { pcm = false; }
+      if (pcm) return {pcm: true};
+      const mime = ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4'].find(has);
+      return mime ? {mime} : {};
+    }
     function recoverVoice() {
       const capture = window.WizardApp?.capture;
       if (!capture || voiceRecoveryWork || view.recording) return;
@@ -2042,12 +2425,21 @@
       r.stop = async () => {
         if (r.phase !== 'recording') return;
         r.phase = 'stopping'; view.paintRecording?.();
+        const wall = Date.now() - r.started;
         let take;
         try { take = await r.session.stop(); }
         catch (e) { r.phase = 'recording'; failed(new Error('Recording kept on this device. Try Send or Discard again. ' + e.message)); return; }
         close();
         const duration = take.durationMs || Date.now() - r.started;
         if (duration < 600 || !take.blob?.size) { voiceNotice('Hold on a little longer to record'); capture.ack(take.id).catch(() => {}); return; }
+        // Never send a clipped note (Miguel, 3 Nov 2026: a 2-minute note from the Mac app reached James as its last
+        // 7 seconds). Keep it as an unsent voice note and say how much was captured; Send there still sends it.
+        const got = captured(take);
+        if (got != null && wall - got > 3000 && got < wall * 0.9) {
+          voiceKept.set(take.id, {...take, meta: {...take.meta, purpose: 'messenger-voice', person: r.person, identity: r.identity}});
+          voiceNotice('Only ' + fmtDur(got) + ' of your ' + fmtDur(wall) + ' recording reached Wizard, so it was not sent.' + captureCause(r) + ' It is kept below if you still want to send it.');
+          view.paintBar?.(); return;
+        }
         const step = Math.max(1, r.levels.length / 64), waveform = Array.from({length: Math.min(64, r.levels.length)}, (_, i) => r.levels[Math.floor(i * step)]);
         const url = URL.createObjectURL(take.blob); localAudio.set(url, take.blob);
         queueSend(r.person, {voice: {blob: take.blob, take: take.id, duration, waveform, url}, reply: r.reply, identity_id: r.identity});
@@ -2063,7 +2455,8 @@
           own = capture.current?.() || own;
           if (!attached && recoverOnly) { close(); return; } // recovery never falls through to start
           r.person = own?.meta?.person || id; r.identity = own?.meta?.identity || channel.value; r.reply = view.reply;
-          r.session = attached || await capture.start({kind: 'audio', meta: {purpose: 'messenger-voice', person: id, identity: channel.value, micSession: voiceTapSession}, maxMs: 15 * 60e3, maxBytes: 24 * 1048576});
+          const mode = attached ? {} : voiceMime(); r.pcm = !!mode.pcm;
+          r.session = attached || await capture.start({kind: 'audio', ...mode, meta: {purpose: 'messenger-voice', person: id, identity: channel.value, micSession: voiceTapSession}, maxMs: 15 * 60e3, maxBytes: 24 * 1048576});
           if (r.abandoned) { dropLate(!!attached); return; }
           if (!r.session) throw new Error('That recording has already stopped. Tap the microphone to start again.');
           clearTimeout(r.deadline);
@@ -2077,6 +2470,7 @@
             const level = Math.round(Math.min(1, last * 1.6) * 1024); r.levels.push(level);
             if (r.levels.length > 9600) r.levels.splice(0, 3200);
             view.paintRecordingTick?.(r, level);
+            watchCapture(r);
           }, 100);
           view.paintRecording?.();
         } catch (e) {
@@ -2102,12 +2496,178 @@
       while (wave.children.length > 40) wave.firstChild.remove();
     };
     Object.assign(view, {draft, grow, paintBar, paintRecording, paintRecordingTick});
-    form.append(bar, via, channel, row, notice); grow(); paintBar(); paintRecording();
+    form.append(bar, via, channel, mediaPicker.panel, row, notice); grow(); paintBar(); paintRecording();
     // Switching chats in the split (or redrawing on resize) must not drop a save that is still waiting.
     const prev = view.sd, flushing = prev?.timer ? prev.save() : prev?.busy;
     prev?.stop?.(); view.sd = serverDraft(id, {form, draft, channel, grow, paintBar, paintVia}, prev?.id === id ? flushing : null);
     queueMicrotask(() => { if (!form.isConnected) return; if (!view.recording) record(true); recoverVoice(); });
     return form;
+  }
+  // ---------- Emoji / GIFs / Stickers (Miguel, 5 Nov 2026) ----------
+  // One panel above the box, opened by the smiley in the box. Emoji go in at the caret (the box stays as typed);
+  // GIFs and stickers are the owner's own Telegram ones (saved GIFs, @gif search, recent/favourite stickers and
+  // installed packs, listed by the Telegram bridge) and send at once, through the same queue as every message.
+  // The full emoji set is Wizard's shared one (WosTopicEmoji, the Chats topic picker); the reaction grid is the fallback.
+  const EMOJI_RECENT = 'messenger-emoji-recent-v1';
+  let emojiKit = null;
+  function loadEmojiKit() {
+    if (window.WosTopicEmoji?.categories?.length) return Promise.resolve(window.WosTopicEmoji);
+    if (emojiKit) return emojiKit;
+    const load = src => new Promise((resolve, reject) => { const el = document.createElement('script'); el.src = src; el.async = false; el.onload = resolve; el.onerror = reject; document.head.append(el); });
+    emojiKit = (window.WosTopicEmojiData ? Promise.resolve() : load('/wizard-os-home/core/chat-topic-emojis-data.js'))
+      .then(() => window.WosTopicEmoji || load('/wizard-os-home/core/chat-topic-emojis.js'))
+      .then(() => window.WosTopicEmoji?.categories?.length ? window.WosTopicEmoji : null).catch(() => null);
+    return emojiKit;
+  }
+  const emojiRecent = () => { try { const v = JSON.parse(localStorage.getItem(EMOJI_RECENT) || '[]'); return Array.isArray(v) ? v.filter(x => typeof x === 'string').slice(0, 24) : []; } catch { return []; } };
+  function rememberEmoji(k) {
+    const list = [k, ...emojiRecent().filter(x => x !== k)].slice(0, 24);
+    try { localStorage.setItem(EMOJI_RECENT, JSON.stringify(list)); } catch { /* private mode: recent stays for this session */ }
+    recent = [k, ...recent.filter(x => x !== k)].slice(0, 8); // the reaction strip leads with the same recent picks
+  }
+  const pickerCache = {stickers: null, packs: Object.create(null), gifs: Object.create(null)};
+  const pickURL = (pid, full) => 'api/unified/picker/media/' + encodeURIComponent(pid) + (full ? '?kind=full' : '');
+  function picker(o) {
+    const panel = node('div', 'u-picker'); panel.hidden = true; panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', 'Emoji, GIFs and stickers');
+    const tabs = node('div', 'u-pick-tabs'); tabs.setAttribute('role', 'tablist');
+    const body = node('div', 'u-pick-body');
+    panel.append(tabs, body);
+    const state = {open: false, tab: 'emoji', start: null, end: null, gen: 0};
+    const touch = () => matchMedia('(pointer: coarse)').matches;
+    // The caret survives the box losing focus (the phone keyboard goes down while the panel is open).
+    const keep = () => { state.start = o.draft.selectionStart; state.end = o.draft.selectionEnd; };
+    for (const ev of ['select', 'keyup', 'pointerup', 'input', 'blur']) o.draft.addEventListener(ev, keep);
+    o.draft.addEventListener('focus', () => { if (state.open && touch()) close(); }); // tapping the box brings the keyboard back, like Telegram
+    function insert(k) {
+      const v = o.draft.value, a = Math.min(state.start ?? v.length, v.length), b = Math.max(a, Math.min(state.end ?? a, v.length));
+      o.draft.value = v.slice(0, a) + k + v.slice(b);
+      o.draft.dispatchEvent(new Event('input', {bubbles: true}));
+      state.start = state.end = a + k.length;
+      if (!touch()) { o.draft.focus(); o.draft.setSelectionRange(state.start, state.end); }
+      rememberEmoji(k);
+    }
+    function tab(name, label) {
+      const t = button(label, () => show(name), 'u-pick-tab' + (state.tab === name ? ' on' : '')); t.setAttribute('role', 'tab'); t.setAttribute('aria-selected', String(state.tab === name)); t.dataset.tab = name; return t;
+    }
+    function paintTabs() {
+      const tg = o.telegram(); if (!tg && state.tab !== 'emoji') state.tab = 'emoji';
+      tabs.replaceChildren(tab('emoji', 'Emoji'), ...(tg ? [tab('gifs', 'GIFs'), tab('stickers', 'Stickers')] : []));
+    }
+    function show(name) { state.tab = name; state.gen++; paintTabs(); body.replaceChildren(); body.scrollTop = 0; ({emoji: emojiTab, gifs: gifTab, stickers: stickerTab})[name](state.gen); }
+    function section(title, cls) { const h = node('h3', 'u-pick-head', title); const g = node('div', cls); body.append(h, g); return g; }
+    function emojiButton(k) { const b = button(k, () => insert(k), 'u-emo'); b.setAttribute('aria-label', k); return b; }
+    function emojiTab(gen) {
+      const search = node('input', 'u-pick-search'); search.type = 'search'; search.placeholder = 'Search emoji'; search.setAttribute('aria-label', 'Search emoji'); search.enterKeyHint = 'search';
+      const list = node('div', 'u-pick-list');
+      body.append(search, list);
+      const paint = kit => {
+        if (gen !== state.gen) return;
+        list.replaceChildren();
+        const add = (title, emoji) => { if (!emoji.length) return; const g = node('div', 'u-emo-grid'); for (const k of emoji) g.append(emojiButton(k)); list.append(node('h3', 'u-pick-head', title), g); };
+        const q = search.value.trim();
+        if (!q) add('Recent', emojiRecent());
+        const groups = kit ? kit.search(q) : [{label: 'Smileys', emoji: [...QUICK, ...MORE].filter(k => !q || k.includes(q))}];
+        for (const c of groups) add(c.label, [...c.emoji]);
+        if (!list.childElementCount) list.append(node('p', 'u-pick-empty', 'No emoji found'));
+      };
+      paint(window.WosTopicEmoji?.categories?.length ? window.WosTopicEmoji : null);
+      loadEmojiKit().then(kit => { if (kit) { search.oninput = () => paint(kit); paint(kit); } });
+      search.oninput = () => paint(null);
+    }
+    // A tile is a small preview; a GIF plays only while on screen (reduced motion keeps the still).
+    const playing = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+      for (const e of entries) {
+        const tile = e.target; if (!e.isIntersecting || tile.dataset.live || stillMotion()) continue;
+        tile.dataset.live = '1'; playing.unobserve(tile);
+        const v = node('video'); v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.setAttribute('muted', '');
+        v.src = pickURL(tile.pick.id, true); v.oncanplay = () => { tile.classList.add('live'); v.play().catch(() => {}); }; v.onerror = () => v.remove();
+        tile.append(v);
+      }
+    }, {root: body, threshold: 0.3}) : null;
+    function tile(item, kind) {
+      const b = node('button', 'u-pick-tile ' + kind); b.type = 'button'; b.pick = item;
+      b.setAttribute('aria-label', kind === 'gif' ? 'Send GIF' : 'Send sticker ' + (item.emoji || ''));
+      if (item.w && item.h && kind === 'gif') b.style.aspectRatio = item.w + ' / ' + item.h;
+      if (item.thumb) { const img = node('img'); img.alt = ''; img.loading = 'lazy'; img.decoding = 'async'; img.src = pickURL(item.id); b.append(img); }
+      else b.append(node('span', 'u-pick-alt', item.emoji || (kind === 'gif' ? 'GIF' : '🙂')));
+      b.onclick = () => { close(); o.send({id: item.id, kind, w: item.w, h: item.h, preview: item.thumb ? pickURL(item.id) : null}); };
+      if (kind === 'gif' && item.mime?.startsWith('video/')) playing?.observe(b);
+      return b;
+    }
+    const loading = () => { const p = node('p', 'u-pick-empty'); p.append(node('span', 'spinner'), node('span', '', ' Loading…')); return p; };
+    const failed = (box, e, retry) => { box.replaceChildren(node('p', 'u-pick-empty', e?.message && e.message.length < 90 ? e.message : 'Telegram did not answer'), button('Try again', retry, 'secondary u-pick-retry')); };
+    function gifTab(gen) {
+      const search = node('input', 'u-pick-search'); search.type = 'search'; search.placeholder = 'Search GIFs'; search.setAttribute('aria-label', 'Search GIFs'); search.enterKeyHint = 'search';
+      const grid = node('div', 'u-gif-grid');
+      body.append(search, grid);
+      let timer = null, more = null;
+      const run = async (q, offset = '') => {
+        const key = q + '\n' + offset, mine = ++state.gen; gen = mine;
+        if (!offset) grid.replaceChildren(loading());
+        try {
+          const r = pickerCache.gifs[key] || (pickerCache.gifs[key] = await api('api/unified/picker/gifs?' + new URLSearchParams(offset ? {q, offset} : {q})).catch(e => { delete pickerCache.gifs[key]; throw e; }));
+          if (mine !== state.gen) return;
+          if (!offset) grid.replaceChildren();
+          more?.remove(); more = null;
+          for (const it of r.items) grid.append(tile(it, 'gif'));
+          if (!grid.childElementCount) grid.append(node('p', 'u-pick-empty', q ? 'No GIFs found' : 'Your saved GIFs show here. Search to find more.'));
+          if (r.next && q) { more = button('More GIFs', () => run(q, r.next), 'secondary u-pick-more'); grid.after(more); }
+        } catch (e) { if (mine === state.gen) failed(grid, e, () => run(q, offset)); }
+      };
+      search.oninput = () => { clearTimeout(timer); timer = setTimeout(() => run(search.value.trim()), 450); };
+      search.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); run(search.value.trim()); } };
+      run('');
+    }
+    function stickerTab(gen) {
+      const packs = node('div', 'u-pack-row'); const grid = node('div', 'u-sticker-list');
+      body.append(packs, grid);
+      const paintPack = async (pack, chip) => {
+        for (const c of packs.children) c.classList.toggle('on', c === chip);
+        const mine = ++state.gen; grid.replaceChildren(loading());
+        try {
+          const r = pickerCache.packs[pack.id] || (pickerCache.packs[pack.id] = await api('api/unified/picker/stickers/' + encodeURIComponent(pack.id)).catch(e => { delete pickerCache.packs[pack.id]; throw e; }));
+          if (mine !== state.gen) return;
+          const g = node('div', 'u-sticker-grid'); for (const it of r.stickers) g.append(tile(it, 'sticker'));
+          grid.replaceChildren(node('h3', 'u-pick-head', r.title), g);
+        } catch (e) { if (mine === state.gen) failed(grid, e, () => paintPack(pack, chip)); }
+      };
+      const paintMine = (r, chip) => {
+        for (const c of packs.children) c.classList.toggle('on', c === chip);
+        state.gen++; grid.replaceChildren();
+        for (const [title, list] of [['Recent', r.recent], ['Favorites', r.favorites]]) {
+          if (!list.length) continue;
+          const g = node('div', 'u-sticker-grid'); for (const it of list) g.append(tile(it, 'sticker'));
+          grid.append(node('h3', 'u-pick-head', title), g);
+        }
+        if (!grid.childElementCount) grid.append(node('p', 'u-pick-empty', r.packs.length ? 'Choose a sticker pack above.' : 'Stickers you use or add in Telegram show here.'));
+      };
+      const load = async () => {
+        grid.replaceChildren(loading());
+        try {
+          const r = pickerCache.stickers || (pickerCache.stickers = await api('api/unified/picker/stickers').catch(e => { pickerCache.stickers = null; throw e; }));
+          if (gen !== state.gen) return;
+          const mineChip = button('Recent', () => paintMine(r, mineChip), 'u-pack');
+          packs.replaceChildren(mineChip, ...r.packs.map(pack => { const c = button(pack.title, () => paintPack(pack, c), 'u-pack'); return c; }));
+          paintMine(r, mineChip);
+        } catch (e) { if (gen === state.gen) failed(grid, e, load); }
+      };
+      load();
+    }
+    function open() {
+      if (state.open) return;
+      if (document.activeElement === o.draft) keep(); state.open = true; panel.hidden = false; o.button.classList.add('on'); o.button.setAttribute('aria-expanded', 'true'); o.form.classList.add('picking');
+      if (touch()) o.draft.blur(); // the panel takes the keyboard's place
+      show(state.tab);
+    }
+    function close() {
+      if (!state.open) return false;
+      state.open = false; state.gen++; panel.hidden = true; body.replaceChildren(); o.button.classList.remove('on'); o.button.setAttribute('aria-expanded', 'false'); o.form.classList.remove('picking');
+      return true;
+    }
+    panel.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); o.draft.focus(); } });
+    const handle = {panel, close, toggle: () => state.open ? close() : open(), get isOpen() { return state.open; }};
+    view.picker = handle;
+    return handle;
   }
   // WebM (Matroska) Opus -> Ogg Opus, packet for packet (RFC 7845). Throws on anything it does not understand.
   function webmToOgg(b) {
@@ -2116,10 +2676,13 @@
     const vint = keep => { const f = b[at]; let n = 1; while (n <= 8 && !(f & (0x80 >> (n - 1)))) n++; if (n > 8 || at + n > b.length) throw new Error('bad vint');
       let v = keep ? f : f & (0xff >> n), all = (f & (0xff >> n)) === (0xff >> n); for (let i = 1; i < n; i++) { v = v * 256 + b[at + i]; if (b[at + i] !== 0xff) all = false; } at += n; return keep ? v : (all ? -1 : v); };
     const MASTER = new Set([0x18538067, 0x1654AE6B, 0xAE, 0xE1, 0x1F43B675, 0xA0]);
+    // Safari's WebM can end in a cut-off element or carry unknown sizes: keep every whole Opus packet read so far.
     while (at < b.length) {
-      const id = vint(true), size = vint(false);
+      let id, size;
+      try { id = vint(true); size = vint(false); } catch (e) { if (packets.length) break; throw e; }
       if (MASTER.has(id)) continue;
-      if (size < 0 || at + size > b.length) { if (id === 0xA3 || id === 0xA1) break; throw new Error('bad size'); }
+      if (size < 0) { if (packets.length) break; throw new Error('bad size'); }
+      if (at + size > b.length) { if (packets.length) break; throw new Error('bad size'); }
       const body = b.subarray(at, at + size); at += size;
       if (id === 0x86) codec = new TextDecoder().decode(body);
       else if (id === 0x63A2) head = body;
@@ -2168,8 +2731,24 @@
   async function toOggOpus(blob) {
     const bytes = new Uint8Array(await blob.arrayBuffer());
     if (bytes[0] === 0x4f && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53) return new Blob([bytes], {type: 'audio/ogg'});
-    if (bytes[0] === 0x1a && bytes[1] === 0x45) { try { return new Blob([webmToOgg(bytes)], {type: 'audio/ogg'}); } catch { /* re-encode below */ } }
-    if (!window.AudioEncoder) throw new Error('This device cannot prepare voice notes for Telegram yet');
+    if (bytes[0] === 0x1a && bytes[1] === 0x45) {
+      try { return new Blob([webmToOgg(bytes)], {type: 'audio/ogg'}); }
+      catch { if (!window.AudioEncoder) return new Blob([bytes], {type: 'audio/webm'}); } // Messenger's server rewraps it
+    }
+    // Telegram also plays M4A (AAC in MP4) as a voice note (Bot API sendVoice: Ogg Opus, MP3 or M4A). Safari before 26,
+    // including the Mac app's web view, records M4A and has no WebCodecs AudioEncoder: send its take as it is rather
+    // than refusing it (Miguel, 3 Nov 2026: a 2:33 voice note to James failed with "cannot prepare voice notes").
+    // PCM WAV (the shared recorder's pcm mode) goes up as is; Messenger's server encodes it to Ogg Opus.
+    if (bytes.length > 44 && String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.subarray(8, 12)) === 'WAVE') return new Blob([bytes], {type: 'audio/wav'});
+    const m4a = bytes.length > 12 && String.fromCharCode(...bytes.subarray(4, 8)) === 'ftyp';
+    if (m4a && !window.AudioEncoder) return new Blob([bytes], {type: 'audio/mp4'});
+    if (window.AudioEncoder) { try { return await encodeOggOpus(bytes); } catch (e) { if (m4a) return new Blob([bytes], {type: 'audio/mp4'}); } }
+    // No WebCodecs encoder (Safari before 26, the Mac app): new takes are recorded as M4A (voiceMime), so only an
+    // older take that is neither Ogg, rewrappable WebM nor M4A ends here. Name its format so a report is actionable.
+    const head = bytes[0] === 0x1a ? 'WebM' : String.fromCharCode(...bytes.subarray(4, 8)).replace(/[^ -~]/g, '?');
+    throw new Error('This device cannot prepare voice notes for Telegram yet (' + head + ')');
+  }
+  async function encodeOggOpus(bytes) {
     const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
     const decoded = await new AC(1, 48000, 48000).decodeAudioData(bytes.buffer.slice(0));
     // Mix to mono at 48 kHz.
@@ -2216,6 +2795,28 @@
     const original = f.type === 'image/gif' ? f : blob;
     return {blob: original, albumBlob: blob, url: URL.createObjectURL(original), w, h};
   }
+  async function saveVoiceRecording(blob, take) {
+    // Start sharing inside the tap: no fetch/conversion before shared gesture handling.
+    try {
+      const ext = /webm/i.test(blob.type) ? 'webm' : /mp4/i.test(blob.type) ? 'm4a' : /wav/i.test(blob.type) ? 'wav' : /ogg/i.test(blob.type) ? 'ogg' : 'bin';
+      const file = new File([blob], 'recording-' + String(take || 'unsent').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60) + '.' + ext, {type: blob.type || 'application/octet-stream'});
+      const outcome = await WizardApp.share.file(file, {title: 'Save recording'});
+      toast(outcome === 'shared' ? 'Recording shared. The unsent note is still kept.' : outcome === 'cancelled' ? 'Save cancelled. Recording kept.' : 'File sharing unavailable. Recording kept.');
+    } catch (_) { toast('Could not save recording. Recording kept.'); }
+  }
+  async function archiveVoiceOriginal(voice) {
+    const blob = voice.blob;
+    const query = new URLSearchParams({take: voice.take || 'unsent', duration: String(voice.duration || 0), mime: blob.type || '', size: String(blob.size)});
+    const response = await fetch('api/view/voice-original?' + query, {method: 'PUT', credentials: 'same-origin', cache: 'no-store', headers: {'Content-Type': 'application/octet-stream', 'X-Messenger-CSRF': csrf()}, body: blob});
+    let env = {}; try { env = await response.json(); } catch (_) { /* keep original on every failure */ }
+    if (!response.ok || !env.ok) throw new Error(env.error?.message || 'Original recording not saved. Use Save recording.');
+    const proof = await fetch('api/view/voice-original/' + encodeURIComponent(env.result.id), {credentials: 'same-origin', cache: 'no-store'});
+    if (!proof.ok) throw new Error('Original recording readback failed. Use Save recording.');
+    const original = new Uint8Array(await blob.arrayBuffer()), saved = new Uint8Array(await proof.arrayBuffer());
+    if (original.length !== saved.length || original.some((v, i) => v !== saved[i])) throw new Error('Original recording readback differs. Use Save recording.');
+    // Custody is diagnostic only: do not ack, clear the bubble, or infer delivery.
+    return env.result;
+  }
   async function upload(id, kind, blob, name = '') {
     // Telegram takes voice notes only as Ogg Opus. Retries convert again from the kept original.
     if (kind === 'voice') blob = await toOggOpus(blob);
@@ -2231,12 +2832,14 @@
     const t = store.threads[id]; if (!t) return;
     const client_id = 'w' + uid();
     const m = {id: 'pending:' + client_id, client_id, outgoing: true, pending: true, original: job.text || '', timestamp: Date.now(), network: t.person.identities?.[0]?.network || 'telegram',
-      msgtype: job.photo || job.photos ? 'm.image' : job.voice ? 'm.audio' : job.file ? 'm.file' : 'm.text', reactions: [], reply_to: job.reply?.id || null,
+      msgtype: job.pick ? (job.pick.kind === 'sticker' ? 'm.sticker' : 'm.image') : job.photo || job.photos ? 'm.image' : job.voice ? 'm.audio' : job.file ? 'm.file' : 'm.text', reactions: [], reply_to: job.reply?.id || null,
       reply: job.reply ? {id: job.reply.id, sender: job.reply.sender, outgoing: job.reply.outgoing, text: job.reply.original, msgtype: job.reply.msgtype, voice: job.reply.media?.voice} : null};
     if (job.photos) { m.album = 'pending:' + client_id; m.photos = job.photos.map((photo, i) => ({...m, photos: undefined, id: m.id + ':' + i, original: i ? '' : m.original, local: photo.url, media: {w: photo.w, h: photo.h, mime: 'image/jpeg'}})); m.media = m.photos[0].media; }
     if (job.photo) { m.local = job.photo.url; m.media = {w: job.photo.w, h: job.photo.h, mime: 'image/jpeg'}; }
+    // A picked sticker or GIF shows its preview while Telegram receives the real one.
+    if (job.pick) { m.local = job.pick.preview || null; m.media = {w: job.pick.w, h: job.pick.h, mime: job.pick.kind === 'gif' ? 'image/gif' : 'image/webp'}; }
     if (job.file) m.media = {filename: job.file.name, size: job.file.bytes, mime: job.file.blob.type || 'application/octet-stream'};
-    if (job.voice) { m.local = job.voice.url; m.media = {voice: true, duration: job.voice.duration, waveform: job.voice.waveform.map(v => Math.round(v / 10.24))}; }
+    if (job.voice) { m.saveRecording = () => saveVoiceRecording(job.voice.blob, job.voice.take); m.local = job.voice.url; m.media = {voice: true, duration: job.voice.duration, waveform: job.voice.waveform.map(v => Math.round(v / 10.24))}; }
     t.messages.push(m); store.pending++; hold();
     if (s.person === id) paintThread(true);
     const run = async () => {
@@ -2249,8 +2852,9 @@
         }
         if (job.photo) { upload_id = (await upload(id, 'image', job.photo.blob)).upload_id; media = {w: job.photo.w, h: job.photo.h}; }
         if (job.file) upload_id = (await upload(id, 'file', job.file.blob, job.file.name)).upload_id;
-        if (job.voice) { upload_id = (await upload(id, 'voice', job.voice.blob)).upload_id; media = {duration: job.voice.duration, waveform: job.voice.waveform}; }
-        const r = await call('people/' + id + '/send', {text: job.text || '', client_id, reply_to: job.reply?.id || null, identity_id: job.identity_id || null, upload_id, upload_ids, media});
+        if (job.voice) { await archiveVoiceOriginal(job.voice); upload_id = (await upload(id, 'voice', job.voice.blob)).upload_id; media = {duration: job.voice.duration, waveform: job.voice.waveform}; }
+        const r = await call('people/' + id + '/send', job.pick ? {pick: job.pick.id, client_id, reply_to: job.reply?.id || null, identity_id: job.identity_id || null}
+          : {text: job.text || '', client_id, reply_to: job.reply?.id || null, identity_id: job.identity_id || null, upload_id, upload_ids, media});
         if (r.message) mergeMessages(id, r.messages || [r.message]);
         job.onDelivered?.();
         if (job.voice?.take) WizardApp.capture.ack(job.voice.take).catch(() => {}); // sent: release the shared recorder's kept copy
@@ -2531,7 +3135,7 @@
       list.replaceChildren();
       for (const x of rows) {
         const row = button('', () => action(async () => {
-          if (!confirm('Merge ' + x.display_name + ' into ' + p.display_name + '?')) return;
+          if (!await ask({title: 'Merge contacts?', body: 'Merge ' + x.display_name + ' into ' + p.display_name + '?', yes: 'Merge', no: 'Cancel'})) { mergePicker(p); return; }
           await call('people/' + encodeURIComponent(p.id) + '/merge', {source_id: x.id});
           closeOverlay(); delete store.threads[p.id]; store.lists = {people: null, groups: null}; toast('Merged into one chat'); await openPerson(p.id);
         }), 'u-pick-row');
@@ -2638,6 +3242,19 @@
     row.append(node('strong', 'u-agent-name', name), choice);
     return row;
   }
+  // Message previews in the chat list: off by default (compact list), remembered on this device.
+  const PREVIEWS_KEY = 'messenger.previews';
+  function previewsOn() { try { return localStorage.getItem(PREVIEWS_KEY) === '1'; } catch { return false; } }
+  function setPreviews(on) {
+    try { if (on) localStorage.setItem(PREVIEWS_KEY, '1'); else localStorage.removeItem(PREVIEWS_KEY); } catch { /* this visit only */ }
+    $('messenger')?.classList.toggle('u-compact', !on); drawList();
+  }
+  function previewsRow() {
+    const row = node('label', 'u-more-row u-more-previews'), sw = node('input', 'u-switch');
+    sw.type = 'checkbox'; sw.setAttribute('role', 'switch'); sw.checked = previewsOn(); sw.onchange = () => setPreviews(sw.checked);
+    row.append(node('span', 'u-more-label', 'Message previews in the list'), sw);
+    return row;
+  }
   // A quiet list row that opens another page.
   function moreLink(label, fn, cls = '') {
     const row = button('', fn, 'u-more-row u-more-link' + (cls ? ' ' + cls : ''));
@@ -2650,6 +3267,7 @@
   function moreSettings(sheet) {
     const head = node('h3', 'u-more-head', 'Agent access'), agents = node('div', 'u-settings-group u-more u-more-agents');
     const group = node('div', 'u-settings-group u-more u-more-other');
+    group.append(previewsRow());
     sheet.append(head, agents, group);
     // Each part stays away while it has nothing to show.
     const sync = () => {
@@ -2821,7 +3439,7 @@
         review.disabled = body.disabled = recipient.disabled = draft.state !== 'draft';
         if (draft.state === 'sending') sheet.append(node('p', 'helper', 'Delivery is uncertain. Check the conversation before creating a replacement. Editing is locked.'));
         if (draft.state !== 'sending') sheet.append(button('Delete draft', () => action(async () => {
-          if (!confirm('Delete this local draft?')) return;
+          if (!await ask({title: 'Delete this local draft?', body: 'Nothing is sent.', yes: 'Delete', no: 'Keep'})) { await agentDrafts(); return; }
           try { await api('api/drafts/' + draft.id, {method:'DELETE', body:{revision:draft.revision}}); await afterAgentDraft(); }
           catch (e) { problem.textContent = e.message; }
         }), 'secondary wide'));
@@ -2862,7 +3480,7 @@
         catch (e) { problem.textContent = e.message; }
       }), 'secondary wide'));
       if (!draft.export && draft.state !== 'sending') sheet.append(button('Delete draft', () => action(async () => {
-        if (!confirm('Delete this local draft?')) return;
+        if (!await ask({title: 'Delete this local draft?', body: 'Nothing is sent.', yes: 'Delete', no: 'Keep'})) { await agentDrafts(); return; }
         try { await api('api/drafts/' + draft.id, {method: 'DELETE', body: {revision: draft.revision}}); await agentDrafts(); }
         catch (e) { problem.textContent = e.message; }
       }), 'secondary wide'));
@@ -2955,7 +3573,7 @@
     if (!linkedChat || !s.ready) return false;
     const id = linkedChat; linkedChat = null;
     if (s.native) returnNative();
-    if (s.low) setLowView(false);
+    if (s.low || s.seg === 'medium') setSeg('all');
     switchTab('people'); openPerson(id); return true;
   }
   takeChatLink();
@@ -2973,7 +3591,7 @@
     s.native = true; s.person = null; view.id = null; s.epoch++;
     document.documentElement.dataset.privateView = '';
     // Desktop split: the native Wizard thread takes the right side and the list stays on the left.
-    if (split.on) { if (!hasListPane()) renderList(); emptyPane(); markSelected(); inChat(true); return; }
+    if (split.on) { if (!hasListPane()) renderList(); closePane(); markSelected(); inChat(true); return; }
     $('unified-inbox').hidden = true; inChat(true);
   }
   function openNative(group, card) {
@@ -2989,7 +3607,7 @@
     s.native = false; s.nativeGroup = null; document.getElementById('native-agent-drafts')?.remove();
     delete document.documentElement.dataset.privateView;
     $('unified-inbox').hidden = false; inChat(false);
-    if (split.on && hasListPane()) { if (!s.person) emptyPane(); drawList(); } else renderList();
+    if (split.on && hasListPane()) { if (!s.person) closePane(); drawList(); } else renderList();
     // List rendering is synchronous when cached; focus the same row after Back.
     const group = nativeFocus?.dataset.nativeGroup;
     if (group) [...document.querySelectorAll('.u-person')].find(el => el.dataset.nativeGroup === group)?.focus();
@@ -3027,7 +3645,7 @@
   }
   window.MessengerUnified = {
     settings: accounts, showNative, returnNative,
-    setNativeRows(rows) { nativeRows = rows; nativeUnread = rows.reduce((n, p) => n + (p.muted || p.low_priority || !(p.unread > 0) ? 0 : 1), 0); syncBadge(); if ((!s.native && !s.person) || split.on) drawList(); if (s.resumeNative && rows.some(p => p.group_id === s.resumeNative)) { const group = s.resumeNative; s.resumeNative = null; openNative(group); } },
+    setNativeRows(rows) { nativeRows = rows; nativeUnread = rows.reduce((n, p) => n + (p.muted || p.low_priority || p.medium_priority || !(p.unread > 0) ? 0 : 1), 0); syncBadge(); if ((!s.native && !s.person) || split.on) drawList(); if (s.resumeNative && rows.some(p => p.group_id === s.resumeNative)) { const group = s.resumeNative; s.resumeNative = null; openNative(group); } },
     receiveShare, shareTargetRows,
     ask, toast, holdToMenu, actionMenu, muteAction, icon, messageGestures, messageSelection,
     // Compatibility hook; adapter rows normally supply private unread to the one Inbox badge.
@@ -3049,7 +3667,7 @@
       // Groups count toward the badge before the Groups tab is ever opened.
       if (!store.lists.groups) call('groups').then(r => { if (s.ready && !store.lists.groups) { store.lists.groups = r.groups || []; persist(); } }).catch(() => {});
     },
-    active: () => s.ready && (!s.native || !!s.overlay), canGoBack: () => !!(s.overlay || s.person || s.search != null || s.low), back,
+    active: () => s.ready && (!s.native || !!s.overlay), canGoBack: () => !!(s.overlay || s.person || s.search != null || s.low || s.seg === 'medium' || detailOpen()), back,
     signout(wipe = false) { clearTimeout(searchTimer); searchGeneration++; s.search = null; Object.assign(searchView, {query: null, rows: [], cursor: null, loading: false}); nativeUnread = 0; nativeRows = []; sharedTargetsKey = ''; Promise.resolve(window.WizardApp?.share?.targets?.([])).catch(() => {}); s.native = false; s.nativeGroup = null; s.resumeNative = null; delete document.documentElement.dataset.privateView; if (wipe) wipeCache(); feedCtl?.abort(); closeOverlay(); s.ready = false; s.epoch++; inChat(false); Object.assign(store, {seq: 0, lists: {people: null, groups: null}, threads: {}, typing: {}}); for (const k in unreadById) delete unreadById[k]; syncBadge(); $('inbox-tabs').hidden = true; split.threadGen++; split.listGen++; $('unified-inbox').hidden = true; $('unified-inbox').replaceChildren(); delete document.documentElement.dataset.inboxTab; }
   };
 })();

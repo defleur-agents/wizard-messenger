@@ -1,16 +1,24 @@
 """Wizard OS inbox feed: one item per chat the Messenger badge counts as unread.
 
-GET  /api/inbox      -> {"inbox": 1, "items": [...]}   read-only, one query, no side effects.
+GET  /api/inbox      -> {"inbox": 1, "items": [...], "version": "...", "watch": "api/inbox/wait"}
+                        read-only, one query, no side effects.
+GET  /api/inbox/wait?v=<version>
+                     -> long poll: the feed (changed: true) as soon as it differs from <version>, else after
+                        ~25 s {"inbox": 1, "changed": false, "version": <version>}. While it waits it does no
+                        DB work: it sleeps on the same in-process condition that wakes the Messenger view's own
+                        long poll (UnifiedInbox.cond, notified by every store write), and re-reads the feed
+                        (one ~1 ms query, shared by all waiters per store seq) only after a write.
 POST /api/inbox/act  -> {"ok": true, ...}             'read' or 'reply' (owner's explicit action).
 
 The feed mirrors the app badge (static/unified.js syncBadge): chats with unread
-incoming messages, never muted or Low priority ones. Reading the chat anywhere
+incoming messages, never muted, Medium or Low priority ones. Reading the chat anywhere
 (opening it, Mark as read, this feed's 'read') moves last_read_ts past the
 newest incoming message, so the item drops out by itself.
 """
 import hashlib
 import json
 import re
+import time
 
 from engine import EngineError
 
@@ -38,7 +46,7 @@ SELECT * FROM (
   FROM identity i
   JOIN person p ON p.id = i.person_id
   JOIN message m ON m.identity_id = i.id AND m.timestamp > i.last_read_ts
-  WHERE m.outgoing = 0 AND m.deleted = 0 AND p.muted = 0 AND p.low_priority = 0
+  WHERE m.outgoing = 0 AND m.deleted = 0 AND p.muted = 0 AND p.low_priority = 0 AND p.medium_priority = 0
     AND i.kind IN ('person', 'group')
 ) WHERE rn = 1 ORDER BY timestamp DESC LIMIT ?
 '''
@@ -60,8 +68,12 @@ def preview(row):
         media = json.loads(row['media']) if row['media'] else {}
     except ValueError:
         media = {}
+    from unified import media_label, unavailable_label, unavailable_media
+    gone = row['msgtype'] == 'm.text' and unavailable_media(original, row['timestamp'] if 'timestamp' in row.keys() else None)
+    if gone:
+        original = gone[1]
     body = _plain(original)
-    label = '🎤 Voice message' if isinstance(media, dict) and media.get('voice') else LABELS.get(row['msgtype'])
+    label = unavailable_label(gone[0]) if gone else media_label(row['msgtype'], media)
     if label:
         body = label + (' · ' + body if body and body != label else '')
     if row['kind'] == 'group' and row['sender']:
@@ -87,6 +99,76 @@ def items(store):
             'actions': ACTIONS,
         })
     return {'inbox': 1, 'items': out}
+
+
+WATCH = 'api/inbox/wait'
+HOLD_MAX = 25.0
+WAITERS_MAX = 6      # one per open shell (phone, desktop, a spare tab); separate from the view's own long polls
+SETTLE = 0.15        # a new message is several writes (message, identity, translation): check once after them
+
+
+def version(feed_items):
+    """Opaque etag of what the feed shows: changes exactly when an item appears, leaves or changes."""
+    raw = json.dumps(feed_items, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(raw.encode()).hexdigest()[:20]
+
+
+def feed(unified):
+    """The feed with its version and change signal. Cached per store seq, so several waiters woken by one
+    write share one query, and a GET right after a wait costs nothing."""
+    store = unified.store
+    seq = getattr(store, 'seq', None)
+    cached = vars(unified).get('_inbox_feed')
+    if cached is not None and isinstance(seq, int) and cached[0] == seq:
+        return cached[1]
+    out = items(store)
+    out['version'] = version(out['items'])
+    out['watch'] = WATCH
+    if isinstance(seq, int):
+        unified._inbox_feed = (seq, out)
+    return out
+
+
+def wait(unified, since, hold=HOLD_MAX):
+    """Long poll for the shell: return the feed once its version differs from `since`, or a small
+    'unchanged' answer after `hold` seconds. Wakes on UnifiedInbox.cond (the view's change signal)."""
+    try:
+        hold = max(0.0, min(float(hold), HOLD_MAX))
+    except (TypeError, ValueError):
+        raise EngineError('invalid_input', 'Invalid hold', 400)
+    since = since if isinstance(since, str) else ''
+    if len(since) > 64:
+        raise EngineError('invalid_input', 'Invalid version', 400)
+    current = feed(unified)
+    if current['version'] != since:
+        return dict(current, changed=True)
+    cond, stop = unified.cond, unified.stop
+    deadline = time.monotonic() + hold
+    with cond:
+        if getattr(unified, 'inbox_waiters', 0) >= WAITERS_MAX:
+            raise EngineError('busy', 'Too many open inbox watchers', 429)
+        unified.inbox_waiters = getattr(unified, 'inbox_waiters', 0) + 1
+    try:
+        seen = unified.store.seq
+        while not stop.is_set():
+            with cond:
+                while unified.store.seq == seen and not stop.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    cond.wait(remaining)
+            if unified.store.seq == seen or stop.is_set():
+                break  # timed out (or shutting down) with nothing new
+            stop.wait(min(SETTLE, max(0.0, deadline - time.monotonic())))
+            seen = unified.store.seq
+            current = feed(unified)
+            if current['version'] != since:
+                return dict(current, changed=True)
+            # A write that changes nothing the feed shows (outgoing, muted chat, typing receipt): keep waiting.
+    finally:
+        with cond:
+            unified.inbox_waiters -= 1
+    return {'inbox': 1, 'changed': False, 'version': since, 'watch': WATCH}
 
 
 def _newest_incoming(store, person_id):

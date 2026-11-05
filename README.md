@@ -1,8 +1,12 @@
 # Wizard Messenger
 
-## Install (Wizard App Store, Alpha)
+## Install (Wizard App Store)
 
 Open **Store** in Wizard and get **Messenger**. Everything installs on your own box; nothing is shared with Humanity Labs.
+
+Messenger is listed in the [official public Wizard App Index](https://apps.aiwizards.com/v1/apps/humanitylabs-org/wizard-messenger). Choose the **Standard** release for the current public recipe. It uses public, digest-pinned GHCR images for amd64 and arm64; Alpha membership, access to a developer's computer and rebuilding an image are not required. The older private Alpha catalog is a separate source, not the current public release.
+
+Messenger is a user-facing app and belongs under **Apps** in Store. Agent apps have no user interface; `type: service` describes Messenger's backend packaging, not its Store section. Searching **Messenger** also finds it; being installed does not hide its card. Do not switch an existing installation's release merely to find or open it.
 
 - **First open:** ask your Wizard for your Messenger setup link, then choose a passphrase (16+ characters). It encrypts your private Messenger chats. After the server restarts you type it once.
 - **Fingerprint unlock:** in Messenger → your address → *Unlock with fingerprint next time*. Your phone stays signed in for 30 days; *Lock Messenger* signs out at once.
@@ -16,9 +20,9 @@ Messenger adds private Matrix + Telegram plumbing, People, Groups and reviewed T
 
 Encrypted text conversations with peers, inside Wizard OS. Each installation runs its own isolated container, documented HTTP API, minimal MCP and editable web view. Marmot MDK supplies the messaging engine; Wizard supplies the interface and app integration.
 
-## Private beta
+## Historical private beta
 
-Version 0.1.2-beta.1 uses private GitHub release image archives for arm64/amd64. Follow [PRIVATE-BETA.md](PRIVATE-BETA.md) for exact installation, route configuration, first-run setup and restart checks. No package-registry login is needed beyond private repository read access.
+Version 0.1.2-beta.1 originally used private GitHub release image archives for arm64/amd64. [PRIVATE-BETA.md](PRIVATE-BETA.md) preserves that version's installation and restart instructions; it is not the current Store install path. Repository and asset visibility can change independently of those historical instructions.
 
 ## Retained Marmot scope
 
@@ -37,11 +41,11 @@ Dedicated Messenger account and public npub/nprofile contact code; contact resol
 
 ## Build and install
 
-Sustained Rust/image builds and integration campaigns run on the remote build machine. The default Dockerfile builds the exact MDK source/lock. Audited matching binary carriers can be supplied using `MDK_BUILD_IMAGE`; distinguish this route from a clean default build.
+Sustained Rust/image builds and integration campaigns run on the remote build machine. The default Dockerfile verifies the exact MDK source lock, applies the tracked `rustls` security overlay, then builds with the patched lock. Prebuilt `wn`/`wnd` carriers are refused until their patched provenance is independently audited.
 
-This private beta uses `wizard-messenger:0.1.2-beta.1` with `pull_policy: never`; load the architecture-matching image before installation. The Runtipi definition maps only its own `/data`, limits resources and exposes internal port 8765. The installer supplies a generated 32+ character application capability, exact private HTTPS origin and public app path through normal app-secret/configuration mechanisms. Keep secrets out of output and URL queries.
+The current `runtipi/docker-compose.yml` pulls public images pinned by digest; the old beta's local-image preload is not needed for this recipe. The Runtipi definition retains app-owned data, resource limits and internal port 8765. The installer supplies a generated 32+ character application capability, exact private HTTPS origin and public app path through normal app-secret/configuration mechanisms. Keep secrets out of output and URL queries.
 
-This package is distributed through a private GitHub prerelease and is not publicly indexed. Recipient contact and access grants are not performed by the package.
+Store discovery and installation use the existing public index and App Manager. Recipient contact and access grants are not performed by the package. Source-build and disposable-preview helpers are developer tools, not recipient installation prerequisites; see [UNIFIED-INBOX.md](UNIFIED-INBOX.md).
 
 ## Privacy and limits
 
