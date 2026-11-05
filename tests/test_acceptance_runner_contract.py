@@ -25,7 +25,10 @@ class RunnerContracts(unittest.TestCase):
     def test_no_chown_or_host_install_escape(self):
         text=SOURCE.read_text()
         self.assertNotIn('sudo',text.replace('# Authenticated download only; no host install/update/sudo. Pins from forum APT policy.',''))
-        self.assertIn("'--download-only'",text)
+        self.assertIn("['apt-get','download'",text)
+        self.assertEqual(text.count("'apt-get'"),1)
+        self.assertNotIn("'dpkg','-i'",text)
+        self.assertNotIn("'apt-get','install'",text)
         self.assertIn("before==digest(Path('/var/lib/dpkg/status'))",text)
         self.assertIn("assert not counts[label]['skipped']",text)
 if __name__=='__main__': unittest.main()
