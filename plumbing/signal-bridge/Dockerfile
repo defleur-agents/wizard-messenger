@@ -34,6 +34,9 @@ RUN go vet ./pkg/msgconv/... ./pkg/connector/... && ./build-go.sh
 RUN sha256sum mautrix-signal > /proof/binary.sha256 && go version -m mautrix-signal > /proof/go-version.txt
 
 FROM dock.mau.dev/mautrix/signal@sha256:39afa721aa69472b2e91c75bd7d81a739e47f7e480fc0ff5ac8247af28eb2d0a AS runtime
+# The pinned Alpine 3.24 runtime omits the CGO library used by the Go builder.
+# Match its olm-dev 3.2.16-r2 ABI without changing any native build layer.
+RUN apk add --no-cache olm=3.2.16-r2
 COPY --from=signal-go /build/mautrix-signal /usr/bin/mautrix-signal
 COPY --from=signal-go /proof /usr/share/wizard-signal-albums
 RUN ldd /usr/bin/mautrix-signal && /usr/bin/mautrix-signal --version
