@@ -1,0 +1,9 @@
+# Only runtime delta from the approved 16.22 image is the retained live Share recency behavior.
+# Do NOT use Dockerfile.overlay: its old 15.12 carrier predates the 16.22 engine/security changes.
+FROM ghcr.io/humanitylabs-org/wizard-messenger:sha-6ab2ed06c48787acb22828b6296597f6f1dfe1a7@sha256:71f6f4e003456273179a84245fd1f8019b36c67e26d74c9b2018b9e68d841736
+ARG REVISION
+LABEL org.opencontainers.image.revision=$REVISION \
+      org.opencontainers.image.version="0.2.0-unified.16.22+live-recents-candidate" \
+      org.opencontainers.image.source="https://github.com/humanitylabs-org/wizard-messenger"
+COPY --chmod=0644 static/unified.js /app/static/unified.js
+USER 1000:1000
