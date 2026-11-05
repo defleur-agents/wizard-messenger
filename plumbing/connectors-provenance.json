@@ -70,7 +70,7 @@
     "upstream_commit": "d129f0ecc6bd29cfb5e54b18e025bd0c8a20a4bf",
     "libsignal_commit": "4beb029d8a941f81e7d9c6d8af1ed25a677569a8",
     "patch": "plumbing/signal-bridge/albums.patch",
-    "patch_sha256": "8ff8f9d8170f3bd2cbed17a8bd7d48c564e1ac2b973fc7ca6e31a5d9a1a5cfe5",
+    "patch_sha256": "b6a24ec3763106aac7ddab6b40b849f493d56137d0335bc53cf8b2d1406ffd74",
     "license": "AGPL-3.0-or-later",
     "recipe": "plumbing/signal-bridge/Dockerfile"
   },

@@ -19,14 +19,14 @@
     },
     {
       "name": "diff-whitespace",
-      "command": "git diff --check",
+      "command": "git diff --check 4566306576d3a6805da1ba531da3a89214dfd7af",
       "output": "",
       "exit_code": 0,
       "error": null
     },
     {
       "name": "pinned-source-patch",
-      "command": "git -C /home/telos/.hermes/cache/scratch/messenger-signal-contract-20261105 apply --check /home/telos/worktrees/messenger-signal-albums-20261105/plumbing/signal-bridge/albums.patch",
+      "command": "git -C /home/telos/.hermes/cache/scratch/messenger-signal-contract-20261105 apply --check --unidiff-zero /home/telos/worktrees/messenger-signal-albums-20261105/plumbing/signal-bridge/albums.patch",
       "output": "",
       "exit_code": 0,
       "error": null

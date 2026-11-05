@@ -2,14 +2,8 @@ diff --git a/pkg/msgconv/from-signal.go b/pkg/msgconv/from-signal.go
 index 68f5558..fe56e17 100644
 --- a/pkg/msgconv/from-signal.go
 +++ b/pkg/msgconv/from-signal.go
-@@ -214,6 +214,7 @@ func (mc *MessageConverter) ToMatrix(
- 		})
- 	}
- 	cm.MergeCaption()
+@@ -216,0 +217 @@ func (mc *MessageConverter) ToMatrix(
 +	markWizardPhotoAlbum(cm, sender, dm)
- 	for i, part := range cm.Parts {
- 		part.ID = signalid.MakeMessagePartID(i)
- 		meta := &signalid.MessageMetadata{
 diff --git a/pkg/msgconv/wizard-albums.go b/pkg/msgconv/wizard-albums.go
 new file mode 100644
 index 0000000..1121286

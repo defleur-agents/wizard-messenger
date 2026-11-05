@@ -27,7 +27,7 @@ COPY plumbing/signal-bridge/converter-fixture_test.go pkg/msgconv/wizard-convert
 RUN mkdir -p /proof && WIZARD_EXPECT_ALBUM=0 WIZARD_FIXTURE_OUT=/proof/baseline.json \
     go test -count=1 -v ./pkg/msgconv -run '^TestWizardConverterFixture$' > /proof/baseline-go.log 2>&1 || (cat /proof/baseline-go.log; exit 1)
 COPY plumbing/signal-bridge/albums.patch /albums.patch
-RUN git apply --check /albums.patch && git apply /albums.patch
+RUN git apply --check --unidiff-zero /albums.patch && git apply --unidiff-zero /albums.patch
 RUN WIZARD_EXPECT_ALBUM=1 WIZARD_FIXTURE_OUT=/proof/candidate.json \
     go test -count=1 -v ./pkg/msgconv/... ./pkg/connector/... > /proof/candidate-go.log 2>&1 || (cat /proof/candidate-go.log; exit 1)
 RUN go vet ./pkg/msgconv/... ./pkg/connector/... && ./build-go.sh
