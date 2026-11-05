@@ -151,8 +151,15 @@ try:
     node('signal-projection-prebuild',['tests/signal_albums.test.cjs'],
          expected_skips=['actual old vs patched converter outputs through persisted public ingress rows'])
     python('schema-and-existing-photo-albums',['test_photo_albums','test_signal_albums.SignalAlbumSchemaTests'])
-    python('current-security',['test_agent_keys','test_wizard_agents','test_permission_runtime','test_remote_authority',
+    python('current-security',['test_agent_keys','test_wizard_agents','test_permission_runtime',
                                'test_passkey','test_owner_ingress','test_trusted_owner'])
+    run('current-security-pytest',[sys.executable,str(ROOT/'tests/helpers/signal_pytest.py'),
+        str(OUT/'current-security-pytest-cases.json'),'tests/test_remote_authority.py'],
+        {'PYTEST_DISABLE_PLUGIN_AUTOLOAD':'1'})
+    pytest_result=json.loads((OUT/'current-security-pytest-cases.json').read_text())
+    assert pytest_result['result']=='scoped_pass' and pytest_result['tests_run']>0 and pytest_result['skips']==0
+    receipt['security_counts']={'unittest':json.loads((OUT/'current-security-cases.json').read_text())['tests_run'],
+                                'pytest':pytest_result['tests_run']}
     unit={'result':'scoped_pass','suite_result':comparison['suite_result'],'all_suite_green':comparison['all_suite_green'],
           'source_revision':manifest['source_revision'],'comparison':comparison,'build_started':False,
           'optional_converter_skip':'pre-existing only; must execute with zero skips after real build','runs':list(records)}
