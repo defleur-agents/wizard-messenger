@@ -58,10 +58,21 @@ def archive_identity(path):
                 'raw_config': config, 'layer_descriptors': body['layers']}
 
 def check_loaded(info, frozen):
-    assert info['Config'] == frozen['raw_config']['config'], 'full image Config drift'
+    # Qualify exact verified archive identity BEFORE allowing serializer-only defaults.
+    assert info['Id'] in (frozen['manifest_digest'], frozen['config_digest']), 'unqualified loaded ID'
+    expected = dict(frozen['raw_config']['config'])
+    # Observed classic Docker expansion from worker_identity.py SOURCE_DEFAULTS;
+    # never erase a raw field, accept an unknown field, or normalize a nonempty value.
+    defaults = {'Hostname': '', 'Domainname': '', 'User': '', 'AttachStdin': False,
+                'AttachStdout': False, 'AttachStderr': False, 'Tty': False,
+                'OpenStdin': False, 'StdinOnce': False, 'Image': '',
+                'Entrypoint': None, 'OnBuild': None, 'Labels': None}
+    extras = set(info['Config']) - set(expected)
+    assert all(k in defaults and info['Config'][k] == defaults[k] for k in extras), 'nondefault image Config expansion'
+    expected.update({k: defaults[k] for k in extras})
+    assert info['Config'] == expected, 'full image Config drift'
     assert info['RootFS']['Layers'] == frozen['raw_config']['rootfs']['diff_ids'], 'ordered RootFS drift'
     assert info['Os'] == frozen['raw_config']['os'] and info['Architecture'] == frozen['raw_config']['architecture']
-    assert info['Id'] in (frozen['manifest_digest'], frozen['config_digest']), 'unqualified loaded ID'
     return 'manifest_digest' if info['Id'] == frozen['manifest_digest'] else 'config_digest'
 
 def tap_counts(text):
@@ -95,7 +106,19 @@ def main():
     revision = manifest['revision']
     assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip() == revision
     assert not subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True).strip()
-    ENV = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=str(ROOT) + ':' + str(ROOT / 'tests'),
+    deps = S / 'python-deps'
+    lock = json.loads((S / 'python-deps-lock.json').read_text())
+    assert not deps.exists(), 'fresh task-local Python dependency directory required'
+    deps.mkdir()
+    import zipfile
+    for wheel in lock:
+        path = S / 'wheels' / wheel['filename']
+        assert sha(path) == wheel['sha256'], 'Python wheel hash drift'
+        with zipfile.ZipFile(path) as archive:
+            assert all(not n.startswith('/') and '..' not in Path(n).parts for n in archive.namelist())
+            archive.extractall(deps)
+    sys.path.insert(0, str(deps))
+    ENV = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=str(deps) + ':' + str(ROOT) + ':' + str(ROOT / 'tests'),
                PLAYWRIGHT_MODULE='/srv/work/morning-diff-deps-r4/node_modules/playwright',
                SHELL_DIR=str(S / 'shell'), AGENT_STAGE_DIR=str(OUT / 'synthetic-state'),
                EVIDENCE_DIR=str(OUT / 'attachment-browser'), STATIC_DIR=str(ROOT / 'static'))

@@ -3,14 +3,22 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 class Element {
-  constructor(tag) { this.tag=tag; this.children=[]; this.attrs={}; this.value=''; this.style={}; this.dataset={}; this.className=''; }
+  constructor(tag) {
+    this.tag=tag; this.children=[]; this.attrs={}; this.value=''; this.style={}; this.dataset={}; this.className='';
+    const classes=()=>this.className.split(/\s+/).filter(Boolean);
+    this.classList={contains:c=>classes().includes(c),add:(...cs)=>{this.className=[...new Set([...classes(),...cs])].join(' ');},remove:(...cs)=>{this.className=classes().filter(c=>!cs.includes(c)).join(' ');},toggle:(c,force)=>{const on=force===undefined?!classes().includes(c):!!force;this.classList[on?'add':'remove'](c);return on;}};
+  }
   append(...nodes) { for (const n of nodes) { n.parent=this; this.children.push(n); } }
   replaceChildren(...nodes) { for (const n of this.children) n.parent=null; this.children=[]; this.append(...nodes); }
   contains(n) { return this===n || this.children.some(c => c.contains(n)); }
   remove() { if (this.parent) this.parent.children=this.parent.children.filter(n => n!==this); this.parent=null; }
   setAttribute(k,v) { this.attrs[k]=v; }
   getContext() { return {fillRect(){}}; }
-  querySelector() { return null; }
+  querySelector(selector) {
+    const match=n=>selector.startsWith('.') ? n.classList.contains(selector.slice(1)) : n.tag===selector;
+    for (const child of this.children) { if (match(child)) return child; const found=child.querySelector(selector); if (found) return found; }
+    return null;
+  }
 }
 const window = {setTimeout: (f) => setTimeout(f,0), qrcode: () => ({addData(){},make(){},getModuleCount:()=>1,isDark:()=>true})};
 vm.runInNewContext(fs.readFileSync('static/connectors.js','utf8'), {window,document:{createElement:t=>new Element(t)}});
@@ -102,7 +110,12 @@ async function telegramApplicationSetup() {
     if(p==='/api/view/telegram/application') { if(fail) throw new Error('synthetic-secret-hash'); return {configured:true}; }
     return {providers:[{network:'telegram',label:'Telegram',supported:true,state:'not_configured',flows:[]}]};
   });
-  await ui.show(); await button(root,'Set up Telegram').onclick();
+  // Dormant Telegram lives under Add until explicitly selected; setup is never automatic.
+  const openTelegram = async () => {
+    await all(root).find(n=>n.tag==='button' && n.dataset.network==='telegram').onclick();
+    await button(root,'Set up Telegram').onclick();
+  };
+  await ui.show(); await openTelegram();
   assert.equal(all(root).find(n=>n.tag==='a').href,'https://my.telegram.org/apps');
   const id=all(root).find(n=>n.name==='api_id'), hash=all(root).find(n=>n.name==='api_hash');
   assert.equal(hash.type,'password'); id.value='12345'; hash.value='synthetic-secret-hash';
@@ -111,7 +124,7 @@ async function telegramApplicationSetup() {
   assert.deepEqual(saved.b,{api_id:'12345',api_hash:'synthetic-secret-hash'});
   assert.match(text(root),/warming up/); assert.ok(button(root,'Refresh accounts'));
   assert.equal(calls.filter(c=>c.p.endsWith('/start')).length,0,'saving application keys never starts account login');
-  await button(root,'Refresh accounts').onclick(); await button(root,'Set up Telegram').onclick();
+  await button(root,'Refresh accounts').onclick(); await openTelegram();
   fail=true; all(root).find(n=>n.name==='api_hash').value='synthetic-secret-hash';
   await submit(root); assert.match(text(root),/Check the API ID and hash/); assert.doesNotMatch(text(root),/synthetic-secret-hash/);
   await ui.close();

@@ -44,6 +44,13 @@ class PacketGuards(unittest.TestCase):
         self.assertEqual(worker.check_loaded(info, frozen), 'config_digest')
         info['Id'] = 'manifest-id'
         self.assertEqual(worker.check_loaded(info, frozen), 'manifest_digest')
+        expanded = copy.deepcopy(info)
+        expanded['Config'].update({'Hostname':'', 'AttachStdin':False, 'OnBuild':None})
+        self.assertEqual(worker.check_loaded(expanded, frozen), 'manifest_digest')
+        for field, value in [('Hostname','owner'), ('AttachStdin',True), ('Unknown',None)]:
+            bad = copy.deepcopy(expanded); bad['Config'][field] = value
+            with self.assertRaises(AssertionError):
+                worker.check_loaded(bad, frozen)
         for field, value in [('Id', 'other-id'), ('Config', {'User':'0:0', 'Env':['A=B']}), ('RootFS', {'Layers':['layer-b','layer-a']}), ('RootFS', {'Layers':['layer-a']})]:
             bad = copy.deepcopy(info); bad[field] = value
             with self.assertRaises(AssertionError):
