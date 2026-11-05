@@ -189,7 +189,8 @@ services:
       retries: 10
     restart: unless-stopped
   signal:
-    image: dock.mau.dev/mautrix/signal@sha256:39afa721aa69472b2e91c75bd7d81a739e47f7e480fc0ff5ac8247af28eb2d0a
+    image: ${SIGNAL_IMAGE:-wizard-signal-bridge:0.2610.0-native-albums1}
+    pull_policy: never
     user: 1000:1000
     entrypoint:
     - /bin/sh

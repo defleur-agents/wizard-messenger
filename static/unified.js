@@ -1150,13 +1150,25 @@
     const posts = [];
     for (const m of messages) {
       const last = posts[posts.length - 1];
-      if (m.album && last?.album === m.album && last.sender === m.sender && last.identity_id === m.identity_id && last.network === m.network && last.outgoing === m.outgoing) {
+      if (m.album && m.msgtype === 'm.image' && last?.msgtype === 'm.image' && last?.album === m.album && last.sender === m.sender && last.identity_id === m.identity_id && last.network === m.network && last.outgoing === m.outgoing) {
         last.photos.push(m);
-        if (!last.original && m.original) last.original = m.original;
         last.deleted = last.photos.every(p => p.deleted);
-      } else posts.push(m.album ? {...m, photos: m.photos || [m]} : m);
+      } else posts.push(m.album && m.msgtype === 'm.image' ? {...m, photos: [m]} : m);
     }
     for (const post of posts) if (post.photos) {
+      // Explicit native ordinals, never event-ID or time-window guesses. Telegram
+      // retains its existing timeline order. Incomplete/delayed albums stay usable.
+      if (post.network === 'signal' && post.photos.every(p => Number.isInteger(p.media?.album_index))) {
+        post.photos.sort((a, b) => a.media.album_index - b.media.album_index);
+      }
+      const photos = post.photos;
+      Object.assign(post, photos[0], {photos});
+      post.deleted = photos.every(p => p.deleted);
+      // Keep every distinct caption, in tile order, rather than silently taking
+      // the first. Canonical per-part originals remain untouched for the viewer.
+      post.original = [...new Set(photos.filter(p => !p.deleted).map(p => p.original).filter(Boolean))].join('\n\n');
+      if (photos.filter(p => !p.deleted && p.original).length > 1) post.translated = null;
+      post.links = photos.filter(p => !p.deleted).flatMap(p => p.links || []);
       const reactions = new Map();
       for (const photo of post.photos) for (const reaction of photo.reactions || []) {
         const current = reactions.get(reaction.key) || {key: reaction.key, count: 0, mine: false};
@@ -1284,7 +1296,7 @@
         if (foreignScript(m.original)) b.append(button(translated ? 'Show original' : 'Translate', () => translate(m), 'u-translate link'));
       }
     }
-    if (!m.deleted && m.links?.length) for (const [i, l] of m.links.entries()) b.append(linkCard(m, l, i));
+    if (!m.deleted) for (const photo of m.photos || [m]) if (!photo.deleted && photo.links?.length) for (const [i, l] of photo.links.entries()) b.append(linkCard(photo, l, i));
     const meta = node('footer');
     if (ctx.multi) { const via = node('span', 'u-via'); via.append(netBadge(m.network, 'u-via-icon')); via.title = 'via ' + netLabel(m.network); meta.append(via); }
     if (m.edited && !m.deleted) meta.append(node('span', 'u-edited', 'edited'));

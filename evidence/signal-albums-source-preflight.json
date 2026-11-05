@@ -1,0 +1,42 @@
+{
+  "static_only": true,
+  "runtime_tests_executed": false,
+  "owner_data_read": false,
+  "records": [
+    {
+      "name": "javascript-syntax",
+      "command": "node --check static/unified.js && node --check tests/signal_albums.test.cjs && node --check tests/signal_album_browser.cjs",
+      "output": "",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "name": "python-ast",
+      "command": "python3 -c \"import ast,pathlib; [ast.parse(pathlib.Path(f).read_text(),filename=f) for f in ['unified.py','tests/test_signal_albums.py','tests/run_signal_albums_forum.py']]; print('Python AST: PASS')\"",
+      "output": "Python AST: PASS",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "name": "diff-whitespace",
+      "command": "git diff --check",
+      "output": "",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "name": "pinned-source-patch",
+      "command": "git -C /home/telos/.hermes/cache/scratch/messenger-signal-contract-20261105 apply --check /home/telos/worktrees/messenger-signal-albums-20261105/plumbing/signal-bridge/albums.patch",
+      "output": "",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "name": "upstream-license",
+      "command": "sha256sum plumbing/signal-bridge/LICENSE /home/telos/.hermes/cache/scratch/signal-native-albums-source-20261105/LICENSE",
+      "output": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0  plumbing/signal-bridge/LICENSE\n0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0  /home/telos/.hermes/cache/scratch/signal-native-albums-source-20261105/LICENSE",
+      "exit_code": 0,
+      "error": null
+    }
+  ]
+}

@@ -34,8 +34,14 @@
   },
   "signal": {
     "tag": "v0.2610.0",
-    "image": "dock.mau.dev/mautrix/signal@sha256:39afa721aa69472b2e91c75bd7d81a739e47f7e480fc0ff5ac8247af28eb2d0a",
-    "manifest": {
+    "image": "wizard-signal-bridge:0.2610.0-native-albums1",
+    "binary_sha256": null,
+    "upstream_template_sha256": "b35d306cc63d4522adbbe7ede4cc0214d918088127f173319d7f5f30bde0dc76",
+    "template_overrides": "Pairing/device label changed to Wizard; converter publishes explicit native album identity/ordinal/count; configuration unchanged",
+    "template_sha256": "ca06b82c8d01a5ea44417247a52828f70a6d49f6584f12fd869c3904a8504d91",
+    "source": "https://github.com/mautrix/signal/tree/v0.2610.0",
+    "upstream_image": "dock.mau.dev/mautrix/signal@sha256:39afa721aa69472b2e91c75bd7d81a739e47f7e480fc0ff5ac8247af28eb2d0a",
+    "upstream_manifest": {
       "schemaVersion": 2,
       "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
       "manifests": [
@@ -59,11 +65,14 @@
         }
       ]
     },
-    "binary_sha256": "13867e87604464b7ca848bd0e4b6afdb013710f021cc7477007629d1585f3b5f",
-    "upstream_template_sha256": "b35d306cc63d4522adbbe7ede4cc0214d918088127f173319d7f5f30bde0dc76",
-    "template_overrides": "Pairing/device label changed to Wizard; upstream binary unchanged",
-    "template_sha256": "ca06b82c8d01a5ea44417247a52828f70a6d49f6584f12fd869c3904a8504d91",
-    "source": "https://github.com/mautrix/signal/tree/v0.2610.0"
+    "upstream_binary_sha256": "13867e87604464b7ca848bd0e4b6afdb013710f021cc7477007629d1585f3b5f",
+    "build_status": "source candidate; forum build required before activation",
+    "upstream_commit": "d129f0ecc6bd29cfb5e54b18e025bd0c8a20a4bf",
+    "libsignal_commit": "4beb029d8a941f81e7d9c6d8af1ed25a677569a8",
+    "patch": "plumbing/signal-bridge/albums.patch",
+    "patch_sha256": "8ff8f9d8170f3bd2cbed17a8bd7d48c564e1ac2b973fc7ca6e31a5d9a1a5cfe5",
+    "license": "AGPL-3.0-or-later",
+    "recipe": "plumbing/signal-bridge/Dockerfile"
   },
   "slack": {
     "tag": "v0.2610.0",
