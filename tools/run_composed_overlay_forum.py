@@ -67,7 +67,7 @@ def inheritance(manifest):
     # Byte reconstruction proves disjoint JS composition; it is not inherited merged-behavior QA.
     work=S/'composition-check';work.mkdir()
     shutil.copyfile(S/'attachment-unified.js',work/'unified.js')
-    subprocess.run(['git','apply','--unsafe-paths','--directory='+str(work),str(S/'signal-unified.patch')],check=True,env=ENV)
+    subprocess.run(['git','apply',str(S/'signal-unified.patch')],cwd=work,check=True,env=ENV)
     assert (work/'unified.js').read_bytes()==(ROOT/'static/unified.js').read_bytes(),'unreviewed JS composition'
     dump('inherited-source-bound-evidence',ledger)
     return ledger
