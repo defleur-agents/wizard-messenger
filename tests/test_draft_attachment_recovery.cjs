@@ -13,12 +13,13 @@ const copy = v => structuredClone(v);
 async function fixture(saved = []) {
   let row = saved === null ? null : {id: 'synthetic-draft', person_id: 'alice', identity_id: 'signal-alice', revision: 1, text: 'Keep this caption', state: 'draft', attachments: saved};
   let next = 0, writes = 0, failPut = new Set(), failGet = new Set(), holdPut = null, holdGet = null, failDelete = false;
-  const counts = {puts: 0, deletes: 0, sends: 0}, errors = [];
+  const counts = {puts: 0, deletes: 0, draftDeletes: 0, sends: 0}, errors = [], requests = [];
   const s = {person: 'alice', drafts: {}, draftIndex: {}, bindDraft: null};
   const view = {id: 'alice', attach: null}, ui = {form: {isConnected: true}, draft: {value: '', focus() {}}, channel: {value: 'signal-alice', options: [{value: 'signal-alice'}]}, grow() {}, paintBar() {}, paintVia() {}};
   const bad = (code) => Object.assign(new Error(code), {code});
   async function api(url, options = {}) {
     const body = options.body || {}, method = options.method || 'GET';
+    requests.push({url, method, body: copy(body)});
     if (url.endsWith('/attachments/' + (url.split('/').pop())) && url.includes('/attachments/') && method === 'DELETE') {
       if (failDelete) throw bad('storage_failed');
       if (body.revision !== row.revision) throw bad('draft_changed');
@@ -28,16 +29,16 @@ async function fixture(saved = []) {
       row = {...body, id: 'synthetic-draft', revision: 1, state: 'draft', attachments: []};
     } else if (method === 'POST') {
       if (body.revision !== row.revision) throw bad('draft_changed');
-      row = {...row, text: body.text, revision: row.revision + 1};
+      row = {...row, text: body.text, identity_id: body.identity_id, revision: row.revision + 1};
     } else if (method === 'DELETE') {
       if (body.revision !== row.revision) throw bad('draft_changed');
-      row = null;
+      row = null; counts.draftDeletes++;
     }
     return {draft: copy(row)};
   }
   async function draftRaw(url, method, blob, q) {
     counts.puts++;
-    if (holdPut) { const gate = holdPut; holdPut = null; await gate.promise; }
+    if (holdPut) { const gate = holdPut; holdPut = null; gate.entered.resolve(); await gate.promise; }
     if (failPut.has(q.name)) throw bad('storage_failed');
     if (q.revision !== row.revision) throw bad('draft_changed');
     row.attachments.push({id: 'file-' + (++next), name: q.name, mime: blob.type, bytes: blob.size}); row.revision++;
@@ -59,10 +60,10 @@ async function fixture(saved = []) {
   view.sd = context.sd;
   await new Promise(r => setTimeout(r, 10));
   const item = name => ({key: name, name, bytes: 3, file: true, blob: new Blob(['abc'], {type: 'application/pdf'})});
-  return {sd: context.sd, ui, view, item, counts, errors, row: () => copy(row), failPut, failGet,
-    holdPut() { return holdPut = defer(); }, holdGet() { return holdGet = defer(); },
+  return {sd: context.sd, ui, view, item, counts, errors, requests, row: () => copy(row), failPut, failGet,
+    holdPut() { return holdPut = {...defer(), entered: defer()}; }, holdGet() { return holdGet = defer(); },
     failDelete(v) { failDelete = v; }, remoteAttachments(a) { row.attachments = a; row.revision++; },
-    replaceView() { s.person = 'bob'; ui.form.isConnected = false; view.id = 'bob'; view.sd = {}; view.attach = [item('bob-only')]; },
+    replaceView(empty = false) { s.person = 'bob'; ui.form.isConnected = false; view.id = 'bob'; view.sd = {}; view.attach = empty ? null : [item('bob-only')]; },
     async select(...items) { view.attach = [...(view.attach || []), ...items]; await context.sd.attach(items); },
     async remove(it) { view.attach = (view.attach || []).filter(a => a !== it); await context.sd.detach(it); },
   };
@@ -123,6 +124,89 @@ test('late download cannot cross into another conversation', async () => {
   const load = f.sd.check(true); await tick(); f.replaceView(); gate.resolve(); await load;
   assert.deepEqual(f.view.attach.map(a => a.name), ['bob-only']);
 });
+for (const emptyDestination of [true, false]) {
+  test('caption-cleared autosave survives navigation during held upload to ' + (emptyDestination ? 'empty' : 'nonempty') + ' composer', async () => {
+    const f = await fixture();
+    const gate = f.holdPut(), file = f.item('alice-held.pdf');
+    const upload = f.select(file); await gate.entered.promise;
+    f.ui.draft.value = '';
+    // Execute the actual production save handler BEFORE releasing its awaited upload.
+    const saving = f.sd.save();
+    assert.equal(f.counts.draftDeletes, 0);
+    f.sd.stop(); f.replaceView(emptyDestination);
+    const destination = f.view.attach;
+    gate.resolve(); await upload; await saving;
+    assert.equal(f.row() !== null, true, 'REGRESSION_AUTOSAVE_NAVIGATION_DELETED_ATTACHMENT_DRAFT');
+    assert.equal(f.row().text, '');
+    assert.equal(f.row().person_id, 'alice');
+    assert.equal(f.row().identity_id, 'signal-alice');
+    assert.deepEqual(f.row().attachments.map(a => a.name), ['alice-held.pdf']);
+    assert.equal(file.sid, f.row().attachments[0].id);
+    assert.equal(file.blob.size, 3);
+    assert.strictEqual(f.view.attach, destination, 'old save must not replace the destination tray');
+    assert.equal(f.counts.draftDeletes, 0);
+    assert.equal(f.counts.sends, 0);
+    assert.equal(f.sd.conflict, null);
+  });
+}
+
+test('navigation flush captures old controller handles after global tray was cleared', async () => {
+  const f = await fixture();
+  const gate = f.holdPut(), file = f.item('alice-flush.pdf');
+  const upload = f.select(file); await gate.entered.promise;
+  f.ui.draft.value = ''; f.replaceView(true);
+  const saving = f.sd.save(); f.sd.stop();
+  gate.resolve(); await upload; await saving;
+  assert.ok(f.row(), 'REGRESSION_NAVIGATION_FLUSH_LOST_CONTROLLER_HANDLES');
+  assert.equal(f.row().text, '');
+  assert.deepEqual(f.row().attachments.map(a => a.id), [file.sid]);
+  assert.equal(f.view.attach, null);
+  assert.equal(f.counts.sends, 0);
+});
+
+test('suspended autosave freezes text and identity and ignores destination edit state', async () => {
+  const f = await fixture();
+  const gate = f.holdPut(), file = f.item('alice-frozen.pdf');
+  const upload = f.select(file); await gate.entered.promise;
+  f.ui.draft.value = 'Frozen Alice caption';
+  const saving = f.sd.save();
+  f.sd.stop(); f.replaceView(); f.view.edit = {id: 'bob-edit'};
+  f.ui.draft.value = 'Not the frozen caption'; f.ui.channel.value = 'bob-channel';
+  gate.resolve(); await upload; await saving;
+  assert.equal(f.row().text, 'Frozen Alice caption');
+  assert.equal(f.row().identity_id, 'signal-alice');
+  assert.equal(f.view.attach[0].key, 'bob-only');
+  const writes = f.requests.filter(r => r.method === 'POST');
+  assert.ok(writes.every(r => r.body.person_id === 'alice' && r.body.identity_id === 'signal-alice'));
+  assert.equal(f.counts.sends, 0);
+});
+
+test('newer autosave supersedes an older snapshot suspended on the same upload', async () => {
+  const f = await fixture();
+  const gate = f.holdPut(), file = f.item('alice-latest.pdf');
+  const upload = f.select(file); await gate.entered.promise;
+  f.ui.draft.value = 'Old caption'; const first = f.sd.save();
+  f.ui.draft.value = 'Newest caption'; const latest = f.sd.save();
+  gate.resolve(); await upload; await Promise.all([first, latest]);
+  assert.equal(f.row().text, 'Newest caption');
+  assert.deepEqual(f.requests.filter(r => r.method === 'POST').map(r => r.body.text), ['Newest caption']);
+  f.sd.stop();
+});
+
+test('send generation fences a suspended autosave rather than resurrecting a sent draft', async () => {
+  const f = await fixture();
+  const gate = f.holdPut(), file = f.item('alice-send.pdf');
+  const upload = f.select(file); await gate.entered.promise;
+  f.ui.draft.value = 'Must not resurrect'; const saving = f.sd.save();
+  f.view.attach = null; f.ui.draft.value = ''; f.sd.closeForSend();
+  gate.resolve(); await upload; await saving; await f.sd.closing;
+  assert.equal(f.row(), null);
+  assert.equal(f.requests.filter(r => r.method === 'POST').length, 0, 'stale save must not recreate a closed draft');
+  assert.equal(f.counts.draftDeletes, 1);
+  assert.equal(f.counts.sends, 0);
+  f.sd.stop();
+});
+
 test('send barrier waits for pending upload and uses its final revision exactly once', async () => {
   const f = await fixture(), gate = f.holdPut(), upload = f.select(f.item('one.pdf')); await tick();
   f.sd.closeForSend(); gate.resolve(); await upload; await f.sd.afterSend();
