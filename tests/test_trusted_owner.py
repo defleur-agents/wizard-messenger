@@ -299,4 +299,29 @@ class LegacyIngressStillWorks(unittest.TestCase):
             self.assertEqual(t.proof_key, (root / 'p').read_bytes())
 
 
+class RecipeNeedsNoOwnerGrant(unittest.TestCase):
+    """wizard-os DECISIONS #107: accepting an app's host access is an owner-device action no agent can trigger, so a
+    Messenger recipe that asked for any would stop every install and update at an owner prompt. Static check of the
+    same things wizard-app-manager `network.host_access` flags (synthetic: reads only the recipe in this repo)."""
+
+    def test_the_recipe_asks_for_no_host_access(self):
+        import yaml
+        compose = yaml.safe_load((Path(__file__).resolve().parents[1] / 'runtipi' / 'docker-compose.yml').read_text())
+        safe_caps = {'CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETUID', 'SETGID', 'KILL', 'FSETID', 'NET_BIND_SERVICE'}
+        for name, service in compose['services'].items():
+            self.assertNotIn(service.get('privileged'), (True, 'true'), name)
+            self.assertNotIn(service.get('network_mode'), ('host',), name)
+            for key in ('pid', 'ipc', 'uts', 'userns_mode', 'cgroup', 'devices', 'volumes_from'):
+                self.assertFalse(service.get(key), (name, key))
+            self.assertFalse(set(service.get('cap_add') or []) - safe_caps, name)
+            for option in service.get('security_opt') or []:
+                self.assertIn(str(option).replace('=', ':'), ('no-new-privileges', 'no-new-privileges:true'), name)
+            for volume in service.get('volumes') or []:
+                source = volume if isinstance(volume, str) else str(volume.get('source', ''))
+                source = source.split(':')[0]
+                self.assertTrue(source.startswith('${APP_DATA_DIR}/'), (name, volume))
+                self.assertNotIn('..', source, name)
+                self.assertNotIn('sock', source, name)
+
+
 if __name__ == '__main__': unittest.main()
