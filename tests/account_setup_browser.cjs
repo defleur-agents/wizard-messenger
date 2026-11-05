@@ -15,12 +15,13 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
   const frame = await maker.evaluate(()=>{const c=document.createElement('canvas');c.width=1280;c.height=1000;const x=c.getContext('2d');x.fillStyle='#e8edf4';x.fillRect(0,0,1280,1000);x.strokeStyle='#93a3ba';for(let i=0;i<1280;i+=80){x.beginPath();x.moveTo(i,0);x.lineTo(i,1000);x.stroke();}for(let i=0;i<1000;i+=80){x.beginPath();x.moveTo(0,i);x.lineTo(1280,i);x.stroke();}x.fillStyle='#182738';x.font='bold 48px sans-serif';x.fillText('SYNTHETIC PAGE — no account',35,110);for(const [a,b,t]of[[0,0,'TL'],[1160,0,'TR'],[0,900,'BL'],[1160,900,'BR']]){x.fillStyle='#197c59';x.fillRect(a,b,120,100);x.fillStyle='white';x.fillText(t,a+18,b+65);}return c.toDataURL('image/png').split(',')[1];}); await maker.close();
   const summary=[];
   for(const profile of [{name:'phone-enlarged',viewport:{width:360,height:640},isMobile:true,hasTouch:true},{name:'desktop-constrained',viewport:{width:860,height:620}},{name:'desktop-wide',viewport:{width:1280,height:860}}]){
-    const ctx=await browser.newContext({...profile,deviceScaleFactor:1});
+    const ctx=await browser.newContext({...profile,deviceScaleFactor:1,reducedMotion:'reduce'});
     const page=await ctx.newPage(), errors=[], inputs=[], cancelled=[], starts=[], forbidden=[];
     page.on('pageerror',e=>errors.push(e.message));
     const prov=(network,label,state,flows=[])=>({network,label,state,flows,supported:true,logins:state==='connected'?[{id:'fixture',name:'Fixture account'}]:[]});
     const providers=[prov('telegram','Telegram','connected'),prov('slack','Slack','disconnected',[{id:'cookies',name:'Browser'}]),prov('instagram','Instagram DMs','disconnected',[{id:'android',name:'Native'}]),prov('twitter','X','not_configured')];
-    let seq=0, id=0;
+    let seq=0, id=0, releaseFrameCapture=null, holdFrames=false;
+    let frameCaptureGate=Promise.resolve();
     await page.route('**/*',async route=>{
       const req=route.request(),u=new URL(req.url());
       if(u.origin!=='https://messenger.test'){forbidden.push(u.origin);return route.abort();}
@@ -37,7 +38,7 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
       if(api==='/api/unified/groups')return ok({groups:[],seq:5});
       if(api==='/api/unified/connectors')return ok({providers});
       if(api==='/api/unified/connectors/browser/start'){starts.push(JSON.parse(req.postData()));return ok({id:'synthetic-'+(++id)});}
-      if(/\/browser\/[^/]+\/frame$/.test(api)){await new Promise(r=>setTimeout(r,120));return ok({seq:++seq,frame,state:'signing_in',host:'synthetic.invalid'});}
+      if(/\/browser\/[^/]+\/frame$/.test(api)){await new Promise(r=>setTimeout(r,120));if(holdFrames)await frameCaptureGate;return ok({seq:++seq,frame,state:'signing_in',host:'synthetic.invalid'});}
       if(/\/browser\/[^/]+\/input$/.test(api)){inputs.push(JSON.parse(req.postData()));return ok({});}
       if(/\/browser\/[^/]+\/cancel$/.test(api)){cancelled.push(api);return ok({});}
       if(api.startsWith('/api/unified/updates')){await new Promise(r=>setTimeout(r,1500));return ok({seq:5});}
@@ -52,7 +53,8 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
     await f.waitForFunction(()=>document.documentElement.dataset.skin==='nebula');
     if(profile.isMobile)await f.addStyleTag({content:'html {font-size:20px} body{font-size:18px}'});
     await f.locator('.u-settings-btn').click();
-    await f.locator('.c-plus').waitFor();
+    await f.getByRole('button',{name:'Add an account',exact:true}).waitFor();
+    assert.equal(await f.locator('.c-plus .c-tile-name').innerText(),'Add','original Your accounts → Add tile preserved');
     assert.equal(await f.locator('.c-card').count(),0,'Settings contains NO automatic disconnected setup cards');
     assert.equal(await f.locator('.c-viewer').count(),0);
     await f.locator('.c-plus').click();
@@ -78,10 +80,34 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
       const geometry=await f.evaluate(()=>{const shell=document.querySelector('.c-live'),img=document.querySelector('.c-live-img'),panel=document.querySelector('.u-sheet');const b=img.getBoundingClientRect(),r=shell.getBoundingClientRect();return {fit:b.width<=shell.clientWidth+1&&b.height<=shell.clientHeight+1,inside:r.bottom<=innerHeight+1,overflow:panel.scrollWidth>panel.clientWidth+1,stageHeight:r.height};});
       assert(geometry.fit&&geometry.inside&&!geometry.overflow&&geometry.stageHeight>=80,JSON.stringify(geometry));
       for(const sel of ['.c-live-tools','.c-live-keys','.c-waiting']){const b=await f.locator(sel).boundingBox();assert(b&&b.y>=32&&b.y+b.height<=profile.viewport.height+1,sel+' reachable without zoom');}
-      const before=await f.locator('.u-sheet').screenshot();
-      await f.evaluate(()=>{const x=document.createElement('div');x.id='loud-behind';x.style='position:absolute;inset:0;color:red;font:60px serif;z-index:0';x.textContent='LOUD BACKGROUND '.repeat(100);document.querySelector('#messenger').prepend(x);});
-      const over=await f.locator('.u-sheet').screenshot();assert(before.equals(over),'text panel opaque over loud content');
+      // Hold synthetic frame replacement only while comparing paint; the real product poller stays unchanged.
+      holdFrames=true;frameCaptureGate=new Promise(resolve=>releaseFrameCapture=resolve);
+      await page.waitForTimeout(150);
+      const panel=f.locator('.u-sheet'), prefix=path.join(out,`${profile.name}-${skin}-opacity`);
+      const computed=await panel.evaluate(e=>{const c=getComputedStyle(e),r=e.getBoundingClientRect();return {background:c.backgroundColor,image:c.backgroundImage,opacity:c.opacity,panelSolid:c.getPropertyValue('--panel-solid').trim(),wzPanel:c.getPropertyValue('--wz-panel').trim(),rect:{x:r.x,y:r.y,width:r.width,height:r.height},animations:e.getAnimations().map(a=>({playState:a.playState,currentTime:a.currentTime}))}});
+      fs.writeFileSync(prefix+'-computed.json',JSON.stringify({computed,geometry},null,2));
+      const shot=async name=>panel.screenshot({path:prefix+'-'+name+'.png',animations:'disabled',caret:'hide'});
+      const pixels=async(a,b)=>page.evaluate(async ([a,b])=>{
+        const decode=async s=>{const i=await createImageBitmap(await(await fetch('data:image/png;base64,'+s)).blob());const c=document.createElement('canvas');c.width=i.width;c.height=i.height;const x=c.getContext('2d');x.drawImage(i,0,0);return {w:i.width,h:i.height,p:Array.from(x.getImageData(0,0,i.width,i.height).data)}};
+        const x=await decode(a),y=await decode(b);let changed=0,maxDelta=0;for(let n=0;n<x.p.length;n+=4){let d=false;for(let k=0;k<4;k++){const v=Math.abs(x.p[n+k]-y.p[n+k]);maxDelta=Math.max(maxDelta,v);d ||= v!==0}if(d)changed++}return {changedPixels:changed,maxChannelDelta:maxDelta,sameGeometry:x.w===y.w&&x.h===y.h,width:x.w,height:x.h};
+      },[a.toString('base64'),b.toString('base64')]);
+      const loud=()=>f.evaluate(()=>{const x=document.createElement('div');x.id='loud-behind';x.style='position:absolute;inset:0;color:red;background:repeating-linear-gradient(0deg,#f0f 0 6px,#0f0 6px 12px);font:60px serif;z-index:0';x.textContent='LOUD BACKGROUND '.repeat(100);document.querySelector('#messenger').prepend(x);});
+      const before=await shot('before');await loud();const over=await shot('over');
+      const diff=await pixels(before,over);
+      fs.writeFileSync(prefix+'-diff.json',JSON.stringify({computed,geometry,diff},null,2));
+      await page.screenshot({path:prefix+'-full.png',animations:'disabled',caret:'hide'});
+      assert(diff.sameGeometry&&diff.changedPixels===0,'text panel opaque over loud content: '+JSON.stringify(diff));
+      assert.equal(Number(computed.opacity),1,'text panel opacity 1');
+      // Negative control: an actually transparent panel must fail the identical decoded-pixel gate.
       await f.locator('#loud-behind').evaluate(e=>e.remove());
+      await panel.evaluate(e=>{e.dataset.qaStyle=e.getAttribute('style')||'';e.style.setProperty('background','transparent','important')});
+      const transparentBefore=await shot('negative-before');await loud();const transparentOver=await shot('negative-over');
+      const negative=await pixels(transparentBefore,transparentOver);
+      fs.writeFileSync(prefix+'-negative.json',JSON.stringify(negative,null,2));
+      assert(negative.sameGeometry&&negative.changedPixels>0,'opacity detector must reject actual transparency');
+      await f.locator('#loud-behind').evaluate(e=>e.remove());
+      await panel.evaluate(e=>{e.setAttribute('style',e.dataset.qaStyle);delete e.dataset.qaStyle});
+      holdFrames=false;releaseFrameCapture();releaseFrameCapture=null;
       await page.screenshot({path:path.join(out,`${profile.name}-${skin}-fit.png`)});
     }
     assert.notEqual(paints[0].bg,paints[1].bg,'actual dark/light paint differs');
