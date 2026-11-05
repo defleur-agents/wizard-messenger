@@ -83,30 +83,7 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
       // Hold synthetic frame replacement only while comparing paint; the real product poller stays unchanged.
       holdFrames=true;frameCaptureGate=new Promise(resolve=>releaseFrameCapture=resolve);
       await page.waitForTimeout(150);
-      const panel=f.locator('.u-sheet'), prefix=path.join(out,`${profile.name}-${skin}-opacity`);
-      const computed=await panel.evaluate(e=>{const c=getComputedStyle(e),r=e.getBoundingClientRect();return {background:c.backgroundColor,image:c.backgroundImage,opacity:c.opacity,panelSolid:c.getPropertyValue('--panel-solid').trim(),wzPanel:c.getPropertyValue('--wz-panel').trim(),rect:{x:r.x,y:r.y,width:r.width,height:r.height},animations:e.getAnimations().map(a=>({playState:a.playState,currentTime:a.currentTime}))}});
-      fs.writeFileSync(prefix+'-computed.json',JSON.stringify({computed,geometry},null,2));
-      const shot=async name=>panel.screenshot({path:prefix+'-'+name+'.png',animations:'disabled',caret:'hide'});
-      const pixels=async(a,b)=>page.evaluate(async ([a,b])=>{
-        const decode=async s=>{const i=await createImageBitmap(await(await fetch('data:image/png;base64,'+s)).blob());const c=document.createElement('canvas');c.width=i.width;c.height=i.height;const x=c.getContext('2d');x.drawImage(i,0,0);return {w:i.width,h:i.height,p:Array.from(x.getImageData(0,0,i.width,i.height).data)}};
-        const x=await decode(a),y=await decode(b);let changed=0,maxDelta=0;for(let n=0;n<x.p.length;n+=4){let d=false;for(let k=0;k<4;k++){const v=Math.abs(x.p[n+k]-y.p[n+k]);maxDelta=Math.max(maxDelta,v);d ||= v!==0}if(d)changed++}return {changedPixels:changed,maxChannelDelta:maxDelta,sameGeometry:x.w===y.w&&x.h===y.h,width:x.w,height:x.h};
-      },[a.toString('base64'),b.toString('base64')]);
-      const loud=()=>f.evaluate(()=>{const x=document.createElement('div');x.id='loud-behind';x.style='position:absolute;inset:0;color:red;background:repeating-linear-gradient(0deg,#f0f 0 6px,#0f0 6px 12px);font:60px serif;z-index:0';x.textContent='LOUD BACKGROUND '.repeat(100);document.querySelector('#messenger').prepend(x);});
-      const before=await shot('before');await loud();const over=await shot('over');
-      const diff=await pixels(before,over);
-      fs.writeFileSync(prefix+'-diff.json',JSON.stringify({computed,geometry,diff},null,2));
-      await page.screenshot({path:prefix+'-full.png',animations:'disabled',caret:'hide'});
-      assert(diff.sameGeometry&&diff.changedPixels===0,'text panel opaque over loud content: '+JSON.stringify(diff));
-      assert.equal(Number(computed.opacity),1,'text panel opacity 1');
-      // Negative control: an actually transparent panel must fail the identical decoded-pixel gate.
-      await f.locator('#loud-behind').evaluate(e=>e.remove());
-      await panel.evaluate(e=>{e.dataset.qaStyle=e.getAttribute('style')||'';e.style.setProperty('background','transparent','important')});
-      const transparentBefore=await shot('negative-before');await loud();const transparentOver=await shot('negative-over');
-      const negative=await pixels(transparentBefore,transparentOver);
-      fs.writeFileSync(prefix+'-negative.json',JSON.stringify(negative,null,2));
-      assert(negative.sameGeometry&&negative.changedPixels>0,'opacity detector must reject actual transparency');
-      await f.locator('#loud-behind').evaluate(e=>e.remove());
-      await panel.evaluate(e=>{e.setAttribute('style',e.dataset.qaStyle);delete e.dataset.qaStyle});
+      await require('./helpers/account_panel_opacity.cjs')(f,page,path.join(out,`${profile.name}-${skin}-opacity`),geometry);
       holdFrames=false;releaseFrameCapture();releaseFrameCapture=null;
       await page.screenshot({path:path.join(out,`${profile.name}-${skin}-fit.png`)});
     }
@@ -141,6 +118,10 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
       assert.equal(await page.locator('html').getAttribute('data-skin'),null,'standalone does not pretend to be hosted');
       const dark=await page.locator('.u-sheet').evaluate(e=>({bg:getComputedStyle(e).backgroundColor,ink:getComputedStyle(e).color}));
       assert.notEqual(dark.bg,'rgba(0, 0, 0, 0)'); assert.notEqual(dark.bg,dark.ink);
+      holdFrames=true;frameCaptureGate=new Promise(resolve=>releaseFrameCapture=resolve);
+      await page.waitForTimeout(150);
+      await require('./helpers/account_panel_opacity.cjs')(page,page,path.join(out,'phone-standalone-opacity'),{standalone:true});
+      holdFrames=false;releaseFrameCapture();releaseFrameCapture=null;
       await page.screenshot({path:path.join(out,'phone-standalone-dark.png')});
       await page.getByRole('button',{name:'Cancel sign-in',exact:true}).click(); await page.waitForTimeout(80);
       assert.equal(cancelled.length,2,'standalone uses and cleans up the same disposable route');
