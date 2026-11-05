@@ -1712,19 +1712,35 @@
       if (row.identity_id && [...ui.channel.options].some(o => o.value === row.identity_id)) { ui.channel.value = row.identity_id; ui.paintVia(); }
       await loadItems(row);
     }
-    // Bring the tray in line with the draft's attachments. One that fails to load (a blip, a restart) shows the
-    // warning and is tried again on the next poll, which clears the warning once it loads; no reload needed.
+    // Keep failed downloads in the same tray: they must be removable, never silently omitted from a send.
+    const errorsInTray = () => {
+      if (!alive()) return;
+      sd.loadError = (view.attach || []).some(it => it.unavailable || it.removeFailed);
+      sd.uploadError = (view.attach || []).some(it => it.uploadFailed);
+      ui.grow(); ui.paintBar();
+    };
     async function loadItems(row) {
-      const want = row.attachments || [], have = view.attach || [];
-      const tray = have.filter(it => !it.sid || want.some(a => a.id === it.sid));
-      let failed = false;
-      for (const a of want) if (!tray.some(it => it.sid === a.id)) { try { tray.push(await itemFor(a, row.id)); } catch { failed = true; } }
-      if (!alive() || sd.row?.id !== row.id) return;
-      sd.loadError = failed;
-      view.attach = tray.length ? tray : null; ui.grow(); ui.paintBar();
+      const want = row.attachments || [], gen = draftWrites, epoch = sd.epoch, loaded = [];
+      for (const a of want) if (!(view.attach || []).some(it => it.sid === a.id && !it.unavailable)) {
+        try { loaded.push(await itemFor(a, row.id)); }
+        catch { loaded.push({file: true, unavailable: true, key: 'a' + uid(), sid: a.id, name: a.name, bytes: a.bytes}); }
+      }
+      // A slow download must not revive a removed/sent item or replace another conversation's tray.
+      if (!alive() || sd.epoch !== epoch || gen !== draftWrites || sd.row?.id !== row.id || sd.row.revision !== row.revision) {
+        for (const it of loaded) if (it.url) URL.revokeObjectURL(it.url);
+        return;
+      }
+      const tray = (view.attach || []).filter(it => !it.sid || want.some(a => a.id === it.sid));
+      for (const it of loaded) {
+        const at = tray.findIndex(old => old.sid === it.sid);
+        if (at < 0) tray.push(it); else if (tray[at].unavailable) tray[at] = it;
+        else if (it.url) URL.revokeObjectURL(it.url);
+      }
+      view.attach = tray.length ? tray : null; errorsInTray();
     }
     async function save() {
       clearTimeout(sd.timer); sd.timer = null; draftWrote();
+      await sd.uploading?.catch(() => {});
       if (sd.closing) { await sd.closing; if (sd.timer) return; } // a just-sent draft is deleted first; new text starts a new one
       if (sd.busy) { await sd.busy.catch(() => {}); if (sd.timer) return; }
       if (view.edit || sd.conflict) return;
@@ -1753,30 +1769,66 @@
       if (alive()) { ui.paintBar(); if (!sd.conflict && dirty()) schedule(); } refreshDraftIndex();
     }
     const schedule = () => { clearTimeout(sd.timer); sd.timer = setTimeout(save, SD_SAVE_MS); };
-    async function ensure() { if (!sd.row) { if (!ui.draft.value.trim()) { const r = await api('api/drafts', {method: 'POST', body: {person_id: id, identity_id: ui.channel.value, text: ''}}); sd.row = r.draft; sd.saved = ''; } else await save(); } return sd.row; }
-    // A photo or file put in the tray is stored with the draft at once, so it is there on every device and for agents.
-    async function attach(items) {
-      if (sd.closing) await sd.closing;
-      const epoch = sd.epoch;
-      for (const it of items) {
-        if (sd.epoch !== epoch) return; // sent meanwhile: the rest went with the message, not into a deleted draft
-        try {
-          await sd.busy?.catch(() => {}); const row = await ensure(); if (!row) return;
-          draftWrote(); const r = await draftRaw('api/drafts/' + row.id + '/attachments', 'PUT', it.blob, {revision: row.revision, name: it.name || 'Attachment', mime: it.blob.type || 'application/octet-stream'});
-          sd.row = r.draft; it.sid = r.draft.attachments[r.draft.attachments.length - 1].id; // (when sent meanwhile, the send's delete waits for this and needs the new revision)
-        } catch (e) { if (sd.epoch !== epoch) return; sd.uploadError = true; if (e.code === 'draft_changed') { try { sd.conflict = (await api('api/drafts/' + sd.row.id)).draft; ui.paintBar(); } catch { /* next poll */ } } else error(e); ui.paintBar(); }
+    async function ensure() {
+      if (!sd.row) {
+        const text = ui.draft.value;
+        const r = await api('api/drafts', {method: 'POST', body: {person_id: id, identity_id: ui.channel.value, text}});
+        sd.row = r.draft; sd.saved = text;
       }
-      draftWrote(); refreshDraftIndex();
+      return sd.row;
     }
-    async function detach(it) {
-      // Removing a failed local upload clears the block; any other bad attachment remains visible in the tray.
-      if (!it.sid) { sd.uploadError = false; ui.paintBar(); return; }
-      if (!sd.row) return;
-      draftWrote();
-      try { const r = await api('api/drafts/' + sd.row.id + '/attachments/' + it.sid, {method: 'DELETE', body: {revision: sd.row.revision}}); sd.row = r.draft; }
-      catch (e) { if (e.code !== 'not_found') error(e); }
-      draftWrote();
-      if (!ui.draft.value.trim() && !(view.attach || []).length) save();
+    // Picker, paste, removal and autosave share revisions. Queue whole batches, not just their last promise:
+    // two selections before the first PUT returns otherwise race with the same revision and poison the draft.
+    function attachmentWork(work) {
+      const before = sd.uploading, closing = sd.closing;
+      sd.attachmentPending = (sd.attachmentPending || 0) + 1;
+      const run = Promise.resolve(before).catch(() => {}).then(async () => {
+        await closing; await sd.busy?.catch(() => {});
+        draftWrote();
+        try { return await work(); } finally { sd.attachmentPending--; draftWrote(); errorsInTray(); refreshDraftIndex(); }
+      });
+      sd.uploading = run;
+      return run;
+    }
+    function attach(items) {
+      const epoch = sd.epoch;
+      return attachmentWork(async () => {
+        for (const it of items) {
+          if (!alive() || sd.epoch !== epoch) return;
+          if (it.removed || it.sid) continue;
+          try {
+            const row = await ensure();
+            const r = await draftRaw('api/drafts/' + row.id + '/attachments', 'PUT', it.blob, {revision: row.revision, name: it.name || 'Attachment', mime: it.blob.type || 'application/octet-stream'});
+            sd.row = r.draft; it.sid = r.draft.attachments[r.draft.attachments.length - 1].id;
+            it.uploadFailed = false;
+          } catch (e) {
+            if (sd.epoch !== epoch) return;
+            it.uploadFailed = true;
+            if (e.code === 'draft_changed' || e.code === 'draft_exists') {
+              try { sd.conflict = (await fetchDrafts(true)).find(d => d.id === sd.row?.id || d.person_id === id) || null; } catch { /* next poll */ }
+            } else if (alive()) error(e);
+          }
+        }
+      });
+    }
+    function detach(it) {
+      it.removed = true; errorsInTray();
+      return attachmentWork(async () => {
+        if (!it.sid || !sd.row) return;
+        try {
+          const r = await api('api/drafts/' + sd.row.id + '/attachments/' + it.sid, {method: 'DELETE', body: {revision: sd.row.revision}});
+          sd.row = r.draft;
+          if (alive()) { view.attach = (view.attach || []).filter(old => old !== it); if (!view.attach.length) view.attach = null; }
+        } catch (e) {
+          // A refused removal is not a successful removal. Keep its chip and block until reconciled.
+          if (alive()) {
+            it.removed = false; it.removeFailed = true;
+            if (!(view.attach || []).includes(it)) view.attach = [...(view.attach || []), it];
+            if (e.code !== 'not_found') error(e);
+          }
+        }
+        if (alive() && !ui.draft.value.trim() && !(view.attach || []).length) schedule();
+      });
     }
     // Sent (or emptied): the draft is done. Delete it so it never comes back.
     async function clear(quiet = false) {
@@ -1818,7 +1870,7 @@
       if (!first && document.hidden) return;
       const gen = draftWrites;
       let rows; try { rows = await fetchDrafts(first); } catch { return; }
-      if (!alive() || sd.busy || sd.timer || sd.closing) return;
+      if (!alive() || sd.busy || sd.timer || sd.closing || sd.attachmentPending) return;
       if (gen !== draftWrites) return check(first); // this screen wrote meanwhile: that list may predate it
       rows = rows.filter(d => !closedDrafts.has(d.id));
       const mine = sd.row && rows.find(d => d.id === sd.row.id && d.state === 'draft');
@@ -1838,7 +1890,15 @@
       await apply(latest);
     }
     sd.poll = setInterval(() => check(false), SD_POLL_MS);
-    const retry = async () => { if (sd.loadError && sd.row) await loadItems(sd.row); };
+    const retry = async () => {
+      await sd.uploading?.catch(() => {});
+      if (!alive() || sd.conflict) return;
+      for (const it of (view.attach || []).filter(it => it.removeFailed)) await detach(it);
+      const unsaved = (view.attach || []).filter(it => !it.sid && !it.removed);
+      if (unsaved.length) await attach(unsaved);
+      if (sd.loadError && sd.row) await loadItems(sd.row);
+      errorsInTray();
+    };
     Object.assign(sd, {schedule, save, attach, detach, clear, closeForSend, afterSend, note, check, retry, stop: () => { sd.alive = false; clearInterval(sd.poll); clearTimeout(sd.timer); sd.timer = null; }});
     setTimeout(() => Promise.resolve(after).catch(() => {}).then(() => check(true)), 0);
     return sd;
@@ -1937,7 +1997,9 @@
     }
     async function submitOnce() {
       if (view.sd?.conflict) return toast('Choose which draft to keep first');
-      await view.sd?.retry?.();
+      const draftState = view.sd;
+      await draftState?.retry?.();
+      if (s.person !== id || view.sd !== draftState || !form.isConnected) return;
       if (view.sd?.loadError || view.sd?.uploadError) return toast('An attachment needs attention before sending');
       const text = draft.value.trim(), a = view.attach || [];
       if (!text && !a.length) return;
