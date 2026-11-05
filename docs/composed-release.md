@@ -15,8 +15,9 @@ Protected merges and all live lifecycle actions belong to the parent.
 | `unified.py` | exact QA-verified Signal implementation, retained in `89d67976ea8b799f047509bc22433f783d739b13` |
 | `plumbing/connectors-provenance.json` | exact frozen Signal provenance from same packet |
 
-The base `/app` tree must differ at exactly these five paths. One `COPY payload/`
-layer, numeric `0644` modes and actual non-root module imports are required. The
+The base `/app` tree must differ at exactly these five paths. Five explicit per-file
+`COPY --chmod=0644` instructions retain all base directory traversal permissions;
+five appended layers and actual non-root module imports are required. The
 source branch also carries original QA, native patch/license and corresponding-source
 provenance; none is implicitly copied into the production image. Existing recipe
 files stay at live baseline: only parent lifecycle materializes the two image pins.
@@ -26,6 +27,24 @@ version. No database, drafts, attachment/vault contents, provider page or privat
 agent inspection is authorized.
 
 ## Packaging cause and narrow correction
+
+The admitted r3 job `heavy_2db36f91dddd4f13a1f45f3a9a340d2f` passed all
+preparatory/behavior checks and built its overlay, then failed the actual packaged
+uid-1000 `/app` read: recursive `COPY --chmod=0644 payload/ /app/` removed directory
+traversal bits. Preserve that failed stage/image/logs; never activate it. Only the
+Dockerfile, packaging runner, this document and a new packaged readability probe
+change. Product bytes, identity helper, lifecycle adapter, recipe and every existing
+test remain identical. No source recipe version bump: the parent adapter derives
+the new source selection/revision and two immutable image pins from the fresh receipt,
+then advances tipi under its existing guard. Stage manifest and final receipt bind
+the new revision, Dockerfile, probe, unchanged lifecycle/helper and recipe hashes.
+
+The smallest real regression runs the new probe in networkless/read-only containers
+as uid/gid 1000: untouched `static/app.js` must reproduce PermissionError on the
+preserved defective image; base and corrected candidate must read every `/app` file.
+Compare every directory's mode/uid/gid exactly with base and require all five payload
+files to be 0644. Keep exact five-file content diff, full Config, ordered base layer
+prefix, five new file layers, app-user imports, export and archive identity proof.
 
 Read-only measurement of the original imported base found absent raw OCI Config
 `Cmd` and `Volumes` materialized as **null**. These were the only observed additions
@@ -64,18 +83,22 @@ Inherited, not rerun:
 - All earlier failures remain frozen; obsolete UI expectation failures are neither
   hidden nor relabelled green (`all_suites_green:false`).
 
-New, only when parent admits the sealed continuation:
-- Narrow Config/local-builder regressions and pure composed lifecycle regressions.
-- 17 attachment controller and six Signal projection cases on merged JS, including
-  the frozen actual-converter rows (no optional ingress skip).
-- Original real attachment recovery browser + original two-cell single-send browser.
-- The **actually accepted** Signal browser continuation, unchanged, against merged
-  static files and the exact attachment-compatible shared shell: phone/wide ×
-  Nebula/Signal, state-preserving live skin changes, all-file forwarding, tile viewer,
-  standalone dark. No owner screen. Fresh synthetic screenshots need parent review.
-- Exact whole-tree archived-live/candidate `app-parity-gate`, then one image overlay,
-  complete `/app` diff, non-root import smoke, archive export/reproof and frozen
-  Signal Config/RootFS/binary requalification. No Rust/Go work.
+Additionally inherited from exact-source r3, not rerun:
+- Ten Config/local-builder regressions, six composed lifecycle regressions,
+  17 attachment controllers, six Signal projections with actual converter rows.
+- Real merged attachment recovery, original two-cell single-send and four-cell
+  merged Signal browser (Nebula/Signal, all-file forwarding, live skin changes,
+  tile viewer, standalone dark). Parent must still inspect those saved screenshots.
+- Exact archived-live/candidate parity. The new source delta is packaging/docs only;
+  the complete prior tracked-source closure is hash-bound except those explicit files.
+
+New, only when parent admits this packaging-only continuation: corrected five-file
+overlay, real packaged non-root readability negative/positive, complete `/app` diff,
+directory metadata equality, imports, export/reproof and frozen Signal
+Config/RootFS/binary requalification. No feature QA, browser or Rust/Go rerun.
+All inherited logs, checkpoint and screenshots have frozen hashes. Preserve the five
+obsolete permission-test failures explicitly; final result is scoped_pass, never
+all_suite_green. The failed r3 overall job remains failed, not retroactively green.
 
 Reuse:
 - attachment-chip: REUSE WizardApp.attachChip.node
@@ -93,8 +116,8 @@ start tests/builds/browser directly. A helper returns the seal/spec to its paren
 it does not forge admission. Until a new job produces a passing `qa-receipt.json`,
 this is prepared source and a continuation, **not a built/verified final release**.
 
-After completion, parent checks logs, exact case totals, fresh screenshots and
-`app-parity.log`; import the exported Messenger archive and frozen Signal archive
+After completion, parent checks new packaging logs, inherited exact case totals,
+saved r3 screenshots and `app-parity.log`; import the new exported Messenger archive and frozen Signal archive
 only after hash verification. Re-prove typed target identity against each archive's
 full raw Config and ordered RootFS; worker inspect wrapper equality alone is not
 target proof. Preserve full archives on durable encrypted storage, not forum only.

@@ -1,5 +1,5 @@
-"""One parent-admitted forum/light continuation: affected merged behavior + one composed overlay.
-No owner content/providers/live writes; no native build; preserve all frozen evidence.
+"""Parent-admitted packaging-only continuation of passed exact-source composed QA.
+No behavior/browser reruns, owner content/providers/live writes or native build.
 """
 from pathlib import Path
 import copy
@@ -8,10 +8,10 @@ import json
 import os
 import re
 import shutil
-import socket
+
 import subprocess
 import sys
-import time
+
 from docker_overlay_identity import archive_identity, check_loaded, exact, inspect, local_build_argv, assert_local_builder
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -64,7 +64,21 @@ def inheritance(manifest):
         for rel,digest in entries.items():assert sha(Path(root)/rel)==digest,'frozen evidence drift: '+rel
     for group,closure in ledger['exact_file_closures'].items():
         for rel,digest in closure.items():assert sha(ROOT/rel)==digest,group+' closure drift: '+rel
-    # Byte reconstruction proves disjoint JS composition; it is not inherited merged-behavior QA.
+    prior=ledger['packaging_continuation']
+    assert prior['revision']=='2a408e4fe38834e82d78d5f01c52e0edea1089be'
+    for rel,digest in prior['unchanged_source_files'].items():
+        assert sha(ROOT/rel)==digest,'inherited exact-source drift: '+rel
+    for rel,delta in prior['allowed_source_delta'].items():
+        assert sha(ROOT/rel)==delta['after_sha256'],'packaging delta drift: '+rel
+    old=Path(prior['stage'])
+    progress=json.loads((old/'evidence/progress.json').read_text())
+    byname={r['name']:r for r in progress}
+    for name in prior['inherited_passed_runs']:
+        assert byname[name]['returncode']==0
+        assert sha(byname[name]['log'])==byname[name]['log_sha256']
+    assert byname['image-files-candidate']['returncode']==1
+    assert prior['obsolete_permission_failures']==5
+    # Exact disjoint JS composition AND prior merged execution are hash-bound above.
     work=S/'composition-check';work.mkdir()
     shutil.copyfile(S/'attachment-unified.js',work/'unified.js')
     subprocess.run(['git','apply',str(S/'signal-unified.patch')],cwd=work,check=True,env=ENV)
@@ -85,44 +99,11 @@ def main():
     assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()==rev
     assert not subprocess.check_output(['git','status','--porcelain'],cwd=ROOT,text=True).strip()
     ledger=inheritance(manifest)
-    # Regression execution only here, not during source/stage preparation.
-    run('serializer-and-local-base-regressions',[sys.executable,'tests/test_docker_overlay_identity.py','-v'])
-    run('composed-lifecycle-regressions',[sys.executable,'tests/test_composed_lifecycle.py','-v'])
-    run('attachment-17-controller',['node','--test','tests/test_draft_attachment_recovery.cjs'])
-    run('signal-album-projection',['node','--test','tests/signal_albums.test.cjs'],{'SIGNAL_INGRESS_PROOF':'/srv/work/messenger-signal-runtime-a23fd8e26a72-import1/evidence/ingress.json'})
-    # Five native-parser cases and focused Python already passed: source closure is inherited.
-    # Exact archive trees, complete scope; no waiver or working-directory parity substitution.
-    run('app-parity',[sys.executable,str(S/'app-parity-gate'),str(S/'baseline'),str(S/'candidate-archive')],timeout=120)
-    deps=Path(ledger['attachment_stage'])/'python-deps'
-    ENV=dict(ENV,PYTHONPATH=str(deps)+':'+str(ROOT)+':'+str(ROOT/'tests'),
-        NODE_PATH='/srv/work/morning-diff-deps-r4/node_modules',
-        PLAYWRIGHT_MODULE='/srv/work/morning-diff-deps-r4/node_modules/playwright',
-        SHELL_DIR=str(S/'attachment-shell'),ATTACHMENT_FIXTURE_MOUNT='/app/',
-        AGENT_STAGE_DIR=str(OUT/'synthetic-state'),EVIDENCE_DIR=str(OUT/'attachment-browser'),STATIC_DIR=str(ROOT/'static'),TMPDIR=str(S/'tmp'))
-    Path(ENV['AGENT_STAGE_DIR']).mkdir()
-    # Verify task dependency full closure from original stage, including any generated source-bound additions.
-    for rel,digest in manifest['dependency_files'].items():assert sha(Path(rel))==digest,'dependency drift: '+rel
-    sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
-    with (OUT/'synthetic-server.log').open('x') as log:
-        server=subprocess.Popen([sys.executable,'tests/agent_drafts_stage.py',str(port)],cwd=ROOT,env=ENV,stdout=log,stderr=subprocess.STDOUT)
-        try:
-            deadline=time.monotonic()+20
-            while not (Path(ENV['AGENT_STAGE_DIR'])/'state.json').exists():
-                assert server.poll() is None and time.monotonic()<deadline,'synthetic server not ready'
-                time.sleep(.1)
-            run('merged-attachment-browser',['node','tests/draft_attachment_recovery_browser.cjs'],timeout=150)
-            run('existing-single-send',['node','tests/single_send_browser.cjs'],{'PREVIEW_URL':'http://127.0.0.1:%d/'%port,'PREVIEW_API_URL':'http://127.0.0.1:%d'%port,'MESSENGER_API_TOKEN':'synthetic-unused-by-cookie-path'},timeout=120)
-        finally:
-            server.terminate()
-            try:server.wait(timeout=10)
-            except subprocess.TimeoutExpired:server.kill();server.wait(timeout=5)
-    run('merged-signal-browser',['node','tests/signal_album_browser.cjs'],{
-        'SIGNAL_APP_ROOT':str(ROOT),'SIGNAL_SHELL_WEB':str(S/'attachment-shell'),
-        'SIGNAL_INGRESS_PROOF':'/srv/work/messenger-signal-runtime-a23fd8e26a72-import1/evidence/ingress.json',
-        'OUT':str(OUT/'signal-browser')},timeout=180)
-    ui=json.loads((OUT/'signal-browser/receipt.json').read_text())
-    assert len(ui['receipts'])==4 and len(ui['shares'])==1 and not ui['errors']
-    dump('qa-checkpoint',{'scoped_qa_pass':True,'all_suites_green':False,'revision':rev,'runs':runs,'inherited_case_ledger':ledger['case_ledger']})
+    # All unchanged behavior/security/account/native, parity, lifecycle and identity
+    # regressions passed in r3. Inherit exact source + result/log/artifact hashes.
+    # Only the actual packaging defect is exercised in this admitted continuation.
+    dump('qa-checkpoint',{'scoped_qa_pass':True,'all_suites_green':False,'revision':rev,
+        'packaging_pending':True,'inherited_case_ledger':ledger['case_ledger']})
     # Frozen base, all blob bytes + exact Config + ordered RootFS; no normalization of raw archive.
     assert sha(BASE_ARCHIVE)==BASE_SHA
     frozen=archive_identity(BASE_ARCHIVE)
@@ -148,21 +129,32 @@ def main():
         p=ctx/'payload'/rel;p.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(ROOT/rel,p)
         assert sha(p)==sha(ROOT/rel)
     # Assert the local named alias again immediately before BuildKit resolution.
-    assert inspect(alias)['Id']==base['Id']
+    assert inspect(alias)['Id']==base['Id'];check_loaded(inspect(alias),frozen)
     tag='wizard-messenger:composed-'+rev[:12]
     argv=local_build_argv(alias,rev,tag,str(ROOT/'release/composed.Dockerfile'))
     run('build-composed-overlay',argv,cwd=ctx,timeout=180)
     candidate=inspect(tag)
     expected=copy.deepcopy(base['Config']);expected['Labels']['org.opencontainers.image.revision']=rev
     assert exact(candidate['Config'],expected),'full candidate Config drift'
-    assert candidate['RootFS']['Type']=='layers' and candidate['RootFS']['Layers'][:-1]==base['RootFS']['Layers']
-    assert len(candidate['RootFS']['Layers'])==len(base['RootFS']['Layers'])+1,'one payload layer required'
-    # As actual app user, no mounts/network; all /app files, not just intended changes.
-    probe='import pathlib,hashlib,json;print(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in pathlib.Path("/app").rglob("*") if p.is_file()}))'
-    trees={}
+    assert candidate['RootFS']['Type']=='layers' and candidate['RootFS']['Layers'][:-len(PATHS)]==base['RootFS']['Layers']
+    assert len(candidate['RootFS']['Layers'])==len(base['RootFS']['Layers'])+len(PATHS),'five per-file payload layers required'
+    # Real packaged regression: original defective image must reproduce EACCES;
+    # base and corrected candidate must read every /app file as the actual app uid.
+    probe=(ROOT/'tools/probe_packaged_app_readability.py').read_text()
+    sandbox=['docker','run','--rm','--network=none','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--user=1000:1000','--entrypoint=python3']
+    broken=ledger['packaging_continuation']['failed_image']
+    assert inspect(broken)['Id']==broken
+    run('packaged-readability-old-negative',sandbox+[broken,'-B','-c',probe,'--expect-permission-error'])
+    trees={};metadata={}
     for role,image in [('base',base),('candidate',candidate)]:
-        text=run('image-files-'+role,['docker','run','--rm','--network=none','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--user=1000:1000','--entrypoint=python3',image['Id'],'-c',probe])
-        trees[role]=json.loads(text)
+        text=run('image-files-'+role,sandbox+[image['Id'],'-B','-c',probe])
+        metadata[role]=json.loads(text);trees[role]=metadata[role]['files']
+    assert metadata['candidate']['directories']==metadata['base']['directories'],'base directory mode/owner drift'
+    for rel in PATHS:assert metadata['candidate']['file_modes']['/app/'+rel]==0o644,rel
+    dump('packaged-readability-regression',{'scoped_pass':True,'uid':1000,'gid':1000,
+        'old_defective_image':broken,'base_directory_metadata_unchanged':True,
+        'directory_metadata':metadata['candidate']['directories'],'payload_modes':{p:metadata['candidate']['file_modes']['/app/'+p] for p in PATHS},
+        'untouched_app_js_sha256':trees['candidate']['/app/static/app.js']})
     changed={p for p in set(trees['base'])|set(trees['candidate']) if trees['base'].get(p)!=trees['candidate'].get(p)}
     assert changed=={'/app/'+p for p in PATHS},sorted(changed)
     for rel in PATHS:
@@ -181,8 +173,14 @@ def main():
     assert binary==SIGNAL_BINARY
     dump('signal-image-identity',dict(sigproof,loaded_id=sig['Id'],loaded_id_kind=sigkind,config=sig['Config'],rootfs=sig['RootFS'],archive_sha256=SIGNAL_SHA))
     dump('image-identity',{'archive_path':str(archive),'archive_sha256':sha(archive),'base_archive_sha256':BASE_SHA,'base_manifest_digest':BASE_MANIFEST,'base_config_digest':BASE_CONFIG,'base_loaded_id':base['Id'],'base_loaded_id_kind':base_kind,'loaded_id':candidate['Id'],'loaded_id_kind':kind,'tag':tag,'manifest_digest':proof['manifest_digest'],'config_digest':proof['config_digest'],'raw_config':proof['raw_config'],'config':candidate['Config'],'rootfs':candidate['RootFS'],'changed_app_files':sorted(changed)})
+    binding={'revision':rev,'dockerfile_sha256':sha(ROOT/'release/composed.Dockerfile'),
+        'lifecycle_sha256':sha(ROOT/'tools/composed_lifecycle.py'),'identity_helper_sha256':sha(ROOT/'tools/docker_overlay_identity.py'),
+        'readability_probe_sha256':sha(ROOT/'tools/probe_packaged_app_readability.py'),
+        'source_recipe_files':{p:sha(ROOT/p) for p in ['runtipi/config.json','runtipi/docker-compose.yml','wizard.md']},
+        'inheritance_sha256':sha(S/'inheritance.json'),'payload_layers':len(PATHS)}
+    assert binding==manifest['packaging_binding'],'source/recipe/lifecycle binding drift'
     verify_seal(manifest)
-    dump('qa-receipt',{'scoped_qa_pass':True,'all_suites_green':False,'synthetic_only':True,'live_provider_sends':0,'native_builds':0,'activation_performed':False,'revision':rev,'source_manifest_sha256':sys.argv[1],'runner_sha256':sha(__file__),'image_identity_sha256':sha(OUT/'image-identity.json'),'signal_identity_sha256':sha(OUT/'signal-image-identity.json'),'overlay_files':{p:sha(ROOT/p) for p in PATHS},'signal':{'image_id':SIGNAL_IMAGE,'binary_sha256':SIGNAL_BINARY,'archive_sha256':SIGNAL_SHA},'inherited_case_ledger':ledger['case_ledger'],'runs':runs,'remaining':['parent review fresh synthetic screenshots','parent target-daemon archive identity proof','parent fresh live/overrides/serving-shell guards and lifecycle authority only']})
+    dump('qa-receipt',{'scoped_pass':True,'scoped_qa_pass':True,'all_suites_green':False,'packaging_only':True,'packaging_binding':binding,'readability_regression_sha256':sha(OUT/'packaged-readability-regression.json'),'behavior_browser_reruns':0,'obsolete_permission_failures':5,'synthetic_only':True,'live_provider_sends':0,'native_builds':0,'activation_performed':False,'revision':rev,'source_manifest_sha256':sys.argv[1],'runner_sha256':sha(__file__),'image_identity_sha256':sha(OUT/'image-identity.json'),'signal_identity_sha256':sha(OUT/'signal-image-identity.json'),'overlay_files':{p:sha(ROOT/p) for p in PATHS},'signal':{'image_id':SIGNAL_IMAGE,'binary_sha256':SIGNAL_BINARY,'archive_sha256':SIGNAL_SHA},'inherited_case_ledger':ledger['case_ledger'],'runs':runs,'remaining':['parent review fresh synthetic screenshots','parent target-daemon archive identity proof','parent fresh live/overrides/serving-shell guards and lifecycle authority only']})
 
 if __name__=='__main__':
     try:main()
