@@ -8,6 +8,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -16,7 +17,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 STAGE = ROOT.parent
-OUT = STAGE / 'evidence'
+OUT = STAGE / ('evidence-preflight' if '--unit-only' in sys.argv else 'evidence')
 OUT.mkdir(exist_ok=True)
 assert str(ROOT).startswith('/srv/work/'), 'Linux/amd64 work belongs on forum /srv/work'
 manifest = json.loads((STAGE / 'stage.json').read_text())
@@ -54,9 +55,26 @@ container = None
 receipt = {'pass': False, 'error': 'job interrupted before completion', 'source_revision':manifest['source_revision'], 'runs':records, 'deployed':False}
 try:
     # Cheap regression failures surface before the full Rust/CGO build.
+    receipt['phase'] = 'units'
+    run('browser-vm-contract', ['node', '--test', 'tests/unified_browser_context.test.cjs'])
     run('schema-and-existing-photo-albums', [sys.executable, '-m', 'unittest', 'test_photo_albums', 'test_signal_albums.SignalAlbumSchemaTests', '-v'])
     node_tests = sorted({str(p.relative_to(ROOT)) for pattern in ['*.test.cjs', 'test_*.cjs'] for p in (ROOT/'tests').glob(pattern)})
-    run('node-regressions', ['node', '--test', *node_tests])
+    node_code = run('node-regressions', ['node', '--test', *node_tests], {'SIGNAL_INGRESS_PROOF':''}, required=False)
+    node_log = (OUT/'node-regressions.log').read_text()
+    skips = re.findall(r'^ok \d+ - (.*?) # SKIP.*$', node_log, re.M)
+    expected_skips = ['actual old vs patched converter outputs through persisted public ingress rows']
+    unit_receipt = {'pass': node_code == 0 and skips == expected_skips, 'phase': 'units', 'source_revision':manifest['source_revision'],
+                    'runs': list(records), 'skipped_until_converter_built':skips,
+                    'product_bytes_unchanged':manifest['test_fixture_repair']['product_bytes_unchanged'],
+                    'deployed':False, 'build_started':False}
+    (OUT/'unit-receipt.json').write_text(json.dumps(unit_receipt, indent=2)+'\n')
+    (OUT/'qa-receipt.json').write_text(json.dumps(unit_receipt, indent=2)+'\n')
+    assert skips == expected_skips, 'unexpected unit skips: ' + repr(skips)
+    assert node_code == 0, 'Failed node-regressions; inspect ' + str(OUT/'node-regressions.log')
+    if '--unit-only' in sys.argv:
+        receipt = dict(unit_receipt, scope='unit-only preflight; build/integration NOT executed')
+        sys.exit(0)
+    receipt['phase'] = 'build'
     run('playwright-pin', ['node', '-e', "if(require('playwright/package.json').version!=='1.64.1')process.exit(1)"])
     tag = 'wizard-signal-bridge:0.2610.0-native-albums1-' + manifest['source_revision'][:12]
     run('full-pinned-signal-build', ['docker', 'build', '--platform=linux/amd64', '--progress=plain',
@@ -70,6 +88,7 @@ try:
     run('real-converter-ingress', [sys.executable, '-m', 'unittest', 'test_signal_albums.SignalConverterIngressTests', '-v'], integration)
     assert (OUT/'ingress.json').is_file(), 'actual converter ingress proof was not produced'
     run('real-ingress-projection', ['node','--test','tests/signal_albums.test.cjs'], integration)
+    assert re.search(r'^# skipped 0$', (OUT/'real-ingress-projection.log').read_text(), re.M), 'converter integration must not skip'
     run('two-skin-browser', ['node', 'tests/signal_album_browser.cjs'], integration, timeout=300)
     # Includes the unmodified Telegram connector. Signal config is never rewritten.
     run('compose-validation', ['docker','compose','-f','runtipi/docker-compose.yml','config','--quiet'],
@@ -84,7 +103,7 @@ try:
                           'screenshots must still be independently visually inspected',
                           'parent must pin rebuilt image/binary provenance and compose parallel repairs before activation']}
 except Exception as error:
-    receipt = {'pass': False, 'error': str(error), 'source_revision':manifest['source_revision'], 'runs':records, 'deployed':False}
+    receipt = {'pass': False, 'phase':receipt.get('phase', 'units'), 'error': str(error), 'source_revision':manifest['source_revision'], 'runs':records, 'deployed':False, 'build_started':any(r['name']=='full-pinned-signal-build' for r in records)}
 finally:
     if container:
         subprocess.run(['docker','rm',container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
