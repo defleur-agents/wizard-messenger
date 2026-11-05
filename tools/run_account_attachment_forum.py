@@ -120,72 +120,85 @@ def main():
     sys.path.insert(0, str(deps))
     ENV = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=str(deps) + ':' + str(ROOT) + ':' + str(ROOT / 'tests'),
                PLAYWRIGHT_MODULE='/srv/work/morning-diff-deps-r4/node_modules/playwright',
-               SHELL_DIR=str(S / 'shell'), AGENT_STAGE_DIR=str(OUT / 'synthetic-state'),
+               SHELL_DIR=str(S / 'attachment-shell' if (S / 'attachment-shell').exists() else S / 'shell'), AGENT_STAGE_DIR=str(OUT / 'synthetic-state'),
                EVIDENCE_DIR=str(OUT / 'attachment-browser'), STATIC_DIR=str(ROOT / 'static'))
     Path(ENV['AGENT_STAGE_DIR']).mkdir()
-    run('packet-guards', [sys.executable, 'tests/test_composite_release_packet.py', '-v'])
-    # Cheap checks and strict product negatives precede any image loading/build/export.
-    for file in ['unified.js', 'connectors.js']:
-        run('syntax-' + file, ['node', '--check', 'static/' + file])
-    negatives = [
-        ('old-overlap', 'baseline-unified.js', 'two overlapping selections use successive revisions, not a sticky false error',
-         'REGRESSION_OVERLAPPING_ATTACHMENT_BATCH_LOST', r'\n\s+expected: 2\n\s+actual: 1\n'),
-        ('old-autosave-navigation', 'pre-race-unified.js', 'caption-cleared autosave survives navigation during held upload to empty composer',
-         'REGRESSION_AUTOSAVE_NAVIGATION_DELETED_ATTACHMENT_DRAFT', r'\n\s+expected: true\n\s+actual: false\n')]
-    for name, src, case, marker, diagnostic in negatives:
-        code, text = run(name, ['node', '--test', '--test-name-pattern=^' + case + '$', 'tests/test_draft_attachment_recovery.cjs'],
-                         {'STATIC_JS': str(S / src)}, require=False)
-        counts = tap_counts(text)
-        assert code == 1 and re.search(r'^not ok \d+ - ' + re.escape(case) + r'\s*$', text, re.M)
-        assert marker in text and "code: 'ERR_ASSERTION'" in text and re.search(diagnostic, text)
-        assert counts.get('fail') == 1 and counts.get('cancelled') == 0
-        assert 'TypeError' not in text and 'ReferenceError' not in text
-    _, controller = run('candidate-17-controller', ['node', '--test', 'tests/test_draft_attachment_recovery.cjs'])
-    assert tap_counts(controller) == {'tests': 17, 'pass': 17, 'fail': 0, 'cancelled': 0, 'skipped': 0}
-    run('faithful-vm-contract', ['node', '--test', 'tests/unified_browser_context.test.cjs'])
-    # Preserve original assertions: only the two named inherited suites may have source-proven historical failures.
-    historical = {}
-    reporter = str(ROOT / 'tools/qa_case_reporter.cjs')
-    for file in ['test_agent_permissions_view.cjs', 'test_history_search_view.cjs']:
-        sides = {}
-        for side, tree in [('live-baseline', S / 'baseline'), ('combined-candidate', ROOT)]:
-            case_report = OUT / (side + '-' + file + '.jsonl')
-            code, text = run(side + '-' + file, ['node', '--test', '--test-reporter=tap', '--test-reporter-destination=stdout',
-                '--test-reporter=' + reporter, '--test-reporter-destination=' + str(case_report), 'tests/' + file], cwd=tree, require=False)
-            rows = [json.loads(line) for line in case_report.read_text().splitlines() if line.startswith('{')]
-            cases = [row for row in rows if row['type'] in ('test:pass', 'test:fail')]
+    inherited = manifest.get('inherited')
+    if inherited:
+        prior = Path(inherited['stage'])
+        assert sha(prior / 'stage-manifest.json') == inherited['manifest_sha256']
+        for rel, h in inherited['files'].items():
+            assert sha(prior / rel) == h, 'inherited evidence drift: ' + rel
+        prior_manifest = json.loads((prior / 'stage-manifest.json').read_text())
+        for name in FILES:
+            assert sha(ROOT / 'static' / name) == prior_manifest['files']['source/static/' + name]
+        historical = json.loads((prior / 'evidence/historical-exact-case-comparison.json').read_text())
+        inherited_skips = []
+        dump(OUT / 'inherited-source-bound-evidence.json', inherited)
+    else:
+        run('packet-guards', [sys.executable, 'tests/test_composite_release_packet.py', '-v'])
+        # Cheap checks and strict product negatives precede any image loading/build/export.
+        for file in ['unified.js', 'connectors.js']:
+            run('syntax-' + file, ['node', '--check', 'static/' + file])
+        negatives = [
+            ('old-overlap', 'baseline-unified.js', 'two overlapping selections use successive revisions, not a sticky false error',
+             'REGRESSION_OVERLAPPING_ATTACHMENT_BATCH_LOST', r'\n\s+expected: 2\n\s+actual: 1\n'),
+            ('old-autosave-navigation', 'pre-race-unified.js', 'caption-cleared autosave survives navigation during held upload to empty composer',
+             'REGRESSION_AUTOSAVE_NAVIGATION_DELETED_ATTACHMENT_DRAFT', r'\n\s+expected: true\n\s+actual: false\n')]
+        for name, src, case, marker, diagnostic in negatives:
+            code, text = run(name, ['node', '--test', '--test-name-pattern=^' + case + '$', 'tests/test_draft_attachment_recovery.cjs'],
+                             {'STATIC_JS': str(S / src)}, require=False)
             counts = tap_counts(text)
-            assert cases and counts.get('tests') == len(cases), 'native TAP/case count mismatch'
-            assert counts.get('pass') == sum(row['type'] == 'test:pass' and not row['skip'] for row in cases)
-            assert counts.get('fail') == sum(row['type'] == 'test:fail' for row in cases)
-            assert counts.get('skipped') == sum(bool(row['skip']) for row in cases) and counts.get('cancelled') == 0
-            assert code == (1 if counts['fail'] else 0), 'exit/native TAP mismatch'
-            assert 'ReferenceError' not in text and 'Unsupported fixture' not in text and 'unhandledRejection' not in text
-            sides[side] = {'code': code, 'counts': counts, 'cases': cases}
-        assert sides['live-baseline'] == sides['combined-candidate'], 'new case/error drift in ' + file
-        historical[file] = sides
-    dump(OUT / 'historical-exact-case-comparison.json', historical)
-    # Discover all existing non-browser Node suites, not only test_*.cjs.
-    node_files = sorted({*ROOT.glob('tests/test_*.cjs'), *ROOT.glob('tests/test_*.mjs'),
-                         *ROOT.glob('tests/*.test.cjs'), *ROOT.glob('tests/*.test.mjs')})
-    excluded = {'test_agent_permissions_view.cjs', 'test_history_search_view.cjs', 'test_draft_attachment_recovery.cjs', 'unified_browser_context.test.cjs'}
-    inherited_skips = []
-    for file in node_files:
-        if file.name in excluded:
-            continue
-        _, text = run('node-' + file.name, ['node', '--test', str(file.relative_to(ROOT))])
-        if tap_counts(text).get('skipped', 0):
-            # Only baseline-identical optional skips, if any, are allowed and never reported as green cases.
-            basefile = S / 'baseline/tests' / file.name
-            assert basefile.exists() and sha(basefile) == sha(file), 'changed/new suite skip forbidden'
-            _, old = run('baseline-skip-' + file.name, ['node', '--test', str(basefile)], cwd=S / 'baseline')
-            assert tap_counts(old) == tap_counts(text)
-            skip_lines = lambda s: re.findall(r'^ok .*# SKIP.*$', s, re.M)
-            assert skip_lines(old) == skip_lines(text)
-            inherited_skips.append({'file': file.name, 'counts': tap_counts(text), 'cases': skip_lines(text)})
-    # Complete merged account/layout browser, actual shared palettes, stable decoded opacity + injected-negative gate.
-    run('merged-account-layout', ['node', 'tests/account_setup_browser.cjs', str(OUT / 'account-layout')], timeout=240)
-    run('existing-connectors-browser', ['node', 'tests/new_connectors_browser.cjs', str(OUT / 'existing-connectors')])
+            assert code == 1 and re.search(r'^not ok \d+ - ' + re.escape(case) + r'\s*$', text, re.M)
+            assert marker in text and "code: 'ERR_ASSERTION'" in text and re.search(diagnostic, text)
+            assert counts.get('fail') == 1 and counts.get('cancelled') == 0
+            assert 'TypeError' not in text and 'ReferenceError' not in text
+        _, controller = run('candidate-17-controller', ['node', '--test', 'tests/test_draft_attachment_recovery.cjs'])
+        assert tap_counts(controller) == {'tests': 17, 'pass': 17, 'fail': 0, 'cancelled': 0, 'skipped': 0}
+        run('faithful-vm-contract', ['node', '--test', 'tests/unified_browser_context.test.cjs'])
+        # Preserve original assertions: only the two named inherited suites may have source-proven historical failures.
+        historical = {}
+        reporter = str(ROOT / 'tools/qa_case_reporter.cjs')
+        for file in ['test_agent_permissions_view.cjs', 'test_history_search_view.cjs']:
+            sides = {}
+            for side, tree in [('live-baseline', S / 'baseline'), ('combined-candidate', ROOT)]:
+                case_report = OUT / (side + '-' + file + '.jsonl')
+                code, text = run(side + '-' + file, ['node', '--test', '--test-reporter=tap', '--test-reporter-destination=stdout',
+                    '--test-reporter=' + reporter, '--test-reporter-destination=' + str(case_report), 'tests/' + file], cwd=tree, require=False)
+                rows = [json.loads(line) for line in case_report.read_text().splitlines() if line.startswith('{')]
+                cases = [row for row in rows if row['type'] in ('test:pass', 'test:fail')]
+                counts = tap_counts(text)
+                assert cases and counts.get('tests') == len(cases), 'native TAP/case count mismatch'
+                assert counts.get('pass') == sum(row['type'] == 'test:pass' and not row['skip'] for row in cases)
+                assert counts.get('fail') == sum(row['type'] == 'test:fail' for row in cases)
+                assert counts.get('skipped') == sum(bool(row['skip']) for row in cases) and counts.get('cancelled') == 0
+                assert code == (1 if counts['fail'] else 0), 'exit/native TAP mismatch'
+                assert 'ReferenceError' not in text and 'Unsupported fixture' not in text and 'unhandledRejection' not in text
+                sides[side] = {'code': code, 'counts': counts, 'cases': cases}
+            assert sides['live-baseline'] == sides['combined-candidate'], 'new case/error drift in ' + file
+            historical[file] = sides
+        dump(OUT / 'historical-exact-case-comparison.json', historical)
+        # Discover all existing non-browser Node suites, not only test_*.cjs.
+        node_files = sorted({*ROOT.glob('tests/test_*.cjs'), *ROOT.glob('tests/test_*.mjs'),
+                             *ROOT.glob('tests/*.test.cjs'), *ROOT.glob('tests/*.test.mjs')})
+        excluded = {'test_agent_permissions_view.cjs', 'test_history_search_view.cjs', 'test_draft_attachment_recovery.cjs', 'unified_browser_context.test.cjs'}
+        inherited_skips = []
+        for file in node_files:
+            if file.name in excluded:
+                continue
+            _, text = run('node-' + file.name, ['node', '--test', str(file.relative_to(ROOT))])
+            if tap_counts(text).get('skipped', 0):
+                # Only baseline-identical optional skips, if any, are allowed and never reported as green cases.
+                basefile = S / 'baseline/tests' / file.name
+                assert basefile.exists() and sha(basefile) == sha(file), 'changed/new suite skip forbidden'
+                _, old = run('baseline-skip-' + file.name, ['node', '--test', str(basefile)], cwd=S / 'baseline')
+                assert tap_counts(old) == tap_counts(text)
+                skip_lines = lambda s: re.findall(r'^ok .*# SKIP.*$', s, re.M)
+                assert skip_lines(old) == skip_lines(text)
+                inherited_skips.append({'file': file.name, 'counts': tap_counts(text), 'cases': skip_lines(text)})
+        # Complete merged account/layout browser, actual shared palettes, stable decoded opacity + injected-negative gate.
+        run('merged-account-layout', ['node', 'tests/account_setup_browser.cjs', str(OUT / 'account-layout')], timeout=240)
+        run('existing-connectors-browser', ['node', 'tests/new_connectors_browser.cjs', str(OUT / 'existing-connectors')])
     # Real disposable ViewServer, only synthetic cookie/CSRF/data and provider mocks.
     sock = socket.socket(); sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]; sock.close()
     with (OUT / 'synthetic-server.log').open('x') as log:
@@ -208,7 +221,7 @@ def main():
     run('focused-python', [sys.executable, '-m', 'unittest', 'test_server_drafts', 'test_agent_send', 'test_photo_albums', 'test_web', '-v'], timeout=240)
     dump(OUT / 'qa-checkpoint.json', {'scoped_qa_pass': True, 'all_suites_green': not any(
         x['live-baseline']['code'] for x in historical.values()), 'historical': historical, 'inherited_skips': inherited_skips,
-        'source_manifest_sha256': sys.argv[1], 'revision': revision, 'runs': runs})
+        'source_manifest_sha256': sys.argv[1], 'revision': revision, 'inherited': inherited, 'runs': runs})
     # Exact full tested original retained archive; no download/rebuild of any native engine.
     assert sha(BASE_ARCHIVE) == BASE_ARCHIVE_SHA, 'retained original image archive drift'
     frozen = archive_identity(BASE_ARCHIVE)

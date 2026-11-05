@@ -17,7 +17,7 @@ const until = async (fn, label) => { for (let i = 0; i < 120; i++) { if (await f
   for (const d of await drafts()) await fetch(st.origin + '/api/drafts/' + d.id, {method: 'DELETE', headers: {...auth, 'Content-Type': 'application/json'}, body: JSON.stringify({revision: d.revision})});
   const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE});
   const ctx = await browser.newContext({viewport: {width: 390, height: 844}, colorScheme: 'dark', hasTouch: true, isMobile: true});
-  const errors = [], sends = [], checks = []; let failNames = new Set(), failId = null, hold = true, held = false, release;
+  const errors = [], sends = [], checks = [], network = [], consoleMessages = []; const safeURL = u => { const v = new URL(u); return v.origin === st.origin ? v.pathname : '[external]'; }; const safeText = t => String(t).split(st.cookie).join('[redacted]').split(st.agents.Oscar).join('[redacted]').split(st.agents.Reader).join('[redacted]').slice(0, 1500); let failNames = new Set(), failId = null, hold = true, held = false, release;
   const gate = new Promise(r => { release = r; });
   await ctx.addCookies([{name: 'wizard_messenger_session', value: st.cookie, url: st.origin}]);
   await ctx.route('**/wizard-os-home/**', route => {
@@ -28,7 +28,7 @@ const until = async (fn, label) => { for (let i = 0; i < 120; i++) { if (await f
   });
   await ctx.route('**/hosted-draft-qa', r => r.fulfill({contentType: 'text/html', body: `<!doctype html><html data-skin="nebula"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><script>window.setFixtureSkin=id=>{const s=${JSON.stringify(palettes)}.find(s=>s.id===id);if(!s)throw Error('Unknown palette');for(const [k,v] of Object.entries(s.t))document.documentElement.style.setProperty('--'+k,v);document.documentElement.dataset.skin=id;window.WizAppearance?.sync()};setFixtureSkin('nebula')</script><script src="/wizard-os-home/core/appearance-host.js" defer></script><style>html,body{margin:0;width:100%;height:100%;background:var(--bg,#05030c)}.st-embed,iframe{display:block;width:100%;height:100%;border:0}</style></head><body><div class="st-embed"><iframe title="Synthetic Messenger" src="/"></iframe></div></body></html>`}));
   await ctx.route(/\/api\/drafts\/[^/]+\/attachments(?:\/[^/?]+)?(?:\?.*)?$/, async route => {
-    const req = route.request(), u = new URL(req.url());
+    const req = route.request(), u = new URL(req.url()); network.push({event:'attachment-route', method:req.method(), path:u.pathname});
     if (req.method() === 'PUT') {
       if (hold) { hold = false; held = true; await gate; }
       if (failNames.has(u.searchParams.get('name'))) return route.fulfill({status: 507, contentType: 'application/json', body: JSON.stringify({ok: false, error: {code: 'storage_failed', message: 'Synthetic storage failure'}})});
@@ -37,13 +37,13 @@ const until = async (fn, label) => { for (let i = 0; i < 120; i++) { if (await f
     return route.continue();
   });
   await ctx.route(/\/api\/unified\/people\/[^/]+\/send$/, async route => { sends.push(route.request().postDataJSON()); await pause(200); return route.continue(); });
-  const page = await ctx.newPage(); page.on('pageerror', e => errors.push(e.message));
+  const page = await ctx.newPage(); page.on('pageerror', e => errors.push(safeText(e.message))); page.on('console', m => consoleMessages.push({type:m.type(), text:safeText(m.text())})); page.on('request', r => network.push({event:'request',method:r.method(),path:safeURL(r.url())})); page.on('response', r => network.push({event:'response',method:r.request().method(),path:safeURL(r.url()),status:r.status()})); page.on('requestfailed', r => network.push({event:'requestfailed',method:r.method(),path:safeURL(r.url()),error:safeText(r.failure()?.errorText)}));
   try {
     await page.goto(st.origin + '/hosted-draft-qa');
     const frame = page.frameLocator('iframe');
     await frame.locator('.u-person', {hasText: 'Alice Example'}).first().click();
     const field = frame.locator('textarea[aria-label="Message"]'), input = frame.locator('.u-compose-row input[type=file]');
-    await field.waitFor(); await page.waitForTimeout(1200); await field.fill('Synthetic three-photo caption');
+    await field.waitFor(); await frame.locator('html').evaluate(async () => { if (typeof window.WizardApp?.attachChip?.node !== 'function') throw Error('Synthetic shell dependency lacks WizardApp.attachChip.node'); if (!await window.WizardApp.attachChip.ready()) throw Error('Synthetic shared attachment module failed to load'); }); await page.waitForTimeout(1200); await field.fill('Synthetic three-photo caption');
     const bytes = await page.evaluate(async () => { const c = document.createElement('canvas'); c.width = 80; c.height = 60; const x = c.getContext('2d'); x.fillStyle = '#4875a8'; x.fillRect(0,0,80,60); return Array.from(new Uint8Array(await (await new Promise(r => c.toBlob(r, 'image/png'))).arrayBuffer())); });
     const photo = n => ({name: 'synthetic-' + n + '.png', mimeType: 'image/png', buffer: Buffer.from(bytes)});
     await input.setInputFiles(photo(1)); await until(() => held, 'first PUT held');
@@ -99,6 +99,12 @@ const until = async (fn, label) => { for (let i = 0; i < 120; i++) { if (await f
     assert.deepEqual(errors, []);
     fs.writeFileSync(path.join(evidence, 'browser-receipt.json'), JSON.stringify({pass: true, syntheticOnly: true, hostedProxy: true, checks, sends, pageErrors: errors}, null, 2));
     console.log(JSON.stringify({pass: true, checks: checks.length, syntheticSends: sends.length, pageErrors: errors}));
-  } catch (e) { await page.screenshot({path: path.join(evidence, 'failure.png')}).catch(() => {}); throw e; }
+  } catch (e) {
+    const receipt = {pass:false,syntheticOnly:true,error:safeText(e.message),pageErrors:errors,console:consoleMessages,network,held,checks,frames:[]};
+    // Persist network evidence even if a frame/DOM read or screenshot itself fails.
+    const save = () => fs.writeFileSync(path.join(evidence,'failure-diagnostic.json'),JSON.stringify(receipt,null,2)); save();
+    for (const f of page.frames()) { try { receipt.frames.push(await Promise.race([f.evaluate(() => ({path:location.pathname,fixture:document.querySelector('iframe')?.title || document.querySelector('.u-person-name')?.textContent || null,appVersion:window.WizardApp?.version,attachChipNode:typeof window.WizardApp?.attachChip?.node,sharedChip:!!window.WizAttachChip,composer:!!window.WizardApp?.composer,inputs:[...document.querySelectorAll('input[type=file]')].map(i=>({connected:i.isConnected,files:i.files.length})),caption:document.querySelector('textarea[aria-label="Message"]')?.value,chips:document.querySelectorAll('.ch-att').length,errors:[...document.querySelectorAll('.u-draft-note,.error,#error')].map(n=>n.textContent)})),pause(1500).then(()=>({error:'DOM diagnostic deadline'}))])); } catch(x) { receipt.frames.push({error:safeText(x.message)}); } save(); }
+    await page.screenshot({path: path.join(evidence, 'failure.png')}).catch(() => {}); throw e;
+  }
   finally { release(); await browser.close(); }
 })().catch(e => { console.error(e); process.exitCode = 1; });
