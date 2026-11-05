@@ -14,7 +14,8 @@ async function fixture(saved = []) {
   let row = saved === null ? null : {id: 'synthetic-draft', person_id: 'alice', identity_id: 'signal-alice', revision: 1, text: 'Keep this caption', state: 'draft', attachments: saved};
   let next = 0, writes = 0, failPut = new Set(), failGet = new Set(), holdPut = null, holdGet = null, failDelete = false;
   const counts = {puts: 0, deletes: 0, sends: 0}, errors = [];
-  const view = {id: 'alice', attach: null}, ui = {draft: {value: '', focus() {}}, channel: {value: 'signal-alice', options: [{value: 'signal-alice'}]}, grow() {}, paintBar() {}, paintVia() {}};
+  const s = {person: 'alice', drafts: {}, draftIndex: {}, bindDraft: null};
+  const view = {id: 'alice', attach: null}, ui = {form: {isConnected: true}, draft: {value: '', focus() {}}, channel: {value: 'signal-alice', options: [{value: 'signal-alice'}]}, grow() {}, paintBar() {}, paintVia() {}};
   const bad = (code) => Object.assign(new Error(code), {code});
   async function api(url, options = {}) {
     const body = options.body || {}, method = options.method || 'GET';
@@ -42,7 +43,7 @@ async function fixture(saved = []) {
     row.attachments.push({id: 'file-' + (++next), name: q.name, mime: blob.type, bytes: blob.size}); row.revision++;
     return {draft: copy(row)};
   }
-  const context = vm.createContext({view, ui, Blob, File: class extends Blob { constructor(b, name, o) { super(b, o); this.name = name; } },
+  const context = vm.createContext({view, ui, s, saveDrafts() {}, draftsFor: (rows, id) => rows.filter(d => d.person_id === id), Blob, File: class extends Blob { constructor(b, name, o) { super(b, o); this.name = name; } },
     URL: {createObjectURL: () => 'blob:synthetic', revokeObjectURL() {}},
     uid: () => String(++next), api, draftRaw, csrf: () => 'synthetic', error: e => errors.push(e.message),
     fetch: async url => { const id = url.split('/').pop(); if (holdGet) { const gate = holdGet; holdGet = null; await gate.promise; }
@@ -61,7 +62,7 @@ async function fixture(saved = []) {
   return {sd: context.sd, ui, view, item, counts, errors, row: () => copy(row), failPut, failGet,
     holdPut() { return holdPut = defer(); }, holdGet() { return holdGet = defer(); },
     failDelete(v) { failDelete = v; }, remoteAttachments(a) { row.attachments = a; row.revision++; },
-    replaceView() { view.id = 'bob'; view.sd = {}; view.attach = [item('bob-only')]; },
+    replaceView() { s.person = 'bob'; ui.form.isConnected = false; view.id = 'bob'; view.sd = {}; view.attach = [item('bob-only')]; },
     async select(...items) { view.attach = [...(view.attach || []), ...items]; await context.sd.attach(items); },
     async remove(it) { view.attach = (view.attach || []).filter(a => a !== it); await context.sd.detach(it); },
   };
@@ -71,7 +72,7 @@ test('two overlapping selections use successive revisions, not a sticky false er
   const f = await fixture(), first = f.item('one.pdf'), second = f.item('two.pdf'), gate = f.holdPut();
   const a = f.select(first); await tick(); const b = f.select(second); await tick(); gate.resolve();
   await Promise.all([a, b]);
-  assert.equal(f.row().attachments.length, 2); assert.equal(f.sd.uploadError, false); assert.deepEqual(f.errors, []);
+  assert.equal(f.row().attachments.length, 2, 'REGRESSION_OVERLAPPING_ATTACHMENT_BATCH_LOST'); assert.equal(f.sd.uploadError, false); assert.deepEqual(f.errors, []);
 });
 test('overlapping selections in an empty composer create only one draft', async () => {
   const f = await fixture(null), gate = f.holdPut(), a = f.select(f.item('one.pdf')); await tick();
