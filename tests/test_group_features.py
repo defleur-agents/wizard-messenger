@@ -60,7 +60,21 @@ class GroupFeatures(unittest.TestCase):
     def test_direct_message_and_unverified_network_do_not_claim_mentions(self):
         self.assertEqual(self.store.members(dict(self.identity,kind='person')), [])
         for net in ('line','instagram','facebook','twitter','linkedin','gmessages','dots','messenger'):
-            self.assertEqual(self.store.members(dict(self.identity,network=net)), [])
+            members = self.store.members(dict(self.identity,network=net))
+            self.assertTrue(members, net + ' still offers name autocomplete')
+            self.assertTrue(all(m['native'] is False for m in members))
+            self.assertEqual(find_mentions('Hi @Alice Example!', members), [])
+            self.assertEqual(mention_content('Hi @Alice Example!', find_mentions('Hi @Alice Example!', members)), {})
+
+    def test_non_native_send_is_plain_text_even_with_forged_mention_payload(self):
+        with self.store.db() as db:
+            db.execute("UPDATE identity SET network='line' WHERE id=?", (self.identity['id'],))
+        result = self.inbox.send(self.pid, {'text':'Hi @Alice Example!', 'client_id':'plain-synthetic-send', 'mentions':[{'id':ALICE}]})
+        content = self.inbox.mx.call_args.args[2]
+        self.assertNotIn('m.mentions', content)
+        self.assertNotIn('formatted_body', content)
+        self.assertEqual(result['message']['mentions'], [])
+        self.assertEqual(result['message']['original'], 'Hi @Alice Example!')
 
     def test_unicode_offsets_boundaries_longest_names_and_escaped_html(self):
         members = member_labels([{'id':ALICE,'name':'A & B'}, {'id':BOB,'name':'A'}])

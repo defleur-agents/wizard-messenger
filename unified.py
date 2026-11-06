@@ -624,7 +624,7 @@ class PeopleStore:
         return None
 
     def members(self, identity):
-        if identity['kind'] != 'group' or identity['network'] not in MENTION_NETWORKS:
+        if identity['kind'] != 'group':
             return []
         with self.db() as db:
             row = db.execute('SELECT json FROM room_meta WHERE room=?', (identity['address'],)).fetchone()
@@ -632,7 +632,8 @@ class PeopleStore:
         names = meta.get('names') or {}
         joined = meta.get('joined') or []
         return member_labels([{'id': ident, 'name': plain_name(identity['network'], name),
-                               'avatar': picture_tag((meta.get('avatars') or {}).get(ident)), 'identity_id': identity['id']}
+                               'avatar': picture_tag((meta.get('avatars') or {}).get(ident)), 'identity_id': identity['id'],
+                               'native': identity['network'] in MENTION_NETWORKS}
                               for ident, name in names.items() if ident in joined and isinstance(name, str) and name.strip()
                               and MXID.fullmatch(ident) and ident != '@' + identity['network'] + 'bot:messenger.internal'])
 

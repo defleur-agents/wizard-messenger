@@ -21,6 +21,8 @@ commands = [
     [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_group_features.py', '-v'],
     [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_unified.py', '-q'],
     ['node', '--test', 'tests/group_features.test.cjs', 'tests/reactions.test.cjs', 'tests/test_unified_view.cjs', 'tests/test_draft_attachment_recovery.cjs'],
+    [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_connector_history.py', '-v'],
+    ['node', '--test', 'tests/group_features_fixture_boot.cjs'],
     ['node', '--check', 'tests/group_features_browser.cjs'],
     ['node', 'tests/group_features_browser.cjs', str(OUT / 'browser')],
 ]
@@ -42,5 +44,5 @@ files = subprocess.check_output(['git','ls-files'],cwd=ROOT,text=True).splitline
 manifest = {p:hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in files if (ROOT / p).is_file()}
 (OUT / 'source-sha256.json').write_text(json.dumps(manifest,indent=2))
 revision = subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
-(OUT / 'receipt.json').write_text(json.dumps({'source':revision,'version':'0.2.0-unified.15.15','tipi_version':56,'source_archive':str(archive),'archive_sha256':hashlib.sha256(archive.read_bytes()).hexdigest(),'synthetic_only':True,'provider_round_trip':False,'image_built':False,'installed':False,'visual_review_required':True},indent=2))
+(OUT / 'receipt.json').write_text(json.dumps({'source':revision,'version':'0.2.0-unified.15.16','tipi_version':58,'source_archive':str(archive),'archive_sha256':hashlib.sha256(archive.read_bytes()).hexdigest(),'synthetic_only':True,'provider_round_trip':False,'image_built':False,'installed':False,'visual_review_required':True},indent=2))
 (OUT / 'PASS').write_text('Synthetic feature checks passed. Screenshots require inspection; image/candidate publication, LINE acceptance, parity and activation are parent gates.\n')
