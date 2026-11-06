@@ -84,16 +84,17 @@ class ConnectorTests(unittest.TestCase):
         secret_path = self.root / 'unified' / 'connector-secrets.json'
         before = config_path.read_bytes()
         original = secret_path.read_bytes()
-        secrets = json.loads(original)
+        # Inject invalid synthetic configuration in memory; never rewrite credentials.
+        read_text = Path.read_text
         for invalid in (None, '', 'too-short', 123):
-            secrets['line']['provisioning'] = invalid
-            secret_path.write_text(json.dumps(secrets))
-            with self.subTest(invalid=invalid), self.assertRaises(EngineError) as error:
+            fixture = json.dumps({'line': {'provisioning': invalid}})
+            def fixture_read(path, *args, **kwargs):
+                return fixture if path == secret_path else read_text(path, *args, **kwargs)
+            with patch.object(Path, 'read_text', fixture_read), self.subTest(invalid=invalid), self.assertRaises(EngineError) as error:
                 controller.dispatch('POST', ['line', 'enable'], {})
             self.assertEqual(error.exception.code, 'connector_not_configured')
             self.assertEqual(config_path.read_bytes(), before)
             self.assertFalse((self.root / 'line' / 'configured').exists())
-        secret_path.write_bytes(original)
         self.assertEqual(controller.dispatch('POST', ['line', 'enable'], {}), {'enabled': True, 'network': 'line'})
         self.assertTrue((self.root / 'line' / 'configured').exists())
         self.assertFalse((self.root / 'signal' / 'configured').exists())
