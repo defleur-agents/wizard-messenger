@@ -316,7 +316,7 @@ def focused_reconciliation(src):
     run([os.environ['NODE'],str(src/'tests/account_setup_browser.cjs'),str(OUT/'account-setup')],cwd=src,env=env,timeout=300)
     cases.append({'case':'account_setup_browser.cjs','pass':True,'scope':'synthetic hosted proxy, separate from canonical-shell acceptance'})
     R['reconciliation_pass']=True
-    save('reconciliation-source.json',{'pass':True,'source':I['source'],'historical_source':I['approved_source'],'cases':cases,'untouched_closure':json.loads((CAP/'reconciliation.json').read_text())['accepted_closure'],'current_source_browser_aggregate_not_inherited':True})
+    save('reconciliation-source.json',{'pass':True,'source':I['source'],'historical_source':I['historical_source'],'cases':cases,'untouched_closure':json.loads((CAP/'reconciliation.json').read_text())['accepted_closure'],'current_source_browser_aggregate_not_inherited':True})
 
 def canonical(static):
     shell=WORK/'work'/'shell';assert shell.is_dir();catalogue=ROOT/'capsule/canonical_shell_origin.cjs'

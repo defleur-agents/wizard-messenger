@@ -42,3 +42,14 @@ def test_phase_budget_preserves_reserve_and_foreign_allowance(tmp_path,free,grow
         if passes:assert g.resource_sample(tmp_path,'phase',plan,initial)['remaining_budget_bytes']==300-growth
         else:
             with pytest.raises(RuntimeError,match='resource fence'):g.resource_sample(tmp_path,'phase',plan,initial)
+
+
+def test_promotion_keeps_native_converter_and_protected_app_review_gates():
+    import runpy
+    eligible=runpy.run_path(str(Path(__file__).with_name('guarded_promotion.py')))['eligibility']
+    flags=['packaging_pass','canonical_pass','lifecycle_pass','absence_pass','independently_reviewed','screenshots_visually_reviewed','current_live_parity_pass','no_waivers','durable_archive_readback_verified','reconciliation_pass','signal_override_preservation_reviewed','no_auth_policy_change','candidate_mount_free_retention_verified','baseline_retention_verified','converter_ingress_native_pass','protected_app_mapping_reviewed']
+    inputs={'source':'synthetic-exact-source','promotion_blocked_by_live_source_drift':False}
+    accepted={k:True for k in flags};accepted.update(source=inputs['source'],durable_archive_uri='r2:synthetic-only/fixture')
+    assert eligible(inputs,accepted)
+    for flag in ['converter_ingress_native_pass','protected_app_mapping_reviewed']:
+        with pytest.raises(AssertionError):eligible(inputs,{**accepted,flag:False})
