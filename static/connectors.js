@@ -545,6 +545,47 @@
         } finally { payload.api_hash = ''; save.disabled = false; }
       };
     }
+    // LINE stays under Accounts → Add. Waking its preinstalled bridge is separate from
+    // owner sign-in: setup never starts a login or handles any account credentials.
+    async function setupLine(provider) {
+      const mine = generation + 1;
+      const cancelled = cancel(); selectedProvider = provider; detailOpen = false;
+      root.replaceChildren(heading('line', 'Set up LINE'), element('p', 'helper', 'Starting the private LINE connection… This can take up to a minute.'));
+      button(root, 'Back to accounts', () => show(), 'c-link c-back');
+      let timer;
+      const current = () => mine === generation && selectedProvider === provider;
+      // This bounds the entire setup, including a slow or stalled enable/status request.
+      const timeout = new Promise((_, reject) => { timer = global.setTimeout(() => reject(new Error('setup_timeout')), 60000); });
+      try {
+        const ready = async () => {
+          await cancelled; if (!current()) return null;
+          if (provider.state === 'not_configured') await request('line', 'enable', {});
+          for (let attempt = 0; attempt < 60 && current(); attempt++) {
+            const status = await request('line', 'status');
+            if (!current()) return null;
+            Object.assign(provider, status);
+            if (!['not_configured', 'unavailable'].includes(status.state)) {
+              if (!(status.flows || []).length && status.state !== 'connected') throw new Error('missing_login_flows');
+              return provider;
+            }
+            await new Promise(resolve => global.setTimeout(resolve, 1000));
+          }
+          throw new Error('setup_timeout');
+        };
+        const status = await Promise.race([ready(), timeout]);
+        if (!current() || !status) return;
+        selectProvider(provider);
+      } catch (e) {
+        if (!current()) return;
+        // Invalidate late status results before offering a retry; never present stale readiness.
+        ++generation;
+        root.replaceChildren(heading('line', 'LINE setup needs attention'));
+        const incomplete = e.code === 'connector_not_configured' || e.message === 'missing_login_flows';
+        problem(new Error(incomplete ? 'The LINE installation on this Wizard is incomplete. It needs repair before you can sign in.' : 'The private LINE connection did not become ready. Retry setup. If it still fails, the LINE service on this Wizard needs repair.'));
+        button(root, 'Retry LINE setup', () => setupLine(provider), 'primary wide');
+        button(root, 'Back to accounts', () => show(), 'c-link c-back');
+      } finally { global.clearTimeout?.(timer); }
+    }
     function card(provider) {
       const [stateText, tone] = STATE[provider.state] || [provider.state, 'off'];
       const section = element('section', 'c-card ' + tone); section.dataset.network = provider.network;
@@ -553,6 +594,11 @@
       top.append(text); section.append(top);
       const flows = provider.flows || [];
       if (ABOUT[provider.network] && flows.length) section.append(element('p', 'helper', ABOUT[provider.network]));
+      if (provider.network === 'line' && ['not_configured', 'unavailable'].includes(provider.state)) {
+        section.append(element('p', 'helper', 'Set up the private LINE connection first. Then choose a QR code or email sign-in. Only you enter your LINE sign-in details.'));
+        button(section, provider.state === 'not_configured' ? 'Set up LINE' : 'Retry LINE setup', () => setupLine(provider), 'primary wide');
+        return section;
+      }
       if (provider.state === 'not_configured' && provider.network === 'telegram') {
         section.append(element('p', 'helper', 'Add Telegram application keys once, then scan a QR code with your phone.'));
         button(section, 'Set up Telegram', setupTelegram, 'primary wide');
@@ -666,7 +712,7 @@
         for (const p of addable.sort((a, b) => a.label.localeCompare(b.label))) {
           const t = tile(p, 'add');
           t.onclick = async () => {
-            if (p.state !== 'not_configured') { selectProvider(p); return; }
+            if (p.network === 'line' || p.state !== 'not_configured') { selectProvider(p); return; }
             if (t.disabled) return; t.disabled = true; t.classList.add('busy');
             const name = t.querySelector('.c-tile-name'); if (name) name.textContent = 'Starting ' + p.label + '…';
             const mine = generation;

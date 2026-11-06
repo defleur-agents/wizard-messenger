@@ -77,6 +77,31 @@ class ConnectorTests(unittest.TestCase):
         with self.assertRaises(EngineError): read_only.dispatch('POST', ['whatsapp', 'enable'], {})
         self.assertFalse((self.root / 'whatsapp' / 'configured').exists())
 
+    def test_line_enable_validates_private_prerequisites_before_waking(self):
+        setup_connectors(self.root)
+        controller = Connectors(self.root / 'unified', reader=self.reader, writer=Mock())
+        config_path = self.root / 'unified' / 'connectors.json'
+        secret_path = self.root / 'unified' / 'connector-secrets.json'
+        before = config_path.read_bytes()
+        original = secret_path.read_bytes()
+        secrets = json.loads(original)
+        for invalid in (None, '', 'too-short', 123):
+            secrets['line']['provisioning'] = invalid
+            secret_path.write_text(json.dumps(secrets))
+            with self.subTest(invalid=invalid), self.assertRaises(EngineError) as error:
+                controller.dispatch('POST', ['line', 'enable'], {})
+            self.assertEqual(error.exception.code, 'connector_not_configured')
+            self.assertEqual(config_path.read_bytes(), before)
+            self.assertFalse((self.root / 'line' / 'configured').exists())
+        secret_path.write_bytes(original)
+        self.assertEqual(controller.dispatch('POST', ['line', 'enable'], {}), {'enabled': True, 'network': 'line'})
+        self.assertTrue((self.root / 'line' / 'configured').exists())
+        self.assertFalse((self.root / 'signal' / 'configured').exists())
+        self.assertEqual(secret_path.read_bytes(), original)
+        self.reader.assert_not_called()
+        self.assertIsNotNone(controller.writer)
+        controller.writer.assert_not_called()  # enable cannot perform account login or send
+
     def test_cookie_step_is_sanitized_for_paste_sign_in(self):
         from connectors import cookie_step
         out = cookie_step({'url': 'https://x.com/i/flow/login', 'extract_js': 'steal()', 'wait_for_url_pattern': '.*',

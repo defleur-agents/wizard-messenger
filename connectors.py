@@ -349,10 +349,14 @@ class Connectors:
                 folder = self.root.parent / network
                 if not (folder / 'config.yaml').is_file() or network not in configs:
                     raise ValueError()
+                if network == 'line':
+                    token = json.loads((self.root / 'connector-secrets.json').read_text())[network]['provisioning']
+                    if not isinstance(token, str) or len(token) < 16 or not configs[network].get('url'):
+                        raise ValueError()
                 configs[network]['enabled'] = True
                 write(path, configs)
                 (folder / 'configured').touch(mode=0o600)
-            except (OSError, ValueError):
+            except (OSError, ValueError, KeyError, TypeError):
                 fail('connector_not_configured', 'Bridge installation is incomplete', 409)
         return {'enabled': True, 'network': network}
 

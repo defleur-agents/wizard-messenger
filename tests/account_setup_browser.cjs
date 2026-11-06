@@ -4,13 +4,24 @@
 const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
 const staticDir = path.resolve(__dirname, '../static'), shellDir = process.env.SHELL_DIR;
+const lineOnly = process.env.LINE_SETUP_ONLY === '1';
+const fixtureSkins = lineOnly ? ['nebula', 'signal'] : ['nebula', 'sepia'];
+let lineHost;
+if(lineOnly) {
+  // Reuse the current shared Appearance host contract from draft_attachment_recovery_browser.
+  const vm=require('node:vm'),src=fs.readFileSync(path.join(shellDir,'core/skins.js'),'utf8');
+  const table=src.slice(src.indexOf('  const SKINS = ['),src.indexOf('  // Each skin'));
+  const palettes=vm.runInNewContext('const T=o=>o;'+table+';SKINS').filter(s=>fixtureSkins.includes(s.id)).map(s=>({id:s.id,t:s.t}));
+  assert.equal(palettes.length,2);
+  lineHost=`<!doctype html><html data-skin="nebula"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><script>window.WizCore={apps:()=>({APPS:[{url:'/app/'}]})};window.setFixtureSkin=id=>{const s=${JSON.stringify(palettes)}.find(s=>s.id===id);for(const[k,v]of Object.entries(s.t))document.documentElement.style.setProperty('--'+k,v);document.documentElement.dataset.skin=id;window.WizAppearance?.sync()};setFixtureSkin('nebula')</script><script src="/wizard-os-home/core/appearance-host.js" defer></script><style>html,body{margin:0;height:100%;background:var(--bg)}nav{height:36px;display:flex}nav button{flex:1}iframe{border:0;display:block;width:100%;height:calc(100vh - 36px)}</style></head><body><nav><button onclick="setFixtureSkin('nebula')">Nebula</button><button onclick="setFixtureSkin('signal')">Signal</button></nav><div class="st-embed win"><iframe src="/app/" title="Synthetic LINE setup"></iframe></div></body></html>`;
+}
 const out = path.resolve(process.argv[2] || 'account-setup-evidence'); fs.mkdirSync(out, {recursive:true});
 const L = require('../static/app.js');
 const types = {'.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.html':'text/html'};
 const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><link rel="stylesheet" data-skin-pkg href="/wizard-os-home/skins/sepia/skin.css"><script>window.WizCore={apps:()=>({APPS:[{url:'/app/'}]})};</script><script src="/wizard-os-home/core/skins.js"></script><script src="/wizard-os-home/core/appearance-host.js"></script><style>html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:14px system-ui}nav{height:32px}.win{position:absolute;inset:32px 0 0;background:var(--sk-win)}iframe{width:100%;height:100%;border:0}button{cursor:pointer}</style></head><body><nav>Hosted synthetic proxy <button onclick="WosSkin.set('nebula')">Nebula</button><button onclick="WosSkin.set('sepia')">Sepia</button></nav><section class="win"><iframe src="/app/"></iframe></section></body></html>`;
 (async()=>{
   assert(shellDir, 'SHELL_DIR required: real pinned shell source, not invented palette tokens');
-  const browser = await chromium.launch({headless:true,args:['--no-sandbox']});
+  const browser = await chromium.launch({headless:true,args:['--no-sandbox'],executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE});
   const maker = await browser.newPage();
   const frame = await maker.evaluate(()=>{const c=document.createElement('canvas');c.width=1280;c.height=1000;const x=c.getContext('2d');x.fillStyle='#e8edf4';x.fillRect(0,0,1280,1000);x.strokeStyle='#93a3ba';for(let i=0;i<1280;i+=80){x.beginPath();x.moveTo(i,0);x.lineTo(i,1000);x.stroke();}for(let i=0;i<1000;i+=80){x.beginPath();x.moveTo(0,i);x.lineTo(1280,i);x.stroke();}x.fillStyle='#182738';x.font='bold 48px sans-serif';x.fillText('SYNTHETIC PAGE — no account',35,110);for(const [a,b,t]of[[0,0,'TL'],[1160,0,'TR'],[0,900,'BL'],[1160,900,'BR']]){x.fillStyle='#197c59';x.fillRect(a,b,120,100);x.fillStyle='white';x.fillText(t,a+18,b+65);}return c.toDataURL('image/png').split(',')[1];}); await maker.close();
   const summary=[];
@@ -20,6 +31,8 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
     page.on('pageerror',e=>errors.push(e.message));
     const prov=(network,label,state,flows=[])=>({network,label,state,flows,supported:true,logins:state==='connected'?[{id:'fixture',name:'Fixture account'}]:[]});
     const providers=[prov('telegram','Telegram','connected'),prov('slack','Slack','disconnected',[{id:'cookies',name:'Browser'}]),prov('instagram','Instagram DMs','disconnected',[{id:'android',name:'Native'}]),prov('twitter','X','not_configured')];
+    let releaseEnable, statusReads=0, enableCount=0;
+    if(lineOnly) providers.push(prov('line','LINE','not_configured'));
     let seq=0, id=0, releaseFrameCapture=null, holdFrames=false;
     let frameCaptureGate=Promise.resolve();
     await page.route('**/*',async route=>{
@@ -27,7 +40,7 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
       if(u.origin!=='https://messenger.test'){forbidden.push(u.origin);return route.abort();}
       const p=u.pathname, api=p.replace(/^\/app\//,'/');
       const ok=result=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,result})});
-      if(p==='/host')return route.fulfill({contentType:'text/html',body:host});
+      if(p==='/host')return route.fulfill({contentType:'text/html',body:lineOnly?lineHost:host});
       if(p.startsWith('/wizard-os-home/')){const file=path.join(shellDir,p.slice(16));return fs.existsSync(file)&&fs.statSync(file).isFile()?route.fulfill({contentType:types[path.extname(file)]||'application/octet-stream',body:fs.readFileSync(file)}):route.fulfill({status:404,body:''});}
       if(api==='/api/view/session')return ok({authenticated:true,csrf_token:'synthetic'});
       if(api==='/api/status')return ok({state:'ready',account_configured:true});
@@ -37,6 +50,12 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
       if(api==='/api/unified/people')return ok({people:[{id:'a',display_name:'Synthetic chat',identities:[{id:'i',network:'telegram',kind:'person'}],labels:[],unread:0,last:{text:'Fixture',timestamp:Date.now(),outgoing:false}}],seq:5});
       if(api==='/api/unified/groups')return ok({groups:[],seq:5});
       if(api==='/api/unified/connectors')return ok({providers});
+      if(lineOnly && api==='/api/unified/connectors/line/enable') { enableCount++; await new Promise(resolve=>releaseEnable=resolve); return ok({enabled:true,network:'line'}); }
+      if(lineOnly && api==='/api/unified/connectors/line/status') {
+        const p=providers.find(p=>p.network==='line');
+        Object.assign(p,++statusReads===1 ? {state:'unavailable',flows:[]} : {state:'disconnected',flows:[{id:'dev.highest.matrix.line.qr_login'},{id:'dev.highest.matrix.line.email_login'}]}); return ok(p);
+      }
+      if(lineOnly && /\/line\/(start|step|disconnect)$/.test(api)) { forbidden.push(api); return route.abort(); }
       if(api==='/api/unified/connectors/browser/start'){starts.push(JSON.parse(req.postData()));return ok({id:'synthetic-'+(++id)});}
       if(/\/browser\/[^/]+\/frame$/.test(api)){await new Promise(r=>setTimeout(r,120));if(holdFrames)await frameCaptureGate;return ok({seq:++seq,frame,state:'signing_in',host:'synthetic.invalid'});}
       if(/\/browser\/[^/]+\/input$/.test(api)){inputs.push(JSON.parse(req.postData()));return ok({});}
@@ -58,7 +77,45 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
     assert.equal(await f.locator('.c-card').count(),0,'Settings contains NO automatic disconnected setup cards');
     assert.equal(await f.locator('.c-viewer').count(),0);
     await f.locator('.c-plus').click();
-    assert.deepEqual(await f.locator('.c-add').evaluateAll(es=>es.map(e=>e.dataset.network).sort()),['instagram','slack','twitter']);
+    assert.deepEqual(await f.locator('.c-add').evaluateAll(es=>es.map(e=>e.dataset.network).sort()),lineOnly?['instagram','line','slack','twitter']:['instagram','slack','twitter']);
+    if(lineOnly) {
+      await f.locator('.c-add[data-network=line]').click();
+      assert.equal(await f.locator('.c-card .c-pill').innerText(),'Needs one-time setup');
+      assert(await f.getByRole('button',{name:'Set up LINE',exact:true}).isVisible());
+      assert.equal(enableCount,0,'opening LINE must be owner-controlled, never enable itself');
+      const documentId=await f.evaluate(()=>window.__lineDocument=crypto.randomUUID()),paints=[];
+      const captures=async state=>{
+        for(const skin of fixtureSkins) {
+          await page.getByRole('button',{name:skin==='nebula'?'Nebula':'Signal',exact:true}).click();
+          await f.waitForFunction(s=>document.documentElement.dataset.skin===s,skin); await page.waitForTimeout(350);
+          assert.equal(await f.evaluate(()=>window.__lineDocument),documentId);
+          assert.equal(await f.locator('.u-sheet').evaluate(e=>e.scrollWidth>e.clientWidth+1),false);
+          const paint=await f.locator('.u-sheet').evaluate(e=>({bg:getComputedStyle(e).backgroundColor,ink:getComputedStyle(e).color}));paints.push({state,skin,...paint});
+          await page.screenshot({path:path.join(out,`${profile.name}-${skin}-line-${state}.png`)});
+        }
+      };
+      await captures('actionable');
+      await f.getByRole('button',{name:'Set up LINE',exact:true}).click();
+      await f.getByText('Starting the private LINE connection… This can take up to a minute.',{exact:true}).waitFor();
+      assert.equal(statusReads,0,'pending is painted while enable I/O is held');
+      assert.equal(await f.getByRole('button',{name:'Set up LINE',exact:true}).count(),0,'double setup is impossible');
+      assert.equal(enableCount,1); releaseEnable();
+      await f.getByRole('button',{name:/Sign in with email & password for LINE/}).waitFor();
+      assert(await f.getByRole('button',{name:/QR code.*for LINE/}).isVisible());
+      assert.equal(statusReads,2); await captures('ready');
+      assert.notEqual(paints[0].bg,paints[1].bg);
+      assert.equal(starts.length,0); assert.deepEqual(forbidden,[]); assert.deepEqual(errors,[]);
+      await f.getByRole('button',{name:'Back to accounts',exact:true}).click();
+      await f.locator('.c-add[data-network=line]').waitFor();
+      assert.deepEqual(errors,[]);
+      await page.goto('https://messenger.test/app/');
+      await page.locator('.u-person').first().waitFor(); await page.locator('.u-settings-btn').click();
+      await page.locator('.c-plus').click(); await page.locator('.c-add[data-network=line]').click();
+      assert.equal(await page.locator('html').evaluate(e=>e.classList.contains('wz-hosted')),false);
+      await page.screenshot({path:path.join(out,`${profile.name}-line-standalone-dark.png`)});
+      summary.push({profile:profile.name,status:'PASS',coverage:'synthetic hosted LINE setup only; no provider sign-in',paints,enableCount,statusReads});
+      await ctx.close(); continue;
+    }
     assert.equal(starts.length,0,'rendering settings/add cannot start a browser');
     await f.locator('.c-add[data-network=instagram]').click();
     assert.equal(await f.locator('.c-card').count(),1,'only selected Instagram opens');
