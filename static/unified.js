@@ -1332,15 +1332,19 @@
     if (split.on && s.native) native?.close?.(); // the native Wizard thread on the right gives way
     const fromList = !split.on && !s.person ? $('unified-inbox')?.querySelector(':scope > .u-list') : null;
     if (fromList) split.listTop = fromList.scrollTop;
+    // Where to start reading: taken before anything can mark the chat read, kept until the owner leaves the chat.
+    // Reopening the chat that is already on screen (wake, reset, rename) keeps the divider it had.
+    const again = s.person === id && view.id === id && view.unread?.settled ? view.unread : null;
     s.person = id; const epoch = ++s.epoch, gen = ++split.threadGen; inChat(true); els.clear(); view.reply = view.edit = view.attach = null;
     if (split.on) { if (!hasListPane()) renderList(); markSelected(); }
     const cached = store.threads[id];
+    view.unread = again ? {...again, parked: true} : unreadSnapshot(id, hint, cached);
     buildThread(id, cached?.person || hint || {display_name: '', identities: []});
     if (fromList) slideIn();
     savedOrder = [id, ...savedOrder.filter(x => x !== id)];
-    if (cached) { paintThread(true); if (!cached.stale) { markRead(); persist(); return; } }
+    if (cached) { paintThread(true); if (!cached.stale) { await landUnread(id); persist(); return; } }
     else view.scroll.append(skeleton(6, 'bubbles'));
-    if (!s.ready) return;
+    if (!s.ready) { if (cached) landUnread(id); return; }
     try {
       const r = await call('people/' + id + '?limit=60');
       store.threads[id] = {person: r.person, messages: r.messages.map(m => pendingReactions(id, m)), has_more: r.has_more, next_cursor: r.next_cursor, warning: r.history_warning};
@@ -1349,8 +1353,53 @@
       persist();
       if (split.on ? gen !== split.threadGen || s.person !== id : s.epoch !== epoch) return;
       if (cached) { paintHead(); paintThread(); } else { buildThread(id, r.person); paintThread(true); }
-      markRead();
-    } catch (e) { error(e); }
+      await landUnread(id);
+    } catch (e) { error(e); if (view.id === id && store.threads[id]) landUnread(id); }
+  }
+  // The list row's unread count is the server's own count (incoming, not deleted, newer than each account's read
+  // mark), so it also places the divider right in merged chats. Without a row, fall back on last_read_ts.
+  function unreadSnapshot(id, hint, cached) {
+    const row = store.lists[kindById[id] || 'people']?.find(x => x.id === id) || ['people', 'groups'].map(k => store.lists[k]?.find(x => x.id === id)).find(Boolean);
+    const count = [row?.unread, hint?.unread, unreadById[id]].find(v => typeof v === 'number');
+    const ts = row?.last_read_ts ?? hint?.last_read_ts ?? cached?.person?.last_read_ts;
+    return {count, ts, settled: false, parked: false, from: null, n: 0};
+  }
+  // First unread message: null = nothing unread, undefined = it is older than what is loaded.
+  function firstUnread(t, u) {
+    const incoming = t.messages.filter(m => !m.outgoing && !m.pending && !m.deleted && m.id);
+    const more = t.has_more && t.next_cursor;
+    if (typeof u.count === 'number') {
+      if (u.count <= 0) return null;
+      if (incoming.length >= u.count) return {id: incoming[incoming.length - u.count].id, n: u.count};
+      return more ? undefined : incoming.length ? {id: incoming[0].id, n: u.count} : null;
+    }
+    const ts = u.ts ?? t.person.last_read_ts;
+    if (typeof ts !== 'number') return null;
+    const fresh = incoming.filter(m => m.timestamp > ts);
+    if (!fresh.length) return null;
+    if (fresh.length === incoming.length && more) return undefined;
+    return {id: fresh[0].id, n: fresh.length};
+  }
+  const UNREAD_PAGES = 5; // at most 300 older messages fetched to reach the first unread
+  async function landUnread(id) {
+    const u = view.unread, t = store.threads[id];
+    if (!u || u.settled || view.id !== id || !t) return;
+    let first = firstUnread(t, u);
+    for (let i = 0; first === undefined && i < UNREAD_PAGES; i++) {
+      try { if (!await fetchOlder(t, id, call)) break; } catch { break; }
+      if (view.id !== id || view.unread !== u || store.threads[id] !== t) return;
+      first = firstUnread(t, u);
+    }
+    if (first === undefined) { const top = t.messages.find(m => !m.outgoing && !m.pending && !m.deleted && m.id); first = top ? {id: top.id, n: u.count} : null; }
+    Object.assign(u, {settled: true, from: first?.id || null, n: first?.n || 0});
+    paintThread(true);
+  }
+  function unreadDivider() {
+    const u = view.unread;
+    if (!view.divider) { view.divider = node('p', 'u-unread-divider'); view.divider.setAttribute('role', 'separator'); view.divider.append(node('span')); }
+    view.divider.firstChild.textContent = u.n > 0 ? u.n + (u.n === 1 ? ' new message' : ' new messages') : 'New messages';
+    view.divider.setAttribute('aria-label', view.divider.firstChild.textContent);
+    return view.divider;
   }
   function reviewedOf(p) { return !!p.language && p.language !== 'en'; }
   function subtitle(p) {
@@ -1414,9 +1463,12 @@
     let day = '';
     const side = m => (m.outgoing ? 'o' : 'i' + (m.sender || ''));
     const posts = albumPosts(t.messages);
+    const u = view.unread, from = u?.settled && u.from;
+    let divider = null;
     posts.forEach((m, i) => {
       const label = dayLabel(m.timestamp);
       if (label !== day) { day = label; kids.push(node('p', 'u-day', label)); }
+      if (from && !divider && (m.id === from || m.photos?.some(x => x.id === from))) kids.push(divider = unreadDivider());
       const prev = posts[i - 1], next = posts[i + 1];
       const jp = prev && dayLabel(prev.timestamp) === day && side(prev) === side(m) && m.timestamp - prev.timestamp < 3e5;
       const jn = next && dayLabel(next.timestamp) === day && side(next) === side(m) && next.timestamp - m.timestamp < 3e5;
@@ -1434,11 +1486,23 @@
     const before = scroll.scrollHeight - scroll.scrollTop;
     const same = kids.length === scroll.children.length && kids.every((k, i) => k === scroll.children[i] || (i === 0 && scroll.children[0].className === 'u-spacer') || (k.className === 'u-day' && scroll.children[i].className === 'u-day' && k.textContent === scroll.children[i].textContent) || (k.className === 'u-older' && scroll.children[i].className === 'u-older'));
     if (!same) scroll.replaceChildren(...kids);
-    if (follow) scroll.scrollTop = scroll.scrollHeight;
+    // First paint after the read position is known: park the divider near the top when the unread run is taller
+    // than the window (the sticky day chip sits above it), otherwise show the newest as always.
+    let park = false;
+    if (toBottom && u?.settled && !u.parked) {
+      u.parked = true;
+      if (divider) {
+        const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+        const top = divider.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop - rem * 3;
+        if (scroll.scrollHeight - top > scroll.clientHeight + 2) { scroll.scrollTop = Math.max(0, top); park = true; }
+      }
+    }
+    if (park) { view.bottom = nearBottom(); if (view.pill) view.pill.hidden = view.bottom; }
+    else if (follow) scroll.scrollTop = scroll.scrollHeight;
     else if (view.anchor) { scroll.scrollTop = scroll.scrollHeight - before; }
     view.anchor = false;
     view.selection?.paint();
-    if (follow) markRead();
+    if (follow || park) markRead();
   }
   async function older() {
     const t = store.threads[view.id]; if (!t || !t.has_more || view.loadingOlder) return;
@@ -1450,10 +1514,16 @@
   }
   function markRead() {
     const t = store.threads[view.id]; if (!t || document.hidden || !view.scroll || !nearBottom()) return;
+    if (view.unread && !view.unread.settled) return; // the divider's read position is not known yet
     const last = [...t.messages].reverse().find(m => !m.outgoing && !m.pending);
-    if (!last || last.timestamp <= (t.person.last_read_ts || 0) || view.reading === last.timestamp) return;
-    view.reading = last.timestamp; t.person.last_read_ts = last.timestamp;
-    const row = store.lists[listKey(t.person)]?.find(x => x.id === view.id); if (row) row.unread = 0;
+    const row = store.lists[listKey(t.person)]?.find(x => x.id === view.id);
+    // A merged chat can still count unread on one account below the newest read mark of another.
+    const counted = (row?.unread || unreadById[view.id] || 0) > 0;
+    // The thread's own person record has no read mark; the list row's is the server's.
+    const mark = Math.max(t.person.last_read_ts || 0, row?.last_read_ts || 0);
+    if (!last || (last.timestamp <= mark && !counted) || view.reading === last.timestamp) return;
+    view.reading = last.timestamp; t.person.last_read_ts = Math.max(mark, last.timestamp); if (row) row.last_read_ts = t.person.last_read_ts;
+    if (row) row.unread = 0;
     unreadById[view.id] = 0; syncBadge(); if (split.on && s.tab !== 'messenger') drawList();
     call('people/' + view.id + '/read', {timestamp: last.timestamp}).catch(() => {});
   }
