@@ -10,7 +10,7 @@ from unified import weak_label, MXC
 
 # Cached room_meta written before this version may have dropped a bridged room
 # (protocol.id aliases): re-read room state once for those.
-META_VERSION = 3  # 3: member and room pictures
+META_VERSION = 4  # 4: exact joined-member IDs for identity-safe mention autocomplete
 # Bridged history (bridgev2 backfill on stock Synapse) arrives through /sync with
 # its original timestamps; only recent lines may notify.
 LIVE_WINDOW_MS = 15 * 60 * 1000
@@ -131,6 +131,7 @@ class ConnectorInbox(UnifiedInbox):
             room_type = info.get('com.beeper.room_type.v2') or channel.get('fi.mau.' + network + '.type') or info.get('com.beeper.room_type')
             meta['space'] = any(e['type'] == 'm.room.create' and e.get('content', {}).get('type') == 'm.space' for e in state) or room_type in ('space', 'personal_filtering_space')
             meta['kind'] = 'person' if room_type in ('dm', 'private') or (room_type is None and len(members) == 1) else 'group'
+            meta['joined'] = [e.get('state_key') for e in joined]
             meta['names'] = {e.get('state_key'): (e.get('content') or {}).get('displayname') for e in state if e['type'] == 'm.room.member' and (e.get('content') or {}).get('displayname')}
             if network == 'whatsapp' and isinstance(channel.get('id'), str):
                 meta['channel_id'] = channel['id']  # the portal jid: tells the Status Broadcast chat apart

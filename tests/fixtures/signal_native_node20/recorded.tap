@@ -1,0 +1,429 @@
+TAP version 13
+# Subtest: real handler paints canonical message before HTTP completes
+ok 1 - real handler paints canonical message before HTTP completes
+  ---
+  duration_ms: 3.908336
+  ...
+# Subtest: real handler paints canonical album part before HTTP completes
+ok 2 - real handler paints canonical album part before HTTP completes
+  ---
+  duration_ms: 1.705557
+  ...
+# Subtest: failure restores unchanged counts, including another user on chosen key
+ok 3 - failure restores unchanged counts, including another user on chosen key
+  ---
+  duration_ms: 0.513353
+  ...
+# Subtest: late response stays in originating thread, never paints another thread
+ok 4 - late response stays in originating thread, never paints another thread
+  ---
+  duration_ms: 0.452961
+  ...
+# Subtest: feed cannot erase pending selection; rapid toggles are sent in order
+ok 5 - feed cannot erase pending selection; rapid toggles are sent in order
+  ---
+  duration_ms: 5.277627
+  ...
+# Subtest: signout abandons queued requests and ignores stale completion
+ok 6 - signout abandons queued requests and ignores stale completion
+  ---
+  duration_ms: 0.510859
+  ...
+# Subtest: expanded picker retains old choices and includes exact grinning key once
+ok 7 - expanded picker retains old choices and includes exact grinning key once
+  ---
+  duration_ms: 0.284167
+  ...
+# Subtest: connector settings retain agent controls; disabled connectors preserve Telegram
+not ok 8 - connector settings retain agent controls; disabled connectors preserve Telegram
+  ---
+  duration_ms: 23.521778
+  location: '/srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_agent_permissions_view.cjs:56:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The expression evaluated to a falsy value:
+    
+      assert.ok(f.find('select','Level for Oscar'))
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (/srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_agent_permissions_view.cjs:59:12)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: owner chooses four policies; required remote review has no local Send fallback
+not ok 9 - owner chooses four policies; required remote review has no local Send fallback
+  ---
+  duration_ms: 6.01107
+  location: '/srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_agent_permissions_view.cjs:65:1'
+  failureType: 'testCodeFailure'
+  error: "Cannot read properties of undefined (reading 'children')"
+  code: 'ERR_TEST_FAILURE'
+  name: 'TypeError'
+  stack: |-
+    TestContext.<anonymous> (/srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_agent_permissions_view.cjs:68:27)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: normal mode edits, reviews and requires a separate explicit Send click
+not ok 10 - normal mode edits, reviews and requires a separate explicit Send click
+  ---
+  duration_ms: 3.074908
+  location: '/srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_agent_permissions_view.cjs:81:1'
+  failureType: 'testCodeFailure'
+  error: 'button Review agent drafts'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  operator: '=='
+  stack: |-
+    Object.click (/srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_agent_permissions_view.cjs:52:73)
+    TestContext.<anonymous> (/srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_agent_permissions_view.cjs:83:11)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: normal preview pending cannot expose Send or editable controls
+not ok 11 - normal preview pending cannot expose Send or editable controls
+  ---
+  duration_ms: 2.500422
+  location: '/srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_agent_permissions_view.cjs:102:1'
+  failureType: 'testCodeFailure'
+  error: 'button Review agent drafts'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  operator: '=='
+  stack: |-
+    Object.click (/srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_agent_permissions_view.cjs:52:73)
+    TestContext.<anonymous> (/srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_agent_permissions_view.cjs:104:11)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: secure-review export and edit races execute the shipping UI contract
+ok 12 - secure-review export and edit races execute the shipping UI contract
+  ---
+  duration_ms: 77.116378
+  ...
+# Subtest: owner adds an agent: new key shown once, starts at No access, Draft-and-send needs a confirmation
+not ok 13 - owner adds an agent: new key shown once, starts at No access, Draft-and-send needs a confirmation
+  ---
+  duration_ms: 2.474934
+  location: '/srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_agent_permissions_view.cjs:118:1'
+  failureType: 'testCodeFailure'
+  error: "Cannot set properties of undefined (setting 'value')"
+  code: 'ERR_TEST_FAILURE'
+  name: 'TypeError'
+  stack: |-
+    TestContext.<anonymous> (/srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_agent_permissions_view.cjs:120:61)
+    async Test.run (node:internal/test_runner/test:797:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# connector login runtime: 7 synthetic UI regressions passed
+# Subtest: /srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_connector_login_runtime.cjs
+ok 3 - /srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_connector_login_runtime.cjs
+  ---
+  duration_ms: 101.425458
+  ...
+# connectors UI: QR-first, scan steps, auto-wait, masked secrets, readable address, select, cancel and close passed
+# Subtest: /srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_connectors_view.cjs
+ok 4 - /srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_connectors_view.cjs
+  ---
+  duration_ms: 90.377547
+  ...
+# Subtest: history consumes opaque server cursor, preserves ties, dedupes replay and stops
+ok 16 - history consumes opaque server cursor, preserves ties, dedupes replay and stops
+  ---
+  duration_ms: 2.01999
+  ...
+# Subtest: failed history request does not consume cursor or drop rows
+ok 17 - failed history request does not consume cursor or drop rows
+  ---
+  duration_ms: 0.438805
+  ...
+# Subtest: message search calls authenticated API, pages text results and ignores stale queries
+ok 18 - message search calls authenticated API, pages text results and ignores stale queries
+  ---
+  duration_ms: 24.880241
+  ...
+# Push settings synthetic DOM: explicit gesture, enable/revoke, failure, worker scope conflict, dormant, sibling preservation PASS
+# Subtest: /srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_push_settings_view.cjs
+ok 6 - /srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/test_push_settings_view.cjs
+  ---
+  duration_ms: 86.933012
+  ...
+# Subtest: Unified Back closes overlay, then thread, then delegates guarded root
+ok 20 - Unified Back closes overlay, then thread, then delegates guarded root
+  ---
+  duration_ms: 1.063154
+  ...
+# Subtest: Group nested view has the same Back contract
+ok 21 - Group nested view has the same Back contract
+  ---
+  duration_ms: 0.800255
+  ...
+# Subtest: public npub encoding/decoding round trips exact 32-byte keys
+ok 22 - public npub encoding/decoding round trips exact 32-byte keys
+  ---
+  duration_ms: 3.663431
+  ...
+# Subtest: address input preserves valid tokens and rejects repaired/malformed tokens
+ok 23 - address input preserves valid tokens and rejects repaired/malformed tokens
+  ---
+  duration_ms: 0.547326
+  ...
+# Subtest: nprofile decodes public-key TLV; rejects duplicate/missing/truncated key
+ok 24 - nprofile decodes public-key TLV; rejects duplicate/missing/truncated key
+  ---
+  duration_ms: 1.150376
+  ...
+# Subtest: peer is selected from member public identity, never arbitrary members[0]
+ok 25 - peer is selected from member public identity, never arbitrary members[0]
+  ---
+  duration_ms: 2.281296
+  ...
+# Subtest: copy renders npub, not raw public hex; invalid identity has no invented address
+ok 26 - copy renders npub, not raw public hex; invalid identity has no invented address
+  ---
+  duration_ms: 0.322508
+  ...
+# Subtest: history merges by exact ID, retains older events and sorts equal timestamps by ID
+ok 27 - history merges by exact ID, retains older events and sorts equal timestamps by ID
+  ---
+  duration_ms: 7.280606
+  ...
+# Subtest: message timestamp accepts epoch seconds/ISO and rejects nonfinite data
+ok 28 - message timestamp accepts epoch seconds/ISO and rejects nonfinite data
+  ---
+  duration_ms: 0.411584
+  ...
+# Subtest: scroll follows only within the 48px threshold
+ok 29 - scroll follows only within the 48px threshold
+  ---
+  duration_ms: 0.208657
+  ...
+# Subtest: Back closes exactly one layer; root returns false for actual Wizard hook
+ok 30 - Back closes exactly one layer; root returns false for actual Wizard hook
+  ---
+  duration_ms: 0.36613
+  ...
+# Subtest: Sent requires positive publication; Queued requires durable event IDs
+ok 31 - Sent requires positive publication; Queued requires durable event IDs
+  ---
+  duration_ms: 0.314944
+  ...
+# Subtest: ambiguous engine/network/abort failures never permit fresh-send Retry
+ok 32 - ambiguous engine/network/abort failures never permit fresh-send Retry
+  ---
+  duration_ms: 0.200783
+  ...
+# Subtest: passphrase minimum counts Unicode characters rather than UTF-16 units
+ok 33 - passphrase minimum counts Unicode characters rather than UTF-16 units
+  ---
+  duration_ms: 0.121756
+  ...
+# Subtest: source/markup use local assets, selectable Wizard tokens, no demo/token/import sink
+ok 34 - source/markup use local assets, selectable Wizard tokens, no demo/token/import sink
+  ---
+  duration_ms: 1.924864
+  ...
+# Subtest: DOM fixture: last-message preview never masquerades as loaded thread history
+ok 35 - DOM fixture: last-message preview never masquerades as loaded thread history
+  ---
+  duration_ms: 28.643687
+  ...
+# Subtest: DOM fixture: reopening known history labels its explicit refresh without blanking saved rows
+ok 36 - DOM fixture: reopening known history labels its explicit refresh without blanking saved rows
+  ---
+  duration_ms: 12.127705
+  ...
+# Subtest: DOM fixture: opening and initial list fetch show honest activity; polling stays quiet
+ok 37 - DOM fixture: opening and initial list fetch show honest activity; polling stays quiet
+  ---
+  duration_ms: 2.049996
+  ...
+# Subtest: DOM fixture: accepting an invite is immediate, single-flight, and clears both affordances
+ok 38 - DOM fixture: accepting an invite is immediate, single-flight, and clears both affordances
+  ---
+  duration_ms: 11.749182
+  ...
+# Subtest: DOM fixture: failed invitation clears spinner, restores controls and preserves its error
+ok 39 - DOM fixture: failed invitation clears spinner, restores controls and preserves its error
+  ---
+  duration_ms: 9.673638
+  ...
+# Subtest: DOM fixture: loading a first chat shows history activity, then disappears on settlement
+ok 40 - DOM fixture: loading a first chat shows history activity, then disappears on settlement
+  ---
+  duration_ms: 7.816582
+  ...
+# Subtest: DOM fixture: silent cookie session uses only relative API and same-origin credentials
+ok 41 - DOM fixture: silent cookie session uses only relative API and same-origin credentials
+  ---
+  duration_ms: 5.700664
+  ...
+# Subtest: DOM fixture: parking during bootstrap never strands Opening or repeats the one-use exchange
+ok 42 - DOM fixture: parking during bootstrap never strands Opening or repeats the one-use exchange
+  ---
+  duration_ms: 1.83136
+  ...
+# Subtest: DOM fixture: waking while bootstrap is pending keeps the one-use request alive
+ok 43 - DOM fixture: waking while bootstrap is pending keeps the one-use request alive
+  ---
+  duration_ms: 1.27716
+  ...
+# Subtest: DOM fixture: a consumed setup link recovers only via an existing cookie session
+ok 44 - DOM fixture: a consumed setup link recovers only via an existing cookie session
+  ---
+  duration_ms: 1.131791
+  ...
+# Subtest: DOM fixture: a consumed setup link without a cookie grants no account setup
+ok 45 - DOM fixture: a consumed setup link without a cookie grants no account setup
+  ---
+  duration_ms: 1.345327
+  ...
+# Subtest: DOM fixture: setup link in an existing authenticated window strips its fragment without exchanging again
+ok 46 - DOM fixture: setup link in an existing authenticated window strips its fragment without exchanging again
+  ---
+  duration_ms: 1.256122
+  ...
+# Subtest: DOM fixture: fresh fragment link recovers a mounted first-open gate
+ok 47 - DOM fixture: fresh fragment link recovers a mounted first-open gate
+  ---
+  duration_ms: 1.377508
+  ...
+# Subtest: DOM fixture: one-use ticket is removed and exchanged without token persistence
+ok 48 - DOM fixture: one-use ticket is removed and exchanged without token persistence
+  ---
+  duration_ms: 2.348631
+  ...
+# Subtest: DOM fixture: HTTP 401 presents Wizard reconnect, never a capability field
+ok 49 - DOM fixture: HTTP 401 presents Wizard reconnect, never a capability field
+  ---
+  duration_ms: 1.159553
+  ...
+# Subtest: DOM fixture: setup match/minimum, CSRF body-only secret and first address sheet
+ok 50 - DOM fixture: setup match/minimum, CSRF body-only secret and first address sheet
+  ---
+  duration_ms: 3.22099
+  ...
+# Subtest: DOM fixture: wrong unlock passphrase stays locked, clears field and keeps focus
+ok 51 - DOM fixture: wrong unlock passphrase stays locked, clears field and keeps focus
+  ---
+  duration_ms: 2.491335
+  ...
+# Subtest: DOM fixture: HTTP401 wrong passphrase on a live cookie session keeps the unlock form (no reconnect)
+ok 52 - DOM fixture: HTTP401 wrong passphrase on a live cookie session keeps the unlock form (no reconnect)
+  ---
+  duration_ms: 1.279825
+  ...
+# Subtest: DOM fixture: incoming pending composer is disabled; accept is explicit
+ok 53 - DOM fixture: incoming pending composer is disabled; accept is explicit
+  ---
+  duration_ms: 9.843956
+  ...
+# Subtest: DOM fixture: nested Back closes sheet then chat then returns false; still mounted
+ok 54 - DOM fixture: nested Back closes sheet then chat then returns false; still mounted
+  ---
+  duration_ms: 6.557054
+  ...
+# Subtest: shared domain Back is honest and holds drafts beyond nested close
+ok 55 - shared domain Back is honest and holds drafts beyond nested close
+  ---
+  duration_ms: 9.155327
+  ...
+# Subtest: DOM fixture: outgoing invite stays Invite sent despite relay-published text
+ok 56 - DOM fixture: outgoing invite stays Invite sent despite relay-published text
+  ---
+  duration_ms: 7.556568
+  ...
+# Subtest: DOM fixture: request/draft persisted BEFORE send; checking outcome has no Retry and never resends
+ok 57 - DOM fixture: request/draft persisted BEFORE send; checking outcome has no Retry and never resends
+  ---
+  duration_ms: 7.796044
+  ...
+# Subtest: DOM fixture: definite rejection Retry preserves exact request and message text
+ok 58 - DOM fixture: definite rejection Retry preserves exact request and message text
+  ---
+  duration_ms: 8.149731
+  ...
+# Subtest: DOM fixture: hidden polling cancels one inflight signal; visible resumes snapshot
+ok 59 - DOM fixture: hidden polling cancels one inflight signal; visible resumes snapshot
+  ---
+  duration_ms: 3.234655
+  ...
+# Subtest: DOM fixture: lock clears visible messages and identity, without ending cookie session
+ok 60 - DOM fixture: lock clears visible messages and identity, without ending cookie session
+  ---
+  duration_ms: 6.041546
+  ...
+# Subtest: DOM fixture: normal later opening uses passphrase session bootstrap, not an API-token form
+ok 61 - DOM fixture: normal later opening uses passphrase session bootstrap, not an API-token form
+  ---
+  duration_ms: 2.867514
+  ...
+# Subtest: DOM fixture: a new account with no chats shows the empty state and Add contact
+ok 62 - DOM fixture: a new account with no chats shows the empty state and Add contact
+  ---
+  duration_ms: 1.184749
+  ...
+# Subtest: DOM fixture: first open from the launcher without a setup link explains the next step
+ok 63 - DOM fixture: first open from the launcher without a setup link explains the next step
+  ---
+  duration_ms: 1.234231
+  ...
+# Subtest: DOM fixture: failed passphrase bootstrap remains Unlock, including HTTP401 failure
+ok 64 - DOM fixture: failed passphrase bootstrap remains Unlock, including HTTP401 failure
+  ---
+  duration_ms: 1.196391
+  ...
+# Subtest: DOM fixture: NIP-05 resolver runs before contact save/invite, using exact returned public key
+ok 65 - DOM fixture: NIP-05 resolver runs before contact save/invite, using exact returned public key
+  ---
+  duration_ms: 7.720393
+  ...
+# Subtest: DOM fixture: unverified NIP-05 never creates a contact or conversation
+ok 66 - DOM fixture: unverified NIP-05 never creates a contact or conversation
+  ---
+  duration_ms: 3.526898
+  ...
+# Subtest: DOM fixture: draft and interrupted send restore without automatic new send
+ok 67 - DOM fixture: draft and interrupted send restore without automatic new send
+  ---
+  duration_ms: 6.056163
+  ...
+# Subtest: DOM fixture: older pagination sends BOTH cursors and keeps exact existing message node
+ok 68 - DOM fixture: older pagination sends BOTH cursors and keeps exact existing message node
+  ---
+  duration_ms: 9.406674
+  ...
+# Subtest: DOM fixture: queued retry uses existing event ID and unrelated group publication is not Sent
+ok 69 - DOM fixture: queued retry uses existing event ID and unrelated group publication is not Sent
+  ---
+  duration_ms: 8.56382
+  ...
+# Subtest: DOM fixture: unavailable persistent storage refuses untracked send and retains text
+ok 70 - DOM fixture: unavailable persistent storage refuses untracked send and retains text
+  ---
+  duration_ms: 5.493328
+  ...
+# 1.5x len 96000 pitch 220.0
+# 2x len 72960 pitch 219.6
+# 60 s note at 1.5x: 164 ms
+# pass
+# Subtest: /srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/voice_speed.test.cjs
+ok 9 - /srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline/tests/voice_speed.test.cjs
+  ---
+  duration_ms: 362.173309
+  ...
+1..71
+# tests 71
+# suites 0
+# pass 66
+# fail 5
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 393.909518

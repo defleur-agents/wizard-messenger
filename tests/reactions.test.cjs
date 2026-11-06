@@ -12,7 +12,7 @@ function fixture(rows) {
   const api = build(store, view, s, call, e => errors.push(e.message), p => paints.push(structuredClone(p)));
   return {...api, store, view, s, requests, errors, paints, post: () => api.albumPosts(store.threads.a.messages)[0]};
 }
-const row = (id, reactions = [], album) => ({id, reactions, album, network: 'telegram', sender: 'Fixture', identity_id: 'fixture', timestamp: 1});
+const row = (id, reactions = [], album) => ({id, reactions, album, msgtype: 'm.image', network: 'telegram', sender: 'Fixture', identity_id: 'fixture', timestamp: 1});
 const r = (key, count, mine) => ({key, count, mine});
 const flush = () => new Promise(resolve => setImmediate(resolve));
 for (const album of [false, true]) test(`real handler paints canonical ${album ? 'album part' : 'message'} before HTTP completes`, async () => {

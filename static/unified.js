@@ -60,7 +60,38 @@
       };
     } catch (_) { box.textContent = 'Notification settings unavailable.'; }
   }
-  if (typeof module !== 'undefined') module.exports = {backState, fetchOlder, notificationSettings};
+  function mentionQuery(text, caret = text.length) {
+    const match = /(?:^|[\s(])@([^@\n]{0,80})$/u.exec(text.slice(0, caret));
+    return match ? {start: caret - match[1].length - 1, end: caret, query: match[1].toLocaleLowerCase()} : null;
+  }
+  function parseMentions(text, members) {
+    const spans = [], occupied = new Set();
+    const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const member of [...members].sort((a,b) => b.label.length - a.label.length)) {
+      const re = new RegExp('(?<![\\p{L}\\p{N}_@])' + escape('@' + member.label) + '(?![\\p{L}\\p{N}_])', 'gu');
+      for (const match of text.matchAll(re)) {
+        const start = match.index, end = start + match[0].length;
+        if (Array.from({length:end-start}, (_,i) => start+i).some(i => occupied.has(i))) continue;
+        for (let i=start;i<end;i++) occupied.add(i);
+        spans.push({id:member.id, name:member.name, start, end});
+      }
+    }
+    return spans.sort((a,b) => a.start-b.start);
+  }
+  function insertMention(text, query, member) {
+    const token = '@' + member.label + ' ';
+    return {text:text.slice(0, query.start) + token + text.slice(query.end), caret:query.start + token.length};
+  }
+  function mentionKey(key, index, count) {
+    if (!count) return {index, handled:false};
+    if (key === 'ArrowDown' || key === 'ArrowUp') return {index:(index + (key === 'ArrowDown' ? 1 : -1) + count) % count, handled:true};
+    return {index, handled:['Enter','Tab','Escape'].includes(key), select:key === 'Enter' || key === 'Tab', close:key === 'Escape'};
+  }
+  function reactorGroups(reactions) {
+    return reactions.map(r => ({...r, reactors:[...new Map((r.reactors || []).map(u => [u.id,u])).values()],
+      missing:Math.max(0,r.count-new Set((r.reactors || []).map(u => u.id)).size)}));
+  }
+  if (typeof module !== 'undefined') module.exports = {backState, fetchOlder, notificationSettings, mentionQuery, parseMentions, insertMention, mentionKey, reactorGroups};
   if (typeof document === 'undefined') return;
   const $ = id => document.getElementById(id);
   const s = {tab: 'people', person: null, overlay: null, search: null, low: false, seg: (() => { try { const v = sessionStorage.getItem('messenger-inbox-seg') || (sessionStorage.getItem('messenger-inbox-low') === '1' ? 'low' : 'all'); return ['all', 'unread', 'medium', 'low'].includes(v) ? v : 'all'; } catch { return 'all'; } })(), ready: false, epoch: 0, busy: false, drafts: {}, people: [], login: null};
@@ -297,8 +328,10 @@
     s.login = null; s.overlay = null; $('u-overlay')?.remove(); view.lifted?.classList.remove('lifted'); view.lifted = null; lastFocus?.focus(); hold(); syncBar();
   }
   function back() {
+    if (view.mentionClose?.()) return true;
     if (!s.overlay && view.picker?.isOpen) { view.picker.close(); return true; }
     if (!s.overlay && view.selection?.active) { view.selection.clear(); return true; }
+    if (s.overlay && connectorController?.back?.()) return true;
     if (s.overlay === 'Edit QR codes') { myCodes(); return true; }
     if (s.overlay === 'Suggested merges') { accounts(); return true; } // nested: Back returns to the codes, not the list
     if (s.overlay === 'Advanced' || s.overlay === 'Agent drafts') { accounts(); return true; } // pages opened from Settings return to it
@@ -315,9 +348,10 @@
     closeOverlay(); lastFocus = document.activeElement; s.overlay = title;
     const layer = node('div', 'u-overlay'); layer.id = 'u-overlay';
     const panel = node('section', 'u-sheet'); panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-modal', 'true'); panel.setAttribute('aria-label', title); panel.tabIndex = -1;
-    const head = node('header'); head.append(node('h2', '', title), iconButton('close', 'Close', closeOverlay)); panel.append(node('span', 'grabber'), head);
+    const dismiss = () => { if (!connectorController?.back?.()) closeOverlay(); };
+    const head = node('header'); head.append(node('h2', '', title), iconButton('close', 'Close', dismiss)); panel.append(node('span', 'grabber'), head);
     layer.append(panel); $('messenger').append(layer);
-    layer.onclick = e => { if (e.target === layer) closeOverlay(); };
+    layer.onclick = e => { if (e.target === layer) dismiss(); };
     panel.onkeydown = e => {
       if (e.key !== 'Tab') return;
       const focusable = [...panel.querySelectorAll('button,input,select,textarea')].filter(x => !x.disabled);
@@ -532,8 +566,14 @@
     if (now - d < 6 * 864e5) return d.toLocaleDateString([], {weekday: 'long'});
     return d.toLocaleDateString([], {weekday: 'short', month: 'short', day: 'numeric', ...(d.getFullYear() !== now.getFullYear() ? {year: 'numeric'} : {})});
   }
+  function recentSharePeople(rows) {
+    // Directory entries may omit activity; the already-loaded chat lists know the latest timestamp.
+    const activity = new Map([...(store.lists.people || []), ...(store.lists.groups || [])].map(p => [p.id, p.last?.timestamp || 0]));
+    const stamp = p => Math.max(p.last?.timestamp || 0, activity.get(p.id) || 0);
+    return [...rows].sort((a, b) => stamp(b) - stamp(a) || a.display_name.localeCompare(b.display_name));
+  }
   async function newChat(shareText) {
-    // The full A-Z contact list lives only here. From Wizard's share sheet it picks who gets the shared text.
+    // New chat keeps its A-Z directory; Send to… offers recent chats first.
     const title = shareText ? 'Send to…' : 'New chat';
     const sheet = overlay(title); sheet.classList.add('tall');
     // Sharing: settles true once the owner picks someone (text placed) or closes the picker (declined).
@@ -543,12 +583,13 @@
     const list = node('div', 'u-directory'); sheet.append(search, list);
     try {
       const d = await call('directory'); if (s.overlay !== title) return settled;
-      const all = [...d.people, ...d.groups.map(g => ({...g, group: true}))].sort((a, b) => a.display_name.localeCompare(b.display_name));
+      const directory = [...d.people, ...d.groups.map(g => ({...g, group: true}))];
+      const all = shareText ? recentSharePeople(directory) : directory.sort((a, b) => a.display_name.localeCompare(b.display_name));
       const draw = () => {
         const q = search.value.trim().toLowerCase(); list.replaceChildren(); let letter = '';
         for (const p of all.filter(p => !q || p.display_name.toLowerCase().includes(q)).slice(0, 200)) {
           const first = ([...p.display_name.trim()][0] || '#').toUpperCase();
-          if (!q && first !== letter) { letter = first; list.append(node('p', 'u-letter', /\p{L}/u.test(first) ? first : '#')); }
+          if (!shareText && !q && first !== letter) { letter = first; list.append(node('p', 'u-letter', /\p{L}/u.test(first) ? first : '#')); }
           const row = button('', () => { if (shareText) placeShared(p.id, shareText); closeOverlay(); openPerson(p.id); }, 'u-directory-row');
           const text = node('span', 'u-who-text'); text.append(node('strong', '', p.display_name), node('span', '', (p.group ? 'Group · ' : '') + networksOf(p).map(netLabel).join(' · ')));
           row.append(netAvatar(p, 'small'), text); list.append(row);
@@ -1016,6 +1057,7 @@
         if (who) line.append(node('span', 'u-snippet-who', who + ': '));
         line.append(snippet(p.last) || ''); bottom.append(line);
       }
+      if (p.unread_mentions) bottom.append(node('span', 'u-badge u-mention-badge', '@'));
       if (p.unread) bottom.append(node('span', 'u-badge' + (p.muted || isLow(p) || isMedium(p) ? ' muted' : ''), p.unread > 99 ? '99+' : String(p.unread)));
       else if (p.last?.outgoing) bottom.append(node('span', 'u-ticks' + (p.peer_read_ts >= p.last.timestamp ? ' read' : ''), p.peer_read_ts >= p.last.timestamp ? '✓✓' : '✓'));
       info.append(top, bottom);
@@ -1438,16 +1480,29 @@
     const posts = [];
     for (const m of messages) {
       const last = posts[posts.length - 1];
-      if (m.album && last?.album === m.album && last.sender === m.sender && last.identity_id === m.identity_id && last.network === m.network && last.outgoing === m.outgoing) {
+      if (m.album && m.msgtype === 'm.image' && last?.msgtype === 'm.image' && last?.album === m.album && last.sender === m.sender && last.identity_id === m.identity_id && last.network === m.network && last.outgoing === m.outgoing) {
         last.photos.push(m);
-        if (!last.original && m.original) last.original = m.original;
         last.deleted = last.photos.every(p => p.deleted);
-      } else posts.push(m.album ? {...m, photos: m.photos || [m]} : m);
+      } else posts.push(m.album && m.msgtype === 'm.image' ? {...m, photos: [m]} : m);
     }
     for (const post of posts) if (post.photos) {
+      // Explicit native ordinals, never event-ID or time-window guesses. Telegram
+      // retains its existing timeline order. Incomplete/delayed albums stay usable.
+      if (post.network === 'signal' && post.photos.every(p => Number.isInteger(p.media?.album_index))) {
+        post.photos.sort((a, b) => a.media.album_index - b.media.album_index);
+      }
+      const photos = post.photos;
+      Object.assign(post, photos[0], {photos});
+      post.deleted = photos.every(p => p.deleted);
+      // Keep every distinct caption, in tile order, rather than silently taking
+      // the first. Canonical per-part originals remain untouched for the viewer.
+      post.original = [...new Set(photos.filter(p => !p.deleted).map(p => p.original).filter(Boolean))].join('\n\n');
+      if (photos.filter(p => !p.deleted && p.original).length > 1) post.translated = null;
+      post.links = photos.filter(p => !p.deleted).flatMap(p => p.links || []);
       const reactions = new Map();
       for (const photo of post.photos) for (const reaction of photo.reactions || []) {
         const current = reactions.get(reaction.key) || {key: reaction.key, count: 0, mine: false};
+        if (reaction.reactors) current.reactors = [...new Map([...(current.reactors || []),...reaction.reactors].map(u => [u.id,u])).values()];
         current.count += reaction.count; current.mine ||= reaction.mine; reactions.set(reaction.key, current);
       }
       post.reactions = [...reactions.values()];
@@ -1475,7 +1530,7 @@
       const pos = jp && jn ? 'mid' : jp ? 'last' : jn ? 'first' : 'single';
       const read = m.outgoing && p.peer_read_ts >= m.timestamp;
       const key = m.client_id || m.id;
-      const sig = JSON.stringify([group && !m.outgoing ? p.faces?.[nameOf(m.sender)] : 0, m.id, m.original, m.translated, m.transcript, m.translation_error, m.edited, m.deleted, m.reactions, m.pending, m.failed, pos, read, shown[m.id], m.reply?.text, m.links?.length, auto, multi, group, m.photos?.map(p => [p.id, p.deleted, p.media, p.local, p.pending])]);
+      const sig = JSON.stringify([group && !m.outgoing ? p.faces?.[nameOf(m.sender)] : 0, m.id, m.original, m.translated, m.transcript, m.translation_error, m.edited, m.deleted, m.mentions, m.mentioned, m.reactions, m.pending, m.failed, pos, read, shown[m.id], m.reply?.text, m.links?.length, auto, multi, group, m.photos?.map(p => [p.id, p.deleted, p.media, p.local, p.pending])]);
       let el = els.get(key);
       if (!el || el.dataset.sig !== sig) { el = bubble(m, pos, {auto, multi, group, read, faces: p.faces}); el.dataset.sig = sig; els.set(key, el); }
       kids.push(el);
@@ -1502,6 +1557,13 @@
     else if (view.anchor) { scroll.scrollTop = scroll.scrollHeight - before; }
     view.anchor = false;
     view.selection?.paint();
+    const mentioned = t.messages.filter(m => m.mentioned && !m.outgoing && !m.deleted);
+    const head = scroll.parentElement.querySelector('.u-thread-head');
+    if (head && mentioned.length && !head.querySelector('.u-jump-mention')) {
+      let cursor = 0;
+      const jump = button('@',() => { const target = mentioned[cursor++ % mentioned.length]; els.get(target.client_id || target.id)?.scrollIntoView({block:'center',behavior:'smooth'}); },'u-jump-mention u-badge');
+      jump.setAttribute('aria-label','Jump to mentions of you'); head.append(jump);
+    }
     if (follow || park) markRead();
   }
   async function older() {
@@ -1536,6 +1598,10 @@
   function mentionMarks(text, m) {
     const marks = []; let at = 0;
     for (const x of m?.mentions || []) {
+      if (Number.isInteger(x?.start) && Number.isInteger(x?.end) && x.start >= 0 && x.end > x.start && x.end <= text.length) {
+        marks.push({start:x.start, end:x.end, label:text.slice(x.start,x.end), id:x.id, me:!!x.me});
+        continue;
+      }
       if (!x?.text) continue;
       const i = text.indexOf(x.text, at); if (i < 0) continue;
       const saved = x.acc && !x.me && contactName(x.net, x.acc);
@@ -1574,7 +1640,8 @@
     for (const k of mentionMarks(text || '', m)) {
       if (k.start < at) continue;
       inline(p, text.slice(at, k.start), 0);
-      const chip = node('span', 'u-mention' + (k.me ? ' me' : ''), k.label); if (k.me) chip.title = 'Mentions you';
+      const chip = node(k.id ? 'a' : 'span', 'u-mention' + (k.me ? ' me' : ''), k.label); if (k.me) chip.title = 'Mentions you';
+      if (k.id) { chip.href = 'https://matrix.to/#/' + encodeURIComponent(k.id); chip.target = '_blank'; chip.rel = 'noopener noreferrer'; }
       p.append(chip); at = k.end;
     }
     inline(p, (text || '').slice(at), 0);
@@ -1631,22 +1698,23 @@
     }
     if (!story && !m.deleted && m.original && m.msgtype !== 'm.location') {
       if (ctx.auto || m.outgoing) {
-        b.append(richText('u-text', m.translated || m.original, m));
+        b.append(richText('u-text', m.translated || m.original, m.translated && m.translated !== m.original ? null : m));
         if (m.translated && m.translated !== m.original) b.append(node('p', 'u-original', m.original));
         if (m.translation_error) b.append(node('p', 'u-original error', m.translation_error));
       } else {
         const translated = shown[m.id] === 'translated' && m.translated;
-        b.append(richText('u-text', translated ? m.translated : m.original, m));
+        b.append(richText('u-text', translated ? m.translated : m.original, translated ? null : m));
         if (foreignScript(m.original)) b.append(button(translated ? 'Show original' : 'Translate', () => translate(m), 'u-translate link'));
       }
     }
-    if (!m.deleted && m.links?.length) for (const [i, l] of m.links.entries()) b.append(linkCard(m, l, i));
+    if (!m.deleted) for (const photo of m.photos || [m]) if (!photo.deleted && photo.links?.length) for (const [i, l] of photo.links.entries()) b.append(linkCard(photo, l, i));
     const meta = node('footer');
     if (ctx.multi) { const via = node('span', 'u-via'); via.append(netBadge(m.network, 'u-via-icon')); via.title = 'via ' + netLabel(m.network); meta.append(via); }
     if (m.edited && !m.deleted) meta.append(node('span', 'u-edited', 'edited'));
     meta.append(node('time', '', new Date(m.timestamp).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})));
     if (m.outgoing) meta.append(m.failed ? node('span', 'u-status-ic fail', '!') : m.pending ? node('span', 'u-status-ic clock', '◷') : node('span', 'u-status-ic' + (ctx.read ? ' read' : ''), ctx.read ? '✓✓' : '✓'));
     b.append(meta);
+    if (m.mentioned && !m.outgoing) { row.classList.add('u-mentioned'); b.prepend(node('span','u-mention-notice','@ You were mentioned')); }
     row.append(b);
     if (m.failed) {
       row.append(button(m.failed === true ? 'Not sent · Tap to retry' : 'Not sent · ' + m.failed + ' · Retry', () => m.retry ? m.retry() : null, 'u-retry link'));
@@ -1654,7 +1722,7 @@
     }
     if (m.reactions?.length) {
       const strip = node('div', 'u-reactions');
-      for (const r of m.reactions) strip.append(button(r.key + (r.count > 1 ? ' ' + r.count : ''), () => react(m, r.key), 'u-react' + (r.mine ? ' mine' : '')));
+      for (const r of m.reactions) strip.append(reactionChip(r, m.reactions, {pid:view.id, toggle:() => react(m,r.key)}));
       row.append(strip);
     }
     if (!m.pending && !m.deleted) gestures(row, b, m);
@@ -1980,7 +2048,7 @@
   function toggledReactions(reactions, key) {
     const had = reactions.some(r => r.mine && r.key === key);
     // Copy every entry: increasing an existing count must not mutate the rollback snapshot.
-    const next = reactions.map(r => ({...r, count: r.count - (r.mine ? 1 : 0), mine: false})).filter(r => r.count > 0);
+    const next = reactions.map(r => ({...r, count: r.count - (r.mine ? 1 : 0), mine: false, ...(r.reactors ? {reactors:r.reactors.filter(u => !u.mine)} : {})})).filter(r => r.count > 0);
     if (!had) { const r = next.find(r => r.key === key); if (r) { r.count++; r.mine = true; } else next.push({key, count: 1, mine: true}); }
     return next;
   }
@@ -2081,7 +2149,10 @@
     const by = row => row?.updated_by || row?.created_by;
     const byAgent = row => by(row) && by(row).id !== 'owner';
     const dirty = () => sd.row ? ui.draft.value !== sd.saved || ui.channel.value !== sd.row.identity_id : !!ui.draft.value.trim();
-    const alive = () => sd.alive && ui.form.isConnected && s.person === id;
+    const alive = () => sd.alive && ui.form.isConnected && s.person === id && view.sd === sd;
+    // The global tray belongs to the currently visible composer, not to a suspended save.
+    // Keep this controller's handles (including an in-flight PUT's mutable sid) across navigation.
+    let attachments = [...(view.attach || [])], saveGeneration = 0;
     const note = () => {
       if (sd.conflict) {
         const box = node('div', 'u-draft-note conflict');
@@ -2115,30 +2186,60 @@
       if (row.identity_id && [...ui.channel.options].some(o => o.value === row.identity_id)) { ui.channel.value = row.identity_id; ui.paintVia(); }
       await loadItems(row);
     }
-    // Bring the tray in line with the draft's attachments. One that fails to load (a blip, a restart) shows the
-    // warning and is tried again on the next poll, which clears the warning once it loads; no reload needed.
+    // Keep failed downloads in the same tray: they must be removable, never silently omitted from a send.
+    const errorsInTray = () => {
+      if (!alive()) return;
+      sd.loadError = (view.attach || []).some(it => it.unavailable || it.removeFailed);
+      sd.uploadError = (view.attach || []).some(it => it.uploadFailed);
+      ui.grow(); ui.paintBar();
+    };
     async function loadItems(row) {
-      const want = row.attachments || [], have = view.attach || [];
-      const tray = have.filter(it => !it.sid || want.some(a => a.id === it.sid));
-      let failed = false;
-      for (const a of want) if (!tray.some(it => it.sid === a.id)) { try { tray.push(await itemFor(a, row.id)); } catch { failed = true; } }
-      if (!alive() || sd.row?.id !== row.id) return;
-      sd.loadError = failed;
-      view.attach = tray.length ? tray : null; ui.grow(); ui.paintBar();
+      const want = row.attachments || [], gen = draftWrites, epoch = sd.epoch, loaded = [];
+      for (const a of want) if (!(view.attach || []).some(it => it.sid === a.id && !it.unavailable)) {
+        try { loaded.push(await itemFor(a, row.id)); }
+        catch { loaded.push({file: true, unavailable: true, key: 'a' + uid(), sid: a.id, name: a.name, bytes: a.bytes}); }
+      }
+      // A slow download must not revive a removed/sent item or replace another conversation's tray.
+      if (!alive() || sd.epoch !== epoch || gen !== draftWrites || sd.row?.id !== row.id || sd.row.revision !== row.revision) {
+        for (const it of loaded) if (it.url) URL.revokeObjectURL(it.url);
+        return;
+      }
+      const tray = (view.attach || []).filter(it => !it.sid || want.some(a => a.id === it.sid));
+      for (const it of loaded) {
+        const at = tray.findIndex(old => old.sid === it.sid);
+        if (at < 0) tray.push(it); else if (tray[at].unavailable) tray[at] = it;
+        else if (it.url) URL.revokeObjectURL(it.url);
+      }
+      attachments = tray; view.attach = tray.length ? tray : null; errorsInTray();
     }
-    async function save() {
+    function save() {
       clearTimeout(sd.timer); sd.timer = null; draftWrote();
-      if (sd.closing) { await sd.closing; if (sd.timer) return; } // a just-sent draft is deleted first; new text starts a new one
-      if (sd.busy) { await sd.busy.catch(() => {}); if (sd.timer) return; }
-      if (view.edit || sd.conflict) return;
+      // Freeze the originating composer before any await. A navigation flush may arrive after
+      // openPerson cleared the global tray; only the old controller's retained handles apply then.
+      if (alive()) attachments = [...(view.attach || [])];
+      const snapshot = {text: ui.draft.value, identity_id: ui.channel.value, attachments: [...attachments],
+        editing: alive() && !!view.edit, epoch: sd.epoch, generation: ++saveGeneration};
+      const saving = saveSnapshot(snapshot);
+      sd.saving = saving;
+      return saving.finally(() => { if (sd.saving === saving) sd.saving = null; });
+    }
+    async function saveSnapshot(snapshot) {
+      const fresh = () => sd.epoch === snapshot.epoch && saveGeneration === snapshot.generation;
+      await sd.uploading?.catch(() => {});
+      if (!fresh()) return;
+      if (sd.closing) { await sd.closing; if (!fresh() || sd.timer) return; } // a just-sent draft is deleted first; new text starts a new one
+      if (sd.busy) { await sd.busy.catch(() => {}); if (!fresh() || sd.timer) return; }
+      if (snapshot.editing || sd.conflict) return;
       const run = (async () => {
-        const text = ui.draft.value, identity_id = ui.channel.value, files = (view.attach || []).some(it => it.sid);
+        const {text, identity_id} = snapshot, items = snapshot.attachments.filter(it => !it.removed);
+        // Server metadata is authoritative after the queue: a later batch may have persisted too.
+        const files = (sd.row?.attachments || []).length || items.some(it => it.sid);
         if (!identity_id) return;
         if (!sd.row) {
           if (!text.trim()) return;
           const r = await api('api/drafts', {method: 'POST', body: {person_id: id, identity_id, text}});
           sd.row = r.draft; sd.saved = text;
-        } else if (!text.trim() && !files && !(view.attach || []).length) {
+        } else if (!text.trim() && !files && !items.length) {
           await api('api/drafts/' + sd.row.id, {method: 'DELETE', body: {revision: sd.row.revision}}); sd.row = null; sd.saved = null;
         } else if (text !== sd.row.text || identity_id !== sd.row.identity_id) {
           const r = await api('api/drafts/' + sd.row.id, {method: 'POST', body: {revision: sd.row.revision, person_id: id, identity_id, text}});
@@ -2156,30 +2257,68 @@
       if (alive()) { ui.paintBar(); if (!sd.conflict && dirty()) schedule(); } refreshDraftIndex();
     }
     const schedule = () => { clearTimeout(sd.timer); sd.timer = setTimeout(save, SD_SAVE_MS); };
-    async function ensure() { if (!sd.row) { if (!ui.draft.value.trim()) { const r = await api('api/drafts', {method: 'POST', body: {person_id: id, identity_id: ui.channel.value, text: ''}}); sd.row = r.draft; sd.saved = ''; } else await save(); } return sd.row; }
-    // A photo or file put in the tray is stored with the draft at once, so it is there on every device and for agents.
-    async function attach(items) {
-      if (sd.closing) await sd.closing;
-      const epoch = sd.epoch;
-      for (const it of items) {
-        if (sd.epoch !== epoch) return; // sent meanwhile: the rest went with the message, not into a deleted draft
-        try {
-          await sd.busy?.catch(() => {}); const row = await ensure(); if (!row) return;
-          draftWrote(); const r = await draftRaw('api/drafts/' + row.id + '/attachments', 'PUT', it.blob, {revision: row.revision, name: it.name || 'Attachment', mime: it.blob.type || 'application/octet-stream'});
-          sd.row = r.draft; it.sid = r.draft.attachments[r.draft.attachments.length - 1].id; // (when sent meanwhile, the send's delete waits for this and needs the new revision)
-        } catch (e) { if (sd.epoch !== epoch) return; sd.uploadError = true; if (e.code === 'draft_changed') { try { sd.conflict = (await api('api/drafts/' + sd.row.id)).draft; ui.paintBar(); } catch { /* next poll */ } } else error(e); ui.paintBar(); }
+    async function ensure() {
+      if (!sd.row) {
+        const text = ui.draft.value;
+        const r = await api('api/drafts', {method: 'POST', body: {person_id: id, identity_id: ui.channel.value, text}});
+        sd.row = r.draft; sd.saved = text;
       }
-      draftWrote(); refreshDraftIndex();
+      return sd.row;
     }
-    async function detach(it) {
-      // Removing a failed local upload clears the block; any other bad attachment remains visible in the tray.
-      if (!it.sid) { sd.uploadError = false; ui.paintBar(); return; }
-      if (!sd.row) return;
-      draftWrote();
-      try { const r = await api('api/drafts/' + sd.row.id + '/attachments/' + it.sid, {method: 'DELETE', body: {revision: sd.row.revision}}); sd.row = r.draft; }
-      catch (e) { if (e.code !== 'not_found') error(e); }
-      draftWrote();
-      if (!ui.draft.value.trim() && !(view.attach || []).length) save();
+    // Picker, paste, removal and autosave share revisions. Queue whole batches, not just their last promise:
+    // two selections before the first PUT returns otherwise race with the same revision and poison the draft.
+    function attachmentWork(work) {
+      const before = sd.uploading, closing = sd.closing;
+      sd.attachmentPending = (sd.attachmentPending || 0) + 1;
+      const run = Promise.resolve(before).catch(() => {}).then(async () => {
+        await closing; await sd.busy?.catch(() => {});
+        draftWrote();
+        try { return await work(); } finally { sd.attachmentPending--; draftWrote(); errorsInTray(); refreshDraftIndex(); }
+      });
+      sd.uploading = run;
+      return run;
+    }
+    function attach(items) {
+      const epoch = sd.epoch;
+      attachments = [...new Set([...attachments, ...items])];
+      return attachmentWork(async () => {
+        for (const it of items) {
+          if (!alive() || sd.epoch !== epoch) return;
+          if (it.removed || it.sid) continue;
+          try {
+            const row = await ensure();
+            const r = await draftRaw('api/drafts/' + row.id + '/attachments', 'PUT', it.blob, {revision: row.revision, name: it.name || 'Attachment', mime: it.blob.type || 'application/octet-stream'});
+            sd.row = r.draft; it.sid = r.draft.attachments[r.draft.attachments.length - 1].id;
+            it.uploadFailed = false;
+          } catch (e) {
+            if (sd.epoch !== epoch) return;
+            it.uploadFailed = true;
+            if (e.code === 'draft_changed' || e.code === 'draft_exists') {
+              try { sd.conflict = (await fetchDrafts(true)).find(d => d.id === sd.row?.id || d.person_id === id) || null; } catch { /* next poll */ }
+            } else if (alive()) error(e);
+          }
+        }
+      });
+    }
+    function detach(it) {
+      it.removed = true; attachments = attachments.filter(old => old !== it); errorsInTray();
+      return attachmentWork(async () => {
+        if (!it.sid || !sd.row) return;
+        try {
+          const r = await api('api/drafts/' + sd.row.id + '/attachments/' + it.sid, {method: 'DELETE', body: {revision: sd.row.revision}});
+          sd.row = r.draft;
+          if (alive()) { view.attach = (view.attach || []).filter(old => old !== it); if (!view.attach.length) view.attach = null; }
+        } catch (e) {
+          // A refused removal is not a successful removal. Keep its chip and block until reconciled.
+          if (alive()) {
+            it.removed = false; it.removeFailed = true;
+            attachments = [...new Set([...attachments, it])];
+            if (!(view.attach || []).includes(it)) view.attach = [...(view.attach || []), it];
+            if (e.code !== 'not_found') error(e);
+          }
+        }
+        if (alive() && !ui.draft.value.trim() && !(view.attach || []).length) schedule();
+      });
     }
     // Sent (or emptied): the draft is done. Delete it so it never comes back.
     async function clear(quiet = false) {
@@ -2221,7 +2360,7 @@
       if (!first && document.hidden) return;
       const gen = draftWrites;
       let rows; try { rows = await fetchDrafts(first); } catch { return; }
-      if (!alive() || sd.busy || sd.timer || sd.closing) return;
+      if (!alive() || sd.busy || sd.timer || sd.closing || sd.attachmentPending) return;
       if (gen !== draftWrites) return check(first); // this screen wrote meanwhile: that list may predate it
       rows = rows.filter(d => !closedDrafts.has(d.id));
       const mine = sd.row && rows.find(d => d.id === sd.row.id && d.state === 'draft');
@@ -2241,13 +2380,112 @@
       await apply(latest);
     }
     sd.poll = setInterval(() => check(false), SD_POLL_MS);
-    const retry = async () => { if (sd.loadError && sd.row) await loadItems(sd.row); };
+    const retry = async () => {
+      await sd.uploading?.catch(() => {});
+      if (!alive() || sd.conflict) return;
+      for (const it of (view.attach || []).filter(it => it.removeFailed)) await detach(it);
+      const unsaved = (view.attach || []).filter(it => !it.sid && !it.removed);
+      if (unsaved.length) await attach(unsaved);
+      if (sd.loadError && sd.row) await loadItems(sd.row);
+      errorsInTray();
+    };
     Object.assign(sd, {schedule, save, attach, detach, clear, closeForSend, afterSend, note, check, retry, stop: () => { sd.alive = false; clearInterval(sd.poll); clearTimeout(sd.timer); sd.timer = null; }});
     setTimeout(() => Promise.resolve(after).catch(() => {}).then(() => check(true)), 0);
     return sd;
   }
 
   // ---------- composer: text, photo, voice; optimistic and idempotent ----------
+  // Extend the existing textarea and reaction strip: no second composer or sheet.
+  function mentionComposer(form, field, draft, members, changed) {
+    view.mentionClose?.();
+    const mirror = node('div','u-mention-mirror'); mirror.setAttribute('aria-hidden','true'); field.prepend(mirror);
+    const picker = node('div','u-mention-picker'); picker.id = 'u-mention-picker'; picker.hidden = true;
+    picker.setAttribute('role','listbox'); picker.setAttribute('aria-label','Mention a group member'); form.append(picker);
+    draft.setAttribute('aria-controls',picker.id); draft.setAttribute('aria-expanded','false'); draft.setAttribute('aria-autocomplete','list');
+    let selected = 0, options = [], query = null, outside = null;
+    const paint = () => {
+      mirror.replaceChildren(); let at = 0;
+      for (const span of parseMentions(draft.value,members())) { mirror.append(draft.value.slice(at,span.start),node('mark','',draft.value.slice(span.start,span.end))); at = span.end; }
+      mirror.append(draft.value.slice(at) + '\n'); mirror.scrollTop = draft.scrollTop;
+    };
+    const close = () => {
+      const open = !picker.hidden; picker.hidden = true; draft.setAttribute('aria-expanded','false'); draft.removeAttribute('aria-activedescendant');
+      outside?.abort(); outside = null; return open;
+    };
+    view.mentionClose = close;
+    function choose(member) {
+      if (!query) return;
+      const next = insertMention(draft.value,query,member); draft.value = next.text;
+      close(); draft.focus(); draft.setSelectionRange(next.caret,next.caret); changed(); close(); paint();
+    }
+    function draw() {
+      picker.replaceChildren(node('small','helper','Mention a group member'));
+      if (!options.length) picker.append(node('p','helper','No matching members'));
+      for (const [i,m] of options.entries()) {
+        const item = button('',() => choose(m),'u-mention-option'); item.type = 'button'; item.id = 'u-mention-option-' + i;
+        item.setAttribute('role','option'); item.setAttribute('aria-selected',String(i===selected));
+        item.append(withPicture(avatar(m.name,'small'),pictureURL(view.id,m.avatar,m.id)),node('span','',m.label));
+        item.onpointerdown = e => e.preventDefault(); picker.append(item);
+      }
+      if (options.length) { draft.setAttribute('aria-activedescendant','u-mention-option-' + selected); picker.querySelector('[aria-selected="true"]')?.scrollIntoView({block:'nearest'}); }
+    }
+    const update = () => {
+      paint(); const all = members(); query = mentionQuery(draft.value,draft.selectionStart);
+      if (!all.length || !query || view.edit) return close();
+      options = all.filter(m => m.label.toLocaleLowerCase().includes(query.query)).slice(0,50); selected = 0;
+      picker.hidden = false; draft.setAttribute('aria-expanded','true'); draw();
+      if (!outside) {
+        outside = new AbortController(); document.addEventListener('pointerdown',e => { if (!form.contains(e.target)) close(); },{capture:true,signal:outside.signal});
+      }
+    };
+    draft.addEventListener('keydown',e => {
+      if (picker.hidden || e.isComposing) return;
+      if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); close(); return; }
+      const next = mentionKey(e.key,selected,options.length); if (!next.handled) return;
+      e.preventDefault(); e.stopImmediatePropagation(); selected = next.index;
+      if (next.select) choose(options[selected]); else draw();
+    },true);
+    draft.addEventListener('click',update); draft.addEventListener('scroll',paint);
+    return {paint,update,close};
+  }
+  function reactorFace(user, pid) {
+    return withPicture(avatar(user.name || user.id,'small'),pictureURL(pid,user.avatar,user.id));
+  }
+  function reactorList(reactions, key, pid) {
+    const sheet = overlay('Reactions'), tabs = node('div','u-reactor-tabs'), list = node('div','u-reactor-list');
+    tabs.setAttribute('role','tablist'); sheet.append(tabs,list); const groups = reactorGroups(reactions);
+    const paint = chosen => {
+      list.replaceChildren();
+      for (const tab of tabs.children) tab.setAttribute('aria-selected',String(tab.dataset.key === chosen));
+      for (const group of groups.filter(g => !chosen || g.key === chosen)) {
+        list.append(node('h3','',group.key + ' · ' + group.count));
+        for (const user of group.reactors) { const row = node('div','u-reactor-row'); row.append(reactorFace(user,pid),node('span','',user.name || user.id)); list.append(row); }
+        if (group.missing) list.append(node('p','helper',group.missing + ' reaction' + (group.missing === 1 ? '' : 's') + ' · This network did not provide who reacted.'));
+      }
+    };
+    for (const [value,label] of [['','All'],...groups.map(g => [g.key,g.key + ' ' + g.count])]) {
+      const tab = button(label,() => paint(value),'secondary'); tab.dataset.key = value; tab.setAttribute('role','tab'); tabs.append(tab);
+    }
+    paint(key); return sheet;
+  }
+  function reactionChip(reaction, reactions, {pid, toggle}) {
+    const chip = button(reaction.key + (reaction.count > 1 ? ' ' + reaction.count : ''),e => {
+      if (chip.dataset.held) { delete chip.dataset.held; return; }
+      if (e.pointerType === 'touch' || matchMedia('(hover: none)').matches) reactorList(reactions,reaction.key,pid);
+      else toggle();
+    },'u-react' + (reaction.mine ? ' mine' : ''));
+    chip.setAttribute('aria-label',reaction.key + ', ' + reaction.count + ' reactions. Hold or right-click to see who reacted.');
+    const tip = node('span','u-reactor-tooltip'); tip.setAttribute('role','tooltip'); tip.hidden = true;
+    const group = reactorGroups([reaction])[0];
+    for (const user of group.reactors.slice(0,8)) { const row = node('span','u-reactor-row'); row.append(reactorFace(user,pid),node('span','',user.name || user.id)); tip.append(row); }
+    if (group.reactors.length > 8) tip.append(node('span','', '+' + (group.reactors.length-8) + ' more · right-click to see all'));
+    if (group.missing) tip.append(node('span','','Who reacted is unavailable for ' + group.missing + ' reaction' + (group.missing===1?'':'s')));
+    chip.append(tip); chip.addEventListener('pointerenter',e => { if (e.pointerType !== 'touch') tip.hidden = false; });
+    chip.addEventListener('pointerleave',() => { tip.hidden = true; }); chip.addEventListener('focus',() => { tip.hidden = false; }); chip.addEventListener('blur',() => { tip.hidden = true; });
+    chip.addEventListener('pointerdown',e => { chip.classList.add('pressed'); e.stopPropagation(); });
+    for (const event of ['pointerup','pointercancel','pointerleave']) chip.addEventListener(event,() => chip.classList.remove('pressed'));
+    holdToMenu(chip,() => { tip.hidden = true; reactorList(reactions,reaction.key,pid); }); return chip;
+  }
   function composer(id, p) {
     // A retained DOM view is not proof that its physical mic is still running (e.g. notification Stop).
     if (view.recording?.phase === 'recording') {
@@ -2281,6 +2519,7 @@
     const send = iconButton('send', reviewed ? 'Preview send' : 'Send', () => submit(), 'u-send');
     const mic = iconButton('mic', 'Record voice message', () => record(), 'u-mic'); mic.hidden = !telegramOnly;
     const field = node('div', 'u-field'); field.append(draft);
+    const mentionUI = mentionComposer(form, field, draft, () => (p.members || []).filter(m => m.identity_id === channel.value), () => draft.oninput?.());
     // One button opens Emoji / GIFs / Stickers, like Telegram (Miguel, 5 Nov 2026: "I don't know how to send emojis").
     const pickerBtn = iconButton('smile', 'Emoji, GIFs and stickers', () => mediaPicker.toggle(), 'u-pick-btn'); pickerBtn.setAttribute('aria-expanded', 'false');
     field.append(pickerBtn);
@@ -2314,12 +2553,13 @@
     // One tap is one message. Send settles the server draft and uploads before the box empties, so the text stays
     // visible for a moment; a second tap (or Enter) in that window used to send it twice (James's phone, 31 Oct 2026).
     let sending = false;
-    const grow = () => { draft.style.height = 'auto'; draft.style.height = Math.min(draft.scrollHeight, 140) + 'px'; const has = !!draft.value.trim() || !!view.attach?.length; send.hidden = !has && telegramOnly && !view.edit; mic.hidden = !telegramOnly || !send.hidden; send.disabled = !has || sending; send.classList.toggle('busy', sending); send.setAttribute('aria-busy', String(sending)); };
+    const grow = () => { mentionUI.paint(); draft.style.height = 'auto'; draft.style.height = Math.min(draft.scrollHeight, 140) + 'px'; const has = !!draft.value.trim() || !!view.attach?.length; send.hidden = !has && telegramOnly && !view.edit; mic.hidden = !telegramOnly || !send.hidden; send.disabled = !has || sending; send.classList.toggle('busy', sending); send.setAttribute('aria-busy', String(sending)); };
     // The thread rebuilds its composer once the person loads: keep photos/reply already in the tray visible.
     if (view.attach?.length || view.reply) queueMicrotask(() => { paintBar(); grow(); });
     let typingAt = 0, idle = null;
     const typing = on => { if (!telegramOnly) return; call('people/' + id + '/typing', {typing: on}).catch(() => {}); };
     draft.oninput = () => {
+      mentionUI.update();
       s.drafts[id] = view.edit ? s.drafts[id] : draft.value; grow(); saveDrafts(); hold(); if (!view.edit) view.sd?.schedule(); else paintBar();
       if (draft.value && Date.now() - typingAt > 4000) { typingAt = Date.now(); typing(true); }
       clearTimeout(idle); idle = setTimeout(() => { if (typingAt) { typingAt = 0; typing(false); } }, 5000);
@@ -2340,13 +2580,16 @@
     window.WizardApp?.composer?.bind(form, {field: 'textarea', zone: form, onFiles: takeFiles, onSubmit: () => submit(), notice: msg => toast(msg)});
     form.onsubmit = e => { e.preventDefault(); submit(); };
     async function submit() {
+      mentionUI.close();
       if (sending) return;
       sending = true; grow();
       try { await submitOnce(); } finally { sending = false; grow(); }
     }
     async function submitOnce() {
       if (view.sd?.conflict) return toast('Choose which draft to keep first');
-      await view.sd?.retry?.();
+      const draftState = view.sd;
+      await draftState?.retry?.();
+      if (s.person !== id || view.sd !== draftState || !form.isConnected) return;
       if (view.sd?.loadError || view.sd?.uploadError) return toast('An attachment needs attention before sending');
       const text = draft.value.trim(), a = view.attach || [];
       if (!text && !a.length) return;
@@ -2562,7 +2805,7 @@
     Object.assign(view, {draft, grow, paintBar, paintRecording, paintRecordingTick});
     form.append(bar, via, channel, mediaPicker.panel, row, notice); grow(); paintBar(); paintRecording();
     // Switching chats in the split (or redrawing on resize) must not drop a save that is still waiting.
-    const prev = view.sd, flushing = prev?.timer ? prev.save() : prev?.busy;
+    const prev = view.sd, flushing = prev?.timer ? prev.save() : prev?.saving || prev?.busy;
     prev?.stop?.(); view.sd = serverDraft(id, {form, draft, channel, grow, paintBar, paintVia}, prev?.id === id ? flushing : null);
     queueMicrotask(() => { if (!form.isConnected) return; if (!view.recording) record(true); recoverVoice(); });
     return form;
@@ -3340,7 +3583,6 @@
     };
     const paintAgents = st => {
       agents.replaceChildren();
-      if (st.gateway_connected === false) agents.append(node('p', 'u-more-note warn', 'Your agents can\'t reach Messenger yet. Ask your Wizard to finish connecting it.'));
       for (const agent of st.wizard_agents || []) {
         agents.append(levelRow(agent, agent.label || 'Your Wizard agent', st.wizard_levels || [], async level => {
           await api('api/view/agents/wizard/' + encodeURIComponent(agent.id), {method: 'POST', body: {level}});
@@ -3680,9 +3922,9 @@
   const SHARE_TARGETS = 12;
   let sharedTargetsKey = '';
   function shareTargetRows() {
-    return [...(store.lists.people || []), ...(store.lists.groups || []).map(g => ({...g, group: true}))]
-      .filter(p => p.id && p.display_name).sort((a, b) => (b.last?.timestamp || 0) - (a.last?.timestamp || 0)).slice(0, SHARE_TARGETS)
-      .map(p => ({id: p.id, name: p.display_name, detail: p.group || listKey(p) === 'groups' ? 'Group' : networksOf(p).map(cap).join(' · ')}));
+    return recentSharePeople([...(store.lists.people || []), ...(store.lists.groups || []).map(g => ({...g, group: true}))])
+      .filter(p => p.id && p.display_name).slice(0, SHARE_TARGETS)
+      .map(p => ({id: p.id, name: p.display_name, lastActivity: p.last?.timestamp || 0, detail: p.group || listKey(p) === 'groups' ? 'Group' : networksOf(p).map(cap).join(' · ')}));
   }
   function shareTargets() {
     const share = window.WizardApp?.share; if (!share?.targets) return;
@@ -3708,7 +3950,7 @@
     try { window.WizardApp?.share?.receive?.({accepts: ['text', 'url'], receive: receiveShare}); } catch { /* standalone or an older Wizard: no share sheet */ }
   }
   window.MessengerUnified = {
-    settings: accounts, showNative, returnNative,
+    settings: accounts, showNative, returnNative, reactionChip, reactorList,
     setNativeRows(rows) { nativeRows = rows; nativeUnread = rows.reduce((n, p) => n + (p.muted || p.low_priority || p.medium_priority || !(p.unread > 0) ? 0 : 1), 0); syncBadge(); if ((!s.native && !s.person) || split.on) drawList(); if (s.resumeNative && rows.some(p => p.group_id === s.resumeNative)) { const group = s.resumeNative; s.resumeNative = null; openNative(group); } },
     receiveShare, shareTargetRows,
     ask, toast, holdToMenu, actionMenu, muteAction, icon, messageGestures, messageSelection,

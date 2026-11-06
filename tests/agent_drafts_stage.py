@@ -23,6 +23,10 @@ engine = Engine(); engine.data = tmp
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 18931
 origin = 'http://127.0.0.1:%d' % port
 server = ViewServer(('127.0.0.1', port), engine, fx.TOKEN, [origin])
+# Only attachment acceptance opts in; existing root/standalone fixtures remain valid.
+if os.environ.get('ATTACHMENT_FIXTURE_MOUNT') == '/app/':
+    from attachment_fixture_mount import AttachmentFixtureHandler
+    server.RequestHandlerClass = AttachmentFixtureHandler
 inbox = UnifiedInbox(tmp, engine); server.unified = inbox
 sent = []
 inbox.mx = Mock(side_effect=lambda *a, **k: (sent.append(a), {'event_id': '$sent%d' % len(sent)})[1])

@@ -1,0 +1,17 @@
+{
+  "tests/test_remote_authority.py": [
+    "tests/test_remote_authority.py::test_actual_export_retry_restart_freeze_and_uv_delivery",
+    "tests/test_remote_authority.py::test_changed_recipient_body_revision_and_unauthorized_exports",
+    "tests/test_remote_authority.py::test_down_redirect_bad_key_fail_closed_and_no_legacy_callbacks",
+    "tests/test_remote_authority.py::test_invalid_configuration[http://owner.example.test]",
+    "tests/test_remote_authority.py::test_invalid_configuration[https://wizard.example.test]",
+    "tests/test_remote_authority.py::test_invalid_configuration[https://localhost]",
+    "tests/test_remote_authority.py::test_invalid_configuration[https://owner.example.test/proxy]",
+    "tests/test_remote_authority.py::test_invalid_configuration[https://a:b@owner.example.test]",
+    "tests/test_remote_authority.py::test_invalid_configuration[https://owner.example.test:8443]",
+    "tests/test_remote_authority.py::test_invalid_configuration[https://owner.example.test?token=foo]",
+    "tests/test_remote_authority.py::test_origin_and_identity_remapping_cannot_reroute_frozen_export",
+    "tests/test_remote_authority.py::test_tls_validation_cannot_be_disabled",
+    "tests/test_remote_authority.py::test_disabled_and_local_credentials_rejected"
+  ]
+}

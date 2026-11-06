@@ -147,10 +147,12 @@
     function heading(network, title) {
       const head = element('div', 'c-step-head'); head.append(mark(network, 'big'), element('h3', '', title || 'Connect ' + label(network))); return head;
     }
-    let browserSession = null;
+    let browserSession = null, selectedProvider = null, detailOpen = false, resizeCleanup = null;
     function endBrowser() { const id = browserSession; browserSession = null; if (id) api('/api/unified/connectors/browser/' + id + '/cancel', 'POST', {}).catch(() => {}); }
     async function cancel() {
       endBrowser();
+      resizeCleanup?.(); resizeCleanup = null;
+      root.classList.remove('c-viewer');
       const old = active; active = null; const mine = ++generation;
       if (old) {
         try { await request(old.network, 'cancel', {login_id: old.login_id}); }
@@ -164,6 +166,7 @@
       }
     }
     async function start(network, flow) {
+      detailOpen = true;
       if (flow === 'browser' || String(flow).startsWith('browser:')) return startBrowser(network, String(flow).split(':')[1]);
       const mine = generation + 1;
       await cancel(); if (mine !== generation) return;
@@ -181,6 +184,7 @@
     }
     function failure(error, network, flow, mine) {
       if (mine !== generation) return;
+      root.classList.remove('c-viewer'); resizeCleanup?.(); resizeCleanup = null;
       problem(error);
       button(root, 'Start again', async () => start(network, flow), 'primary wide');
       button(root, 'Back to accounts', async () => show());
@@ -422,17 +426,36 @@
     async function startBrowser(network, flow) {
       const mine = generation + 1;
       await cancel(); if (mine !== generation) return;
+      detailOpen = true;
+      root.classList.add('c-viewer');
       root.replaceChildren(heading(network, 'Sign in to ' + label(network)));
       const hint = element('p', 'c-live-hint', BROWSER_HINT[network] || 'Sign in on the page below. Messenger connects as soon as you are signed in.');
-      root.append(hint, element('p', 'helper c-live-note', 'This is a private window: nothing you type here is saved, and it closes by itself.'));
+      const help = element('details', 'c-live-help'); help.append(element('summary', '', 'Sign-in help'), hint, element('p', 'helper c-live-note', 'Only you control this private sign-in window. It closes when you finish or cancel.'));
+      root.append(help);
+      const tools = element('div', 'c-live-tools'); root.append(tools);
       const shell = element('div', 'c-live'), img = element('img', 'c-live-img'); img.alt = label(network) + ' sign-in page'; img.draggable = false;
       const wait = element('p', 'c-waiting'); wait.append(element('span', 'spinner'), element('span', '', 'Opening ' + label(network) + '…'));
       shell.append(img); root.append(shell);
       const keys = element('div', 'c-live-keys'), typer = element('textarea', 'c-live-type'); typer.rows = 1; typer.placeholder = 'Type here to fill the page'; typer.autocapitalize = 'none'; typer.spellcheck = false; typer.setAttribute('aria-label', 'Type into the page');
       keys.append(typer); root.append(keys, wait);
       const send = body => browserSession && api('/api/unified/connectors/browser/' + browserSession + '/input', 'POST', body).catch(() => {});
+      let fullSize = false;
+      const fit = () => {
+        const w = img.naturalWidth || width, h = img.naturalHeight || height;
+        const scale = fullSize ? 1 : Math.min(1, shell.clientWidth / w, shell.clientHeight / h);
+        img.style.width = Math.max(1, Math.floor(w * scale)) + 'px';
+        img.style.height = Math.max(1, Math.floor(h * scale)) + 'px';
+      };
+      img.onload = fit;
+      const zoom = button(tools, 'Full size', () => {
+        fullSize = !fullSize; shell.classList.toggle('full-size', fullSize);
+        zoom.textContent = fullSize ? 'Fit window' : 'Full size'; zoom.setAttribute('aria-pressed', String(fullSize));
+        shell.scrollLeft = shell.scrollTop = 0; fit();
+      }, 'secondary c-live-key'); zoom.setAttribute('aria-pressed', 'false');
+      for (const [text, dy] of [['↑ Page', -360], ['↓ Page', 360]]) button(tools, text, () => send({type: 'scroll', x: .5, y: .5, dy}), 'secondary c-live-key');
+      button(tools, 'Cancel sign-in', () => { back(); }, 'c-link c-live-key');
       for (const [text, key] of [['⌫', 'Backspace'], ['Tab', 'Tab'], ['Enter ⏎', 'Enter']]) { const k = element('button', 'secondary c-live-key', text); k.type = 'button'; k.onclick = () => send({type: 'key', key}); keys.append(k); }
-      const back = element('button', 'secondary c-live-key', '‹ Page back'); back.type = 'button'; back.onclick = () => send({type: 'back'}); keys.append(back);
+      const pageBack = element('button', 'secondary c-live-key', '‹ Page back'); pageBack.type = 'button'; pageBack.onclick = () => send({type: 'back'}); keys.append(pageBack);
       typer.addEventListener('beforeinput', e => {
         if (e.inputType === 'insertText' || e.inputType === 'insertReplacementText' || e.inputType === 'insertFromPaste') { const t = e.data ?? e.dataTransfer?.getData('text') ?? ''; if (t) send({type: 'text', text: t}); }
         else if (e.inputType === 'deleteContentBackward') send({type: 'key', key: 'Backspace'});
@@ -443,23 +466,25 @@
       const point = e => { const r = img.getBoundingClientRect(); return {x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height}; };
       // Drag scrolls the page live, like a phone; a short touch is a tap.
       let down = null, owed = 0, flushing = false;
-      const scale = () => (height || 720) / (img.getBoundingClientRect().height || 1);  // page pixels per screen pixel
+      const scale = () => (img.naturalHeight || height) / (img.getBoundingClientRect().height || 1);  // page pixels per screen pixel
       const flush = async () => { if (flushing || !down || Math.abs(owed) < 1) return; flushing = true; const dy = owed; owed = 0; await send({type: 'scroll', ...down.at, dy}); flushing = false; flush(); };
       img.addEventListener('pointerdown', e => { down = {x: e.clientX, y: e.clientY, last: e.clientY, at: point(e), moved: false}; img.setPointerCapture?.(e.pointerId); });
       img.addEventListener('pointermove', e => {
         if (!down) return;
         if (!down.moved && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 8) return;
-        down.moved = true; owed += (down.last - e.clientY) * scale(); down.last = e.clientY; flush();
+        down.moved = true;
+        if (fullSize) { shell.scrollLeft += down.x - e.clientX; shell.scrollTop += down.last - e.clientY; down.x = e.clientX; down.last = e.clientY; return; }
+        owed += (down.last - e.clientY) * scale(); down.last = e.clientY; flush();
       });
       img.addEventListener('pointerup', () => {
         if (!down) return; const d = down; if (!d.moved) { down = null; send({type: 'tap', ...d.at}); typer.focus({preventScroll: true}); return; }
         flush().then(() => { down = null; });
       });
       img.addEventListener('pointercancel', () => { down = null; owed = 0; });
-      img.addEventListener('wheel', e => { e.preventDefault(); send({type: 'scroll', ...point(e), dy: e.deltaY}); }, {passive: false});
-      button(root, 'Cancel', async () => { const next = generation + 1; await cancel(); if (next === generation) await show(); });
+      img.addEventListener('wheel', e => { if (fullSize) return; e.preventDefault(); send({type: 'scroll', ...point(e), dy: e.deltaY}); }, {passive: false});
+      // Keep the same disposable browser route; size the picture to the available app window, not vh.
       const width = Math.max(320, Math.min(430, Math.round(shell.clientWidth || 400))), height = Math.max(520, Math.min(860, Math.round(width * 1.7)));
-      shell.style.aspectRatio = width + ' / ' + height;
+      const observer = new global.ResizeObserver(() => { if (root.contains(shell)) fit(); else observer.disconnect(); }); resizeCleanup = () => observer.disconnect(); observer.observe(shell); fit();
       let started;
       try { started = await api('/api/unified/connectors/browser/start', 'POST', {network, flow, width, height, mobile: network === 'slack'}); }
       catch (e) { if (mine === generation) failure(e, network, 'browser', mine); return; }
@@ -477,10 +502,11 @@
           // Slack's "open the app" page: say it again right where the eye is.
           if (network === 'slack' && /(^|\.)slack\.com$/.test(f.host || '') && f.host !== 'app.slack.com') hint.classList.add('attn');
         }
-        else if (f.state === 'continue') { browserSession = null; step(network, flow, f.result?.next, mine); return; }
+        else if (f.state === 'continue') { browserSession = null; root.classList.remove('c-viewer'); observer.disconnect(); step(network, flow, f.result?.next, mine); return; }
         else if (f.state === 'connecting') wait.replaceChildren(element('span', 'spinner'), element('span', '', 'Signed in. Connecting your workspaces…'));
         else {
           browserSession = null;
+          root.classList.remove('c-viewer'); observer.disconnect();
           if (f.state === 'done') {
             root.replaceChildren(heading(network, label(network) + ' connected'), element('p', 'helper', (f.message || '') + '. Your chats appear in the Inbox over the next few minutes.' + (f.result?.failed?.length ? ' Not connected: ' + f.result.failed.join(', ') + '.' : '')));
             button(root, 'Done', async () => show(), 'primary wide'); options.onChange?.(network);
@@ -519,6 +545,47 @@
         } finally { payload.api_hash = ''; save.disabled = false; }
       };
     }
+    // LINE stays under Accounts → Add. Waking its preinstalled bridge is separate from
+    // owner sign-in: setup never starts a login or handles any account credentials.
+    async function setupLine(provider) {
+      const mine = generation + 1;
+      const cancelled = cancel(); selectedProvider = provider; detailOpen = false;
+      root.replaceChildren(heading('line', 'Set up LINE'), element('p', 'helper', 'Starting the private LINE connection… This can take up to a minute.'));
+      button(root, 'Back to accounts', () => show(), 'c-link c-back');
+      let timer;
+      const current = () => mine === generation && selectedProvider === provider;
+      // This bounds the entire setup, including a slow or stalled enable/status request.
+      const timeout = new Promise((_, reject) => { timer = global.setTimeout(() => reject(new Error('setup_timeout')), 60000); });
+      try {
+        const ready = async () => {
+          await cancelled; if (!current()) return null;
+          if (provider.state === 'not_configured') await request('line', 'enable', {});
+          for (let attempt = 0; attempt < 60 && current(); attempt++) {
+            const status = await request('line', 'status');
+            if (!current()) return null;
+            Object.assign(provider, status);
+            if (!['not_configured', 'unavailable'].includes(status.state)) {
+              if (!(status.flows || []).length && status.state !== 'connected') throw new Error('missing_login_flows');
+              return provider;
+            }
+            await new Promise(resolve => global.setTimeout(resolve, 1000));
+          }
+          throw new Error('setup_timeout');
+        };
+        const status = await Promise.race([ready(), timeout]);
+        if (!current() || !status) return;
+        selectProvider(provider);
+      } catch (e) {
+        if (!current()) return;
+        // Invalidate late status results before offering a retry; never present stale readiness.
+        ++generation;
+        root.replaceChildren(heading('line', 'LINE setup needs attention'));
+        const incomplete = e.code === 'connector_not_configured' || e.message === 'missing_login_flows';
+        problem(new Error(incomplete ? 'The LINE installation on this Wizard is incomplete. It needs repair before you can sign in.' : 'The private LINE connection did not become ready. Retry setup. If it still fails, the LINE service on this Wizard needs repair.'));
+        button(root, 'Retry LINE setup', () => setupLine(provider), 'primary wide');
+        button(root, 'Back to accounts', () => show(), 'c-link c-back');
+      } finally { global.clearTimeout?.(timer); }
+    }
     function card(provider) {
       const [stateText, tone] = STATE[provider.state] || [provider.state, 'off'];
       const section = element('section', 'c-card ' + tone); section.dataset.network = provider.network;
@@ -527,6 +594,11 @@
       top.append(text); section.append(top);
       const flows = provider.flows || [];
       if (ABOUT[provider.network] && flows.length) section.append(element('p', 'helper', ABOUT[provider.network]));
+      if (provider.network === 'line' && ['not_configured', 'unavailable'].includes(provider.state)) {
+        section.append(element('p', 'helper', 'Set up the private LINE connection first. Then choose a QR code or email sign-in. Only you enter your LINE sign-in details.'));
+        button(section, provider.state === 'not_configured' ? 'Set up LINE' : 'Retry LINE setup', () => setupLine(provider), 'primary wide');
+        return section;
+      }
       if (provider.state === 'not_configured' && provider.network === 'telegram') {
         section.append(element('p', 'helper', 'Add Telegram application keys once, then scan a QR code with your phone.'));
         button(section, 'Set up Telegram', setupTelegram, 'primary wide');
@@ -555,6 +627,7 @@
     }
     // A connected account's options: who it is, Disconnect, and Back. Opened from its tile.
     async function manage(provider) {
+      selectedProvider = null; detailOpen = true;
       const mine = generation + 1;
       await cancel(); if (mine !== generation) return;
       const who = (provider.logins || []).map(l => l.name).filter(Boolean).join(', ');
@@ -596,23 +669,41 @@
       t.onclick = () => { addOpen = !addOpen; sync(); if (addOpen) panel.scrollIntoView?.({block: 'nearest', behavior: 'smooth'}); };
       sync(); return t;
     }
+    function selectProvider(provider) {
+      // Picking a tile, never warming a worker, is what opens its setup instructions.
+      cancel().catch(e => problem(e)); selectedProvider = provider; detailOpen = false;
+      root.replaceChildren(card(provider));
+      button(root, 'Back to accounts', () => show(), 'c-link c-back');
+    }
+    function back() {
+      if (selectedProvider && detailOpen) { selectProvider(selectedProvider); return true; }
+      if (selectedProvider || detailOpen) { show().catch(e => problem(e)); return true; }
+      if (addOpen) {
+        addOpen = false; const panel = root.querySelector('.c-add-panel'), plus = root.querySelector('.c-plus');
+        if (panel && plus) { panel.hidden = true; plus.setAttribute('aria-expanded', 'false'); return true; }
+      }
+      return false;
+    }
     async function show({focus} = {}) {
       const mine = generation + 1;
-      await cancel(); if (mine !== generation) return;
+      const cancelled = cancel(); selectedProvider = null; detailOpen = false;
+      root.replaceChildren(element('p', 'helper', 'Loading accounts…'));
+      await cancelled; if (mine !== generation) return;
       const data = await api('/api/unified/connectors', 'GET'); if (mine !== generation) return;
       providers = data.providers || [];
-      // Signal and KakaoTalk are optional on this Wizard; they fold away until set up.
-      const usable = providers.filter(p => p.network === 'telegram' || (p.supported && p.state !== 'not_configured'));
+      // Account placement must not depend on worker readiness. Slack/Instagram stay under Add
+      // after enable/restart too (James, 5 Nov): Settings keeps only existing account management.
+      const usable = providers.filter(p => p.state === 'connected' || p.logins?.length);
       const later = providers.filter(p => !usable.includes(p));
-      const connected = usable.filter(p => p.state === 'connected');
+      const connected = usable;
       // No "x of y connected" score: connecting every network is not the goal.
       root.replaceChildren();
       if (!connected.length) root.append(element('p', 'c-summary', 'Connect an account to bring its chats into your Inbox'));
       const order = p => p.state === 'connected' ? 2 : p.state === 'not_configured' ? 1 : 0;
       const sorted = [...usable].sort((a, b) => order(a) - order(b));
-      for (const provider of sorted.filter(p => p.state !== 'connected')) root.append(card(provider));
+
       // Every other network sits dormant (no process work) until the owner picks it here.
-      const addable = later.filter(p => p.supported && p.state === 'not_configured');
+      const addable = later.filter(p => p.supported);
       const gone = later.filter(p => !p.supported);
       const panel = element('div', 'c-add-panel');
       if (addable.length || gone.length) {
@@ -621,18 +712,20 @@
         for (const p of addable.sort((a, b) => a.label.localeCompare(b.label))) {
           const t = tile(p, 'add');
           t.onclick = async () => {
+            if (p.network === 'line' || p.state !== 'not_configured') { selectProvider(p); return; }
             if (t.disabled) return; t.disabled = true; t.classList.add('busy');
+            const name = t.querySelector('.c-tile-name'); if (name) name.textContent = 'Starting ' + p.label + '…';
+            const mine = generation;
             try {
               await request(p.network, 'enable', {});
               for (let attempt = 0; attempt < 60; attempt++) {
                 await new Promise(resolve => global.setTimeout(resolve, 1000));
-                if (!root.contains(grid)) return;
+                if (mine !== generation || !root.contains(grid)) return;
                 const status = await request(p.network, 'status');
-                if (status.state !== 'unavailable' && status.state !== 'not_configured') break;
+                if (status.state !== 'unavailable' && status.state !== 'not_configured') { Object.assign(p, status); break; }
               }
-              addOpen = false;
-              await show({focus: p.network});
-            } catch (e) { problem(e); t.disabled = false; t.classList.remove('busy'); }
+              if (mine === generation && root.contains(grid)) selectProvider(p);
+            } catch (e) { if (mine !== generation || !root.contains(grid)) return; problem(e); t.disabled = false; t.classList.remove('busy'); if (name) name.textContent = p.label; }
           };
           grid.append(t);
         }
@@ -643,17 +736,17 @@
       // choices simply show.
       if (connected.length) {
         root.append(element('h3', 'c-add-title', 'Your accounts'));
-        const mine = element('div', 'c-add-grid c-on-grid'); for (const provider of sorted.filter(p => p.state === 'connected')) mine.append(tile(provider, 'on'));
+        const mine = element('div', 'c-add-grid c-on-grid'); for (const provider of sorted) mine.append(tile(provider, 'on'));
         if (panel.children.length) mine.append(plusTile(panel));
         root.append(mine);
       }
       if (panel.children.length) root.append(panel);
       const resumed = providers.find(p => p.pending_login);
-      if (resumed) step(resumed.network, 'phone', resumed.pending_login, mine);
-      if (focus) { const c = root.querySelector('.c-card[data-network="' + focus + '"]'); c?.scrollIntoView?.({block: 'nearest'}); c?.querySelector('.primary')?.focus(); }
+      if (resumed) { selectedProvider = resumed; detailOpen = true; step(resumed.network, 'phone', resumed.pending_login, mine); }
+      if (focus) { const p = providers.find(p => p.network === focus); if (p) selectProvider(p); }
       return providers;
     }
-    return {show, start, close: async () => { root.replaceChildren(); await cancel(); }};
+    return {show, start, back, close: async () => { root.replaceChildren(); await cancel(); }};
   };
   global.MessengerConnectors.qrCanvas = qrCanvas;
   global.MessengerConnectors.BRAND = BRAND;
