@@ -27,6 +27,10 @@ class TransportTests(unittest.TestCase):
                 elif self.path.endswith('/state'):
                     status, body = 200, [
                         {'type': 'm.bridge', 'content': {'protocol': {'id': 'telegram'}, 'com.beeper.room_type.v2': 'dm'}},
+                        # Current room classification uses joined member metadata:
+                        # two joined accounts prove a DM; unknown membership is a group.
+                        {'type': 'm.room.member', 'state_key': '@owner:messenger.internal', 'content': {'membership': 'join', 'displayname': 'Fixture Owner'}},
+                        {'type': 'm.room.member', 'state_key': '@fixture:messenger.internal', 'content': {'membership': 'join', 'displayname': 'Fixture Peer'}},
                         {'type': 'm.room.name', 'content': {'name': 'Disposable fixture'}}]
                 else:
                     status, body = 404, {'errcode': 'fixture_only'}
