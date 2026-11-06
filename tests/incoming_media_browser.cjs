@@ -98,7 +98,10 @@ const playing = loc => loc.evaluate(async v => { const a = v.currentTime; await 
     assert.ok(media.some(m => m.url.includes(encodeURIComponent('$static')) && /image\/gif/.test(m.type || '')), tag + ' static GIF thumb is image/gif');
     await page.mouse.move(2, 2);
     await page.screenshot({path: path.join(out, `incoming-${tag}-thread.png`)});
-    // GIF: off screen at open (the thread opens at the bottom), so paused; plays once scrolled into view.
+    // GIF: off screen at the bottom of the chat, so paused; plays once scrolled into view. Every staged line is unread,
+    // so since 16.24 the chat opens at the "new messages" divider: read down to the bottom first.
+    await page.evaluate(() => { const sc = document.querySelector('.u-timeline'); sc.scrollTop = sc.scrollHeight; });
+    await page.waitForTimeout(600);
     const gifBox = page.locator('.u-row[data-id="$gif"] .u-media.gif'), gif = gifBox.locator('video');
     const attrs = await gif.evaluate(v => ({loop: v.loop, muted: v.muted, inline: v.playsInline, preload: v.preload, autoplay: v.autoplay}));
     assert.deepEqual(attrs, {loop: true, muted: true, inline: true, preload: 'auto', autoplay: true});
