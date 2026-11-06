@@ -83,6 +83,26 @@ class PermissionsHTTP(HTTPFixture):
             self.assertEqual(status, 200, (path, data))
         self.assertEqual(unified.dispatch.call_count, len(routes))
 
+    def test_catch_me_up_routes_are_owner_only_machine_key_gets_403_in_every_mode(self):
+        # The grant covers only the app's own Tinfoil summarizer: no agent, key or machine caller reaches these.
+        unified = Mock(); unified.dispatch.return_value = {'ok': True}; self.server.unified = unified
+        routes = [('GET', '/api/unified/people/p/catch-up'), ('POST', '/api/unified/people/p/catch-up'),
+                  ('POST', '/api/unified/people/p/catch-up/grant'), ('POST', '/api/unified/people/p/catch-up/revoke'),
+                  ('GET', '/api/unified/catch-up/settings'), ('POST', '/api/unified/catch-up/settings')]
+        for mode in MODES:
+            self.policy(mode)
+            for method, path in routes:
+                with self.subTest(mode=mode, method=method, path=path):
+                    status, _, data = self.request(method, path, {} if method != 'GET' else None, self.bearer)
+                    self.assertEqual(status, 403, data)
+                    self.assertEqual(data['error']['code'], 'agent_access_off' if mode == 'no_access' else 'agent_permission_denied')
+        unified.dispatch.assert_not_called()
+        owner = self.owner_headers()
+        for method, path in routes:
+            status, _, data = self.request(method, path, {} if method != 'GET' else None, owner)
+            self.assertEqual(status, 200, (path, data))
+        self.assertEqual(unified.dispatch.call_count, len(routes))
+
     def test_owner_surfaces_denied_for_all_modes_even_with_cookie(self):
         cookie, csrf = self.session()
         for mode in MODES:

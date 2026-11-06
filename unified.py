@@ -27,6 +27,7 @@ from urllib.parse import quote, unquote, urlencode
 from urllib.request import Request, urlopen
 from engine import EngineError
 from readiness.search import SearchStore
+import catchup
 import history_cursor
 from group_features import MENTION_NETWORKS, MXID, member_labels, find_mentions, mention_content, incoming_mentions
 from typing import NoReturn
@@ -493,6 +494,9 @@ class PeopleStore:
             db.execute('DELETE FROM identity WHERE id=?', (row[0],))
             if not db.execute('SELECT 1 FROM identity WHERE person_id=?', (row[1],)).fetchone():
                 db.execute('DELETE FROM person WHERE id=?', (row[1],))
+                for table in ('catchup_grant', 'catchup_summary'):
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone():
+                        db.execute('DELETE FROM %s WHERE person_id=?' % table, (row[1],))
             return True
 
     def status_identities(self, db):
@@ -1355,6 +1359,7 @@ class UnifiedInbox:
         self.store = PeopleStore(self.root / 'people.sqlite3')
         self.engine = engine
         self.translator = Translator(self.store, self.root)
+        self.catchup = catchup.CatchUpService(self.store, self.catchup_complete, fail, self.store.own_names)
         self.lock = threading.RLock()
         self.sync_lock = threading.Lock()
         self.warm_queue = queue.Queue(maxsize=200)
@@ -2124,6 +2129,15 @@ class UnifiedInbox:
                 'translating': pending, 'seq': self.store.seq,
                 'typing': typing['names'] if typing and typing['until'] > time.time() else [],
                 'history_warning': next((g for g in gaps if g), None)}
+
+    def catchup_complete(self, model, system, user):
+        """One Catch me up model call through the private worker that holds the Tinfoil key. Nothing else is reachable."""
+        secret = json.loads((self.root / 'secrets.json').read_text())['translation_token']
+        result = http(os.environ.get('TRANSLATION_URL', 'http://translation:8766'), '/complete', 'POST', {'model': model, 'system': system, 'user': user}, secret, 185)
+        out = result.get('text')
+        if not isinstance(out, str) or not out.strip():
+            raise ValueError('empty')
+        return out
 
     def translate_one(self, message_id, original):
         translated, error = self.translator.translate(original, 'en')
@@ -2942,6 +2956,17 @@ class UnifiedInbox:
             return self.picker(suffix[1:], q)
         if len(suffix) == 2 and suffix[0] == 'media' and method == 'GET':
             return self.media(text(suffix[1], 300), q('kind') if q('kind') in ('thumb', 'link0', 'link1') else 'full')
+        if len(suffix) >= 3 and suffix[0] == 'people' and suffix[2] == 'catch-up':
+            # Owner session only: no agent capability maps to these routes (permissions.capability_for -> None).
+            pid = suffix[1]
+            if len(suffix) == 3 and method == 'GET': return self.catchup.status(pid)
+            if len(suffix) == 3 and method == 'POST':
+                since = payload.get('since')
+                return {'job': self.catchup.start(pid, since if type(since) is int else None)}
+            if suffix[3:] == ['grant'] and method == 'POST': return self.catchup.grant(pid, payload.get('mode'))
+            if suffix[3:] == ['revoke'] and method == 'POST': return self.catchup.revoke(pid, payload.get('clear') is True)
+        if suffix == ['catch-up', 'settings'] and method == 'GET': return self.catchup.settings()
+        if suffix == ['catch-up', 'settings'] and method == 'POST': return self.catchup.set_model(payload.get('model'))
         if len(suffix) >= 2 and suffix[0] == 'people':
             person_id = suffix[1]
             if len(suffix) == 2:
