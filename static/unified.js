@@ -60,7 +60,38 @@
       };
     } catch (_) { box.textContent = 'Notification settings unavailable.'; }
   }
-  if (typeof module !== 'undefined') module.exports = {backState, fetchOlder, notificationSettings};
+  function mentionQuery(text, caret = text.length) {
+    const match = /(?:^|[\s(])@([^@\n]{0,80})$/u.exec(text.slice(0, caret));
+    return match ? {start: caret - match[1].length - 1, end: caret, query: match[1].toLocaleLowerCase()} : null;
+  }
+  function parseMentions(text, members) {
+    const spans = [], occupied = new Set();
+    const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const member of [...members].sort((a,b) => b.label.length - a.label.length)) {
+      const re = new RegExp('(?<![\\p{L}\\p{N}_@])' + escape('@' + member.label) + '(?![\\p{L}\\p{N}_])', 'gu');
+      for (const match of text.matchAll(re)) {
+        const start = match.index, end = start + match[0].length;
+        if (Array.from({length:end-start}, (_,i) => start+i).some(i => occupied.has(i))) continue;
+        for (let i=start;i<end;i++) occupied.add(i);
+        spans.push({id:member.id, name:member.name, start, end});
+      }
+    }
+    return spans.sort((a,b) => a.start-b.start);
+  }
+  function insertMention(text, query, member) {
+    const token = '@' + member.label + ' ';
+    return {text:text.slice(0, query.start) + token + text.slice(query.end), caret:query.start + token.length};
+  }
+  function mentionKey(key, index, count) {
+    if (!count) return {index, handled:false};
+    if (key === 'ArrowDown' || key === 'ArrowUp') return {index:(index + (key === 'ArrowDown' ? 1 : -1) + count) % count, handled:true};
+    return {index, handled:['Enter','Tab','Escape'].includes(key), select:key === 'Enter' || key === 'Tab', close:key === 'Escape'};
+  }
+  function reactorGroups(reactions) {
+    return reactions.map(r => ({...r, reactors:[...new Map((r.reactors || []).map(u => [u.id,u])).values()],
+      missing:Math.max(0,r.count-new Set((r.reactors || []).map(u => u.id)).size)}));
+  }
+  if (typeof module !== 'undefined') module.exports = {backState, fetchOlder, notificationSettings, mentionQuery, parseMentions, insertMention, mentionKey, reactorGroups};
   if (typeof document === 'undefined') return;
   const $ = id => document.getElementById(id);
   const s = {tab: 'people', person: null, overlay: null, search: null, low: (() => { try { return sessionStorage.getItem('messenger-inbox-low') === '1'; } catch { return false; } })(), ready: false, epoch: 0, busy: false, drafts: {}, people: [], login: null};
@@ -206,6 +237,7 @@
     s.login = null; s.overlay = null; $('u-overlay')?.remove(); view.lifted?.classList.remove('lifted'); view.lifted = null; lastFocus?.focus(); hold(); syncBar();
   }
   function back() {
+    if (view.mentionClose?.()) return true;
     if (!s.overlay && view.selection?.active) { view.selection.clear(); return true; }
     if (s.overlay && connectorController?.back?.()) return true;
     if (s.overlay === 'Edit QR codes') { myCodes(); return true; }
@@ -808,6 +840,7 @@
         if (who) line.append(node('span', 'u-snippet-who', who + ': '));
         line.append(snippet(p.last) || ''); bottom.append(line);
       }
+      if (p.unread_mentions) bottom.append(node('span', 'u-badge u-mention-badge', '@'));
       if (p.unread) bottom.append(node('span', 'u-badge' + (p.muted || isLow(p) ? ' muted' : ''), p.unread > 99 ? '99+' : String(p.unread)));
       else if (p.last?.outgoing) bottom.append(node('span', 'u-ticks' + (p.peer_read_ts >= p.last.timestamp ? ' read' : ''), p.peer_read_ts >= p.last.timestamp ? '✓✓' : '✓'));
       info.append(top, bottom);
@@ -1174,6 +1207,7 @@
       const reactions = new Map();
       for (const photo of post.photos) for (const reaction of photo.reactions || []) {
         const current = reactions.get(reaction.key) || {key: reaction.key, count: 0, mine: false};
+        if (reaction.reactors) current.reactors = [...new Map([...(current.reactors || []),...reaction.reactors].map(u => [u.id,u])).values()];
         current.count += reaction.count; current.mine ||= reaction.mine; reactions.set(reaction.key, current);
       }
       post.reactions = [...reactions.values()];
@@ -1198,7 +1232,7 @@
       const pos = jp && jn ? 'mid' : jp ? 'last' : jn ? 'first' : 'single';
       const read = m.outgoing && p.peer_read_ts >= m.timestamp;
       const key = m.client_id || m.id;
-      const sig = JSON.stringify([group && !m.outgoing ? p.faces?.[nameOf(m.sender)] : 0, m.id, m.original, m.translated, m.transcript, m.translation_error, m.edited, m.deleted, m.reactions, m.pending, m.failed, pos, read, shown[m.id], m.reply?.text, m.links?.length, auto, multi, group, m.photos?.map(p => [p.id, p.deleted, p.media, p.local, p.pending])]);
+      const sig = JSON.stringify([group && !m.outgoing ? p.faces?.[nameOf(m.sender)] : 0, m.id, m.original, m.translated, m.transcript, m.translation_error, m.edited, m.deleted, m.mentions, m.mentioned, m.reactions, m.pending, m.failed, pos, read, shown[m.id], m.reply?.text, m.links?.length, auto, multi, group, m.photos?.map(p => [p.id, p.deleted, p.media, p.local, p.pending])]);
       let el = els.get(key);
       if (!el || el.dataset.sig !== sig) { el = bubble(m, pos, {auto, multi, group, read, faces: p.faces}); el.dataset.sig = sig; els.set(key, el); }
       kids.push(el);
@@ -1213,6 +1247,13 @@
     else if (view.anchor) { scroll.scrollTop = scroll.scrollHeight - before; }
     view.anchor = false;
     view.selection?.paint();
+    const mentioned = t.messages.filter(m => m.mentioned && !m.outgoing && !m.deleted);
+    const head = scroll.parentElement.querySelector('.u-thread-head');
+    if (head && mentioned.length && !head.querySelector('.u-jump-mention')) {
+      let cursor = 0;
+      const jump = button('@',() => { const target = mentioned[cursor++ % mentioned.length]; els.get(target.client_id || target.id)?.scrollIntoView({block:'center',behavior:'smooth'}); },'u-jump-mention u-badge');
+      jump.setAttribute('aria-label','Jump to mentions of you'); head.append(jump);
+    }
     if (follow) markRead();
   }
   async function older() {
@@ -1233,7 +1274,16 @@
     call('people/' + view.id + '/read', {timestamp: last.timestamp}).catch(() => {});
   }
   const URL_RE = /\bhttps?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]]/g;
-  function richText(cls, text) {
+  function richText(cls, text, mentions = []) {
+    if (mentions.length) {
+      const p = node('p', cls); let at = 0;
+      for (const m of mentions) {
+        if (m.start < at || m.end > text.length || m.end <= m.start) continue;
+        p.append(text.slice(at,m.start));
+        const a = node('a','u-mention',text.slice(m.start,m.end)); a.href = 'https://matrix.to/#/' + encodeURIComponent(m.id); a.target = '_blank'; a.rel = 'noopener noreferrer'; p.append(a); at = m.end;
+      }
+      p.append(text.slice(at)); return p;
+    }
     const p = node('p', cls); let at = 0;
     // Markdown links from bridges ("[label](url)"): show the label as the link text.
     if (MD_LINK.test(text)) {
@@ -1289,12 +1339,12 @@
     }
     if (!story && !m.deleted && m.original && m.msgtype !== 'm.location') {
       if (ctx.auto || m.outgoing) {
-        b.append(richText('u-text', m.translated || m.original));
+        b.append(richText('u-text', m.translated || m.original, !m.translated || m.translated === m.original ? m.mentions : []));
         if (m.translated && m.translated !== m.original) b.append(node('p', 'u-original', m.original));
         if (m.translation_error) b.append(node('p', 'u-original error', m.translation_error));
       } else {
         const translated = shown[m.id] === 'translated' && m.translated;
-        b.append(richText('u-text', translated ? m.translated : m.original));
+        b.append(richText('u-text', translated ? m.translated : m.original, translated ? [] : m.mentions));
         if (foreignScript(m.original)) b.append(button(translated ? 'Show original' : 'Translate', () => translate(m), 'u-translate link'));
       }
     }
@@ -1305,11 +1355,12 @@
     meta.append(node('time', '', new Date(m.timestamp).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})));
     if (m.outgoing) meta.append(m.failed ? node('span', 'u-status-ic fail', '!') : m.pending ? node('span', 'u-status-ic clock', '◷') : node('span', 'u-status-ic' + (ctx.read ? ' read' : ''), ctx.read ? '✓✓' : '✓'));
     b.append(meta);
+    if (m.mentioned && !m.outgoing) { row.classList.add('u-mentioned'); b.prepend(node('span','u-mention-notice','@ You were mentioned')); }
     row.append(b);
     if (m.failed) row.append(button(m.failed === true ? 'Not sent · Tap to retry' : 'Not sent · ' + m.failed + ' · Retry', () => m.retry ? m.retry() : null, 'u-retry link'));
     if (m.reactions?.length) {
       const strip = node('div', 'u-reactions');
-      for (const r of m.reactions) strip.append(button(r.key + (r.count > 1 ? ' ' + r.count : ''), () => react(m, r.key), 'u-react' + (r.mine ? ' mine' : '')));
+      for (const r of m.reactions) strip.append(reactionChip(r, m.reactions, {pid:view.id, toggle:() => react(m,r.key)}));
       row.append(strip);
     }
     if (!m.pending && !m.deleted) gestures(row, b, m);
@@ -1592,7 +1643,7 @@
   function toggledReactions(reactions, key) {
     const had = reactions.some(r => r.mine && r.key === key);
     // Copy every entry: increasing an existing count must not mutate the rollback snapshot.
-    const next = reactions.map(r => ({...r, count: r.count - (r.mine ? 1 : 0), mine: false})).filter(r => r.count > 0);
+    const next = reactions.map(r => ({...r, count: r.count - (r.mine ? 1 : 0), mine: false, ...(r.reactors ? {reactors:r.reactors.filter(u => !u.mine)} : {})})).filter(r => r.count > 0);
     if (!had) { const r = next.find(r => r.key === key); if (r) { r.count++; r.mine = true; } else next.push({key, count: 1, mine: true}); }
     return next;
   }
@@ -1938,6 +1989,97 @@
   }
 
   // ---------- composer: text, photo, voice; optimistic and idempotent ----------
+  // Extend the existing textarea and reaction strip: no second composer or sheet.
+  function mentionComposer(form, field, draft, members, changed) {
+    view.mentionClose?.();
+    const mirror = node('div','u-mention-mirror'); mirror.setAttribute('aria-hidden','true'); field.prepend(mirror);
+    const picker = node('div','u-mention-picker'); picker.id = 'u-mention-picker'; picker.hidden = true;
+    picker.setAttribute('role','listbox'); picker.setAttribute('aria-label','Mention a group member'); form.append(picker);
+    draft.setAttribute('aria-controls',picker.id); draft.setAttribute('aria-expanded','false'); draft.setAttribute('aria-autocomplete','list');
+    let selected = 0, options = [], query = null, outside = null;
+    const paint = () => {
+      mirror.replaceChildren(); let at = 0;
+      for (const span of parseMentions(draft.value,members())) { mirror.append(draft.value.slice(at,span.start),node('mark','',draft.value.slice(span.start,span.end))); at = span.end; }
+      mirror.append(draft.value.slice(at) + '\n'); mirror.scrollTop = draft.scrollTop;
+    };
+    const close = () => {
+      const open = !picker.hidden; picker.hidden = true; draft.setAttribute('aria-expanded','false'); draft.removeAttribute('aria-activedescendant');
+      outside?.abort(); outside = null; return open;
+    };
+    view.mentionClose = close;
+    function choose(member) {
+      if (!query) return;
+      const next = insertMention(draft.value,query,member); draft.value = next.text;
+      close(); draft.focus(); draft.setSelectionRange(next.caret,next.caret); changed(); close(); paint();
+    }
+    function draw() {
+      picker.replaceChildren(node('small','helper','Mention a group member'));
+      if (!options.length) picker.append(node('p','helper','No matching members'));
+      for (const [i,m] of options.entries()) {
+        const item = button('',() => choose(m),'u-mention-option'); item.type = 'button'; item.id = 'u-mention-option-' + i;
+        item.setAttribute('role','option'); item.setAttribute('aria-selected',String(i===selected));
+        item.append(withPicture(avatar(m.name,'small'),pictureURL(view.id,m.avatar,m.id)),node('span','',m.label));
+        item.onpointerdown = e => e.preventDefault(); picker.append(item);
+      }
+      if (options.length) { draft.setAttribute('aria-activedescendant','u-mention-option-' + selected); picker.querySelector('[aria-selected="true"]')?.scrollIntoView({block:'nearest'}); }
+    }
+    const update = () => {
+      paint(); const all = members(); query = mentionQuery(draft.value,draft.selectionStart);
+      if (!all.length || !query || view.edit) return close();
+      options = all.filter(m => m.label.toLocaleLowerCase().includes(query.query)).slice(0,50); selected = 0;
+      picker.hidden = false; draft.setAttribute('aria-expanded','true'); draw();
+      if (!outside) {
+        outside = new AbortController(); document.addEventListener('pointerdown',e => { if (!form.contains(e.target)) close(); },{capture:true,signal:outside.signal});
+      }
+    };
+    draft.addEventListener('keydown',e => {
+      if (picker.hidden || e.isComposing) return;
+      if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); close(); return; }
+      const next = mentionKey(e.key,selected,options.length); if (!next.handled) return;
+      e.preventDefault(); e.stopImmediatePropagation(); selected = next.index;
+      if (next.select) choose(options[selected]); else draw();
+    },true);
+    draft.addEventListener('click',update); draft.addEventListener('scroll',paint);
+    return {paint,update,close};
+  }
+  function reactorFace(user, pid) {
+    return withPicture(avatar(user.name || user.id,'small'),pictureURL(pid,user.avatar,user.id));
+  }
+  function reactorList(reactions, key, pid) {
+    const sheet = overlay('Reactions'), tabs = node('div','u-reactor-tabs'), list = node('div','u-reactor-list');
+    tabs.setAttribute('role','tablist'); sheet.append(tabs,list); const groups = reactorGroups(reactions);
+    const paint = chosen => {
+      list.replaceChildren();
+      for (const tab of tabs.children) tab.setAttribute('aria-selected',String(tab.dataset.key === chosen));
+      for (const group of groups.filter(g => !chosen || g.key === chosen)) {
+        list.append(node('h3','',group.key + ' · ' + group.count));
+        for (const user of group.reactors) { const row = node('div','u-reactor-row'); row.append(reactorFace(user,pid),node('span','',user.name || user.id)); list.append(row); }
+        if (group.missing) list.append(node('p','helper',group.missing + ' reaction' + (group.missing === 1 ? '' : 's') + ' · This network did not provide who reacted.'));
+      }
+    };
+    for (const [value,label] of [['','All'],...groups.map(g => [g.key,g.key + ' ' + g.count])]) {
+      const tab = button(label,() => paint(value),'secondary'); tab.dataset.key = value; tab.setAttribute('role','tab'); tabs.append(tab);
+    }
+    paint(key); return sheet;
+  }
+  function reactionChip(reaction, reactions, {pid, toggle}) {
+    const chip = button(reaction.key + (reaction.count > 1 ? ' ' + reaction.count : ''),e => {
+      if (chip.dataset.held) { delete chip.dataset.held; return; }
+      if (e.pointerType === 'touch' || matchMedia('(hover: none)').matches) reactorList(reactions,reaction.key,pid);
+      else toggle();
+    },'u-react' + (reaction.mine ? ' mine' : ''));
+    chip.setAttribute('aria-label',reaction.key + ', ' + reaction.count + ' reactions. Hold or right-click to see who reacted.');
+    const tip = node('span','u-reactor-tooltip'); tip.setAttribute('role','tooltip'); tip.hidden = true;
+    const group = reactorGroups([reaction])[0];
+    for (const user of group.reactors.slice(0,8)) { const row = node('span','u-reactor-row'); row.append(reactorFace(user,pid),node('span','',user.name || user.id)); tip.append(row); }
+    if (group.reactors.length > 8) tip.append(node('span','', '+' + (group.reactors.length-8) + ' more · right-click to see all'));
+    if (group.missing) tip.append(node('span','','Who reacted is unavailable for ' + group.missing + ' reaction' + (group.missing===1?'':'s')));
+    chip.append(tip); chip.addEventListener('pointerenter',e => { if (e.pointerType !== 'touch') tip.hidden = false; });
+    chip.addEventListener('pointerleave',() => { tip.hidden = true; }); chip.addEventListener('focus',() => { tip.hidden = false; }); chip.addEventListener('blur',() => { tip.hidden = true; });
+    chip.addEventListener('pointerdown',e => { chip.classList.add('pressed'); e.stopPropagation(); });
+    for (const event of ['pointerup','pointercancel','pointerleave']) chip.addEventListener(event,() => chip.classList.remove('pressed'));
+    holdToMenu(chip,() => { tip.hidden = true; reactorList(reactions,reaction.key,pid); }); return chip;
+  }
   function composer(id, p) {
     // A retained DOM view is not proof that its physical mic is still running (e.g. notification Stop).
     if (view.recording?.phase === 'recording') {
@@ -1971,6 +2113,7 @@
     const send = iconButton('send', reviewed ? 'Preview send' : 'Send', () => submit(), 'u-send');
     const mic = iconButton('mic', 'Record voice message', () => record(), 'u-mic'); mic.hidden = !telegramOnly;
     const field = node('div', 'u-field'); field.append(draft);
+    const mentionUI = mentionComposer(form, field, draft, () => (p.members || []).filter(m => m.identity_id === channel.value), () => draft.oninput?.());
     const row = node('div', 'u-compose-row'); row.append(attach, field, send, mic, file);
     const paintBar = () => {
       bar.replaceChildren(); const target = view.edit || view.reply; const a = view.attach || [];
@@ -1998,12 +2141,13 @@
     // One tap is one message. Send settles the server draft and uploads before the box empties, so the text stays
     // visible for a moment; a second tap (or Enter) in that window used to send it twice (James's phone, 31 Oct 2026).
     let sending = false;
-    const grow = () => { draft.style.height = 'auto'; draft.style.height = Math.min(draft.scrollHeight, 140) + 'px'; const has = !!draft.value.trim() || !!view.attach?.length; send.hidden = !has && telegramOnly && !view.edit; mic.hidden = !telegramOnly || !send.hidden; send.disabled = !has || sending; send.classList.toggle('busy', sending); send.setAttribute('aria-busy', String(sending)); };
+    const grow = () => { mentionUI.paint(); draft.style.height = 'auto'; draft.style.height = Math.min(draft.scrollHeight, 140) + 'px'; const has = !!draft.value.trim() || !!view.attach?.length; send.hidden = !has && telegramOnly && !view.edit; mic.hidden = !telegramOnly || !send.hidden; send.disabled = !has || sending; send.classList.toggle('busy', sending); send.setAttribute('aria-busy', String(sending)); };
     // The thread rebuilds its composer once the person loads: keep photos/reply already in the tray visible.
     if (view.attach?.length || view.reply) queueMicrotask(() => { paintBar(); grow(); });
     let typingAt = 0, idle = null;
     const typing = on => { if (!telegramOnly) return; call('people/' + id + '/typing', {typing: on}).catch(() => {}); };
     draft.oninput = () => {
+      mentionUI.update();
       s.drafts[id] = view.edit ? s.drafts[id] : draft.value; grow(); saveDrafts(); hold(); if (!view.edit) view.sd?.schedule(); else paintBar();
       if (draft.value && Date.now() - typingAt > 4000) { typingAt = Date.now(); typing(true); }
       clearTimeout(idle); idle = setTimeout(() => { if (typingAt) { typingAt = 0; typing(false); } }, 5000);
@@ -2024,6 +2168,7 @@
     window.WizardApp?.composer?.bind(form, {field: 'textarea', zone: form, onFiles: takeFiles, onSubmit: () => submit(), notice: msg => toast(msg)});
     form.onsubmit = e => { e.preventDefault(); submit(); };
     async function submit() {
+      mentionUI.close();
       if (sending) return;
       sending = true; grow();
       try { await submitOnce(); } finally { sending = false; grow(); }
@@ -3120,7 +3265,7 @@
     try { window.WizardApp?.share?.receive?.({accepts: ['text', 'url'], receive: receiveShare}); } catch { /* standalone or an older Wizard: no share sheet */ }
   }
   window.MessengerUnified = {
-    settings: accounts, showNative, returnNative,
+    settings: accounts, showNative, returnNative, reactionChip, reactorList,
     setNativeRows(rows) { nativeRows = rows; nativeUnread = rows.reduce((n, p) => n + (p.muted || p.low_priority || !(p.unread > 0) ? 0 : 1), 0); syncBadge(); if ((!s.native && !s.person) || split.on) drawList(); if (s.resumeNative && rows.some(p => p.group_id === s.resumeNative)) { const group = s.resumeNative; s.resumeNative = null; openNative(group); } },
     receiveShare, shareTargetRows,
     ask, toast, holdToMenu, actionMenu, muteAction, icon, messageGestures, messageSelection,

@@ -20,4 +20,17 @@ Reuse:
 - album-projection: REUSE static/unified.js albumPosts
 - appearance: REUSE shared app-client Appearance v1
 
+## Group interaction extensions (same components)
+
+| Capability | Existing implementation | Decision |
+|---|---|---|
+| Input/draft/send | WizardApp.composer.bind; unified.js composer/serverDraft/queueSend | REUSE shared input; EXTEND group member selection and existing textarea mirror |
+| Reaction strip | unified.js bubble/reactionChip; app.js renderReactions | EXTEND sender tooltip + existing overlay; no second reaction renderer |
+| Back/outside/hold | WizardApp.back.register; unified.js back/overlay/holdToMenu | REUSE; EXTEND picker-first close |
+| Owner notices | unified.py ingest/push_intent; existing group rows/message bubbles | EXTEND explicit protocol tags/highlight; REUSE notification policy |
+| Pictures | existing opaque avatar proxy + avatar renderer | REUSE |
+| Appearance | app-client Appearance v1 / --wz-* roles | REUSE live theme; literal opaque popup floor beneath token paint |
+
+See docs/group-mentions-reactions.md for channel limitations, copied Telegram patterns and bounded acceptance.
+
 NEW: none.

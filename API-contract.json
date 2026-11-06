@@ -46,6 +46,14 @@
     "ready"
   ],
   "setup_semantics": "No identity is created automatically. A dedicated vault passphrase of at least 16 characters is needed to create/unlock. Keyring remains encrypted at rest. Restart always relocks. account_configured reports whether an identity exists; ready may have identity=null when a new vault has only been unlocked. The one messaging key is separate from Wizard root signing.",
+  "group_features": {
+    "timeline_person_members": "Joined group members with id (network identity, never guessed), name, disambiguated label, identity_id and opaque avatar tag; available only for audited mention-capable bridges.",
+    "outgoing_mentions": "Existing send/preview-confirm paths derive exact @member-label tokens from that channel's cached members. Serialize m.mentions.user_ids and escaped matrix.to links. Client-supplied identity lists are never authoritative.",
+    "message_mentions": "mentions: [{id,name,start,end}] uses UTF-16 offsets into original; mentioned:boolean means an explicit protocol mention targets owner/owner ghost. Plain-text owner names never imply a mention.",
+    "unread_mentions": "Existing people/groups rows include unread_mentions, following last_read_ts. Muted/low-priority push rules remain unchanged; no permission request is added.",
+    "reactions": "Existing reaction entries add reactors:[{id,name,mine,avatar}] and identities_complete:boolean. Missing senders/names produce counts only, never invented identities. Marmot list-valued by_emoji retains actual pubkeys; aggregate-only values stay unnamed.",
+    "network_limits": "See docs/group-mentions-reactions.md. Unsupported/unverified native tagging has no member picker; LINE setup repair does not assert native mention support. No new API authority or provider login."
+  },
   "routes": [
     {
       "method": "GET",
