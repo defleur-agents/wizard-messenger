@@ -145,7 +145,7 @@ SLACK_TEAMS_JS = r'''(() => { try {
 
 NETWORKS = {'slack': {'url': 'https://app.slack.com/signin', 'title': 'Slack'}}
 # Every other network runs the bridge's own browser step (bridgev2 "cookies"), like Beeper's built-in browser.
-GENERIC = {'twitter': ('cookies', 'X'), 'linkedin': ('cookies', 'LinkedIn'), 'facebook': ('facebook', 'Facebook'),
+GENERIC = {'instagram': ('instagram', 'Instagram'), 'twitter': ('cookies', 'X'), 'linkedin': ('cookies', 'LinkedIn'), 'facebook': ('facebook', 'Facebook'),
            'dots': ('cookies', 'ChatGPT'), 'gmessages': ('google', 'Google')}
 # Slack's last page asks to open the desktop app; the browser client is where the login lives.
 SLACK_APP_PROMPT = re.compile(r'^https://[a-z0-9-]+\.slack\.com/(?:ssb/redirect|checkcookie|signin/confirmed|workspace-signin.*redir)', re.I)
