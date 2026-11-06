@@ -1,9 +1,15 @@
-# Only runtime delta from the approved 16.22 image is the retained live Share recency behavior.
-# Do NOT use Dockerfile.overlay: its old 15.12 carrier predates the 16.22 engine/security changes.
-FROM ghcr.io/humanitylabs-org/wizard-messenger:sha-6ab2ed06c48787acb22828b6296597f6f1dfe1a7@sha256:71f6f4e003456273179a84245fd1f8019b36c67e26d74c9b2018b9e68d841736
+# Published approved 16.23 engine plus exact live-preservation overlays; no engine rebuild.
+FROM ghcr.io/humanitylabs-org/wizard-messenger:sha-e199ae8ed61089d9aabff1baa4cb4dd162f29e38@sha256:632c0dfa8e9bbca8a5feb17a5615d7cbbbaac57932b6a7c473ad6c79140a6a85
 ARG REVISION
-LABEL org.opencontainers.image.revision=$REVISION \
-      org.opencontainers.image.version="0.2.0-unified.16.22+live-recents-candidate" \
-      org.opencontainers.image.source="https://github.com/humanitylabs-org/wizard-messenger"
+LABEL org.wizard.messenger.source-overlay=$REVISION \
+      org.wizard.messenger.engine-source="e199ae8ed61089d9aabff1baa4cb4dd162f29e38" \
+      org.wizard.messenger.approved-source="f1bb7a130abc447e7beaabb8243801ac8d2f64e1" \
+      org.wizard.messenger.live-base="884a7d46c4aa443e715dd28fc65c0b81afcdcb57" \
+      org.wizard.messenger.recipe-counter="57" \
+      org.opencontainers.image.version="0.2.0-unified.16.23"
+COPY --chmod=0644 unified.py /app/unified.py
 COPY --chmod=0644 static/unified.js /app/static/unified.js
+COPY --chmod=0644 static/unified.css /app/static/unified.css
+COPY --chmod=0644 static/connectors.js /app/static/connectors.js
+COPY --chmod=0644 plumbing/connectors-provenance.json /app/plumbing/connectors-provenance.json
 USER 1000:1000
