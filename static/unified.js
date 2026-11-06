@@ -1523,8 +1523,9 @@
       if (view.id !== id || view.unread !== u || store.threads[id] !== t) return;
       first = firstUnread(t, u);
     }
+    const exact = first !== undefined; // false: the unread run is longer than the divider could reach, so it cannot mark where to start
     if (first === undefined) { const top = t.messages.find(m => !m.outgoing && !m.pending && !m.deleted && m.id); first = top ? {id: top.id, n: u.count} : null; }
-    Object.assign(u, {settled: true, from: first?.id || null, n: first?.n || 0});
+    Object.assign(u, {settled: true, from: first?.id || null, n: first?.n || 0, exact});
     paintThread(true);
   }
   function unreadDivider() {
@@ -1542,9 +1543,13 @@
   const CU_MODELS = {'glm-5-3': 'GLM 5.3', 'deepseek-v4-1-flash': 'DeepSeek V4.1 Flash'};
   const CU_BASIS = {unread: 'Your unread messages', since: 'Since the new-messages marker', last_sent: 'Since you last wrote here', all: 'The whole chat history'};
   const cuPath = (id, tail = '') => 'people/' + encodeURIComponent(id) + '/catch-up' + tail;
+  // Where "what I missed" starts. The divider only reaches back 300 messages, so past that it is not trusted: the
+  // read mark from when the chat opened is used instead, and with neither the server works it out itself. Never a cap.
   function cuSince(id) {
-    const u = view.id === id ? view.unread : null, m = u?.settled && u.from ? store.threads[id]?.messages.find(x => x.id === u.from) : null;
-    return m ? m.timestamp : undefined;
+    const u = view.id === id ? view.unread : null; if (!u?.settled) return undefined;
+    const m = u.exact && u.from ? store.threads[id]?.messages.find(x => x.id === u.from) : null;
+    if (m) return m.timestamp;
+    return typeof u.ts === 'number' ? u.ts + 1 : undefined;
   }
   function catchUpRow() {
     if (!view.cuRow) { view.cuRow = node('p', 'u-unread-catchup'); view.cuRow.append(button('Summarize these', () => catchUp(view.id, {run: true}), 'u-unread-catchup-btn')); }
@@ -1628,7 +1633,7 @@
       const foot = node('p', 'u-cu-foot', 'Summarized ' + c.count + (c.count === 1 ? ' message' : ' messages') + (c.parts > 1 ? ' in ' + c.parts + ' parts' : '') + '.');
       body.append(foot);
       if (c.parts > 1) body.append(node('p', 'helper u-cu-parts', 'Too long to read at once, so it was read in ' + c.parts + ' parts and merged. Nothing was left out.'));
-      body.append(node('p', 'helper', 'Written privately by ' + (CU_MODELS[c.model] || c.model) + ' on Tinfoil · ' + when(c.created)));
+      body.append(node('p', 'helper', 'Written privately by ' + (CU_MODELS[c.model] || c.model) + ' on Tinfoil · ' + when(c.created * 1000)));
       body.append(button('Refresh', () => (st.grant ? go() : ask()), 'u-cu-refresh wide'));
     }
     // Paint first, reconcile after: the sheet is up this frame; the status arrives behind it.
