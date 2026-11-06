@@ -1109,3 +1109,5 @@ html[data-presentation="immersive"] #unified-inbox .u-header, html[data-presenta
 .u-label-act.danger { color: var(--wz-danger, #ff8a8a); }
 .u-chip.manage { font-style: normal; }
 .u-empty .helper { max-width: 320px; margin: 6px auto 12px; }
+/* Menu rows (Filters > Labels, chat Labels) are full 44px tap targets. */
+.u-menu .u-act { min-height: 44px; }
