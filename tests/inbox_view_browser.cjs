@@ -101,11 +101,11 @@ const SKINS = {
     assert.equal(await view.getByRole('radio', {name: 'Chats'}).getAttribute('aria-checked'), 'true');
     assert.equal(await view.getByRole('radio', {name: 'Compact'}).getAttribute('aria-checked'), 'false');
     await tall(view.getByRole('radio'), 'Inbox view');
-    await shot('settings-chats');
+    await page.waitForTimeout(450); await shot('settings-chats');
     await view.getByRole('radio', {name: 'Compact'}).click();
     assert.equal(await view.getByRole('radio', {name: 'Compact'}).getAttribute('aria-checked'), 'true', 'tap registers at once');
     assert.equal(await page.evaluate(() => localStorage.getItem('messenger.inboxView')), 'compact', 'saved at once');
-    await shot('settings-compact');
+    await page.waitForTimeout(450); await shot('settings-compact');
     await page.mouse.click(viewport.width - 4, 4); await page.waitForTimeout(550);
     assert.equal(await page.locator('.u-sheet').count(), 0, 'outside tap closes Settings');
     assert.equal(await page.locator('#messenger.u-compact').count(), 1);
