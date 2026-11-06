@@ -176,11 +176,34 @@
     for (const e of entries) if (e.isIntersecting) { avatarSeen.unobserve(e.target); avatarQueue.push(e.target); }
     pumpAvatars();
   }, {rootMargin: '300px 0px'}) : null;
-  function withPicture(el, url) {
-    if (!url) return el;
-    const img = document.createElement('img'); img.className = 'u-av-img'; img.alt = ''; img.decoding = 'async'; img.dataset.src = url;
-    img.onerror = () => { if (img.dataset.retried) return img.remove(); img.dataset.retried = '1'; setTimeout(() => { if (img.isConnected) { avatarQueue.push(img); pumpAvatars(); } }, 2500 + Math.random() * 2000); };
-    img.onload = () => el.classList.add('has-img'); el.append(img);
+  // A refresh replaces rows, not their decoded pictures. Scope the slot to its
+  // surface so the same person can appear in the list and header simultaneously.
+  // Keep this memory-only and bounded; never persist profile pictures in storage.
+  const avatarPictures = new Map(), AVATAR_CACHE_LIMIT = 512;
+  function withPicture(el, url, slot) {
+    if (!url) { if (slot) avatarPictures.delete(slot); return el; }
+    const cached = slot && avatarPictures.get(slot);
+    if (cached?.url === url) {
+      avatarPictures.delete(slot); avatarPictures.set(slot, cached);
+      el.append(cached.img);
+      if (!cached.img.hidden && cached.img.complete && cached.img.naturalWidth) el.classList.add('has-img');
+      return el;
+    }
+    const img = document.createElement('img'); img.className = 'u-av-img'; img.alt = ''; img.decoding = 'async'; img.dataset.src = url; img.hidden = true;
+    img.onerror = () => {
+      img.hidden = true; img.parentElement?.classList.remove('has-img');
+      if (img.dataset.retried) return;
+      img.dataset.retried = '1'; setTimeout(() => { if (img.isConnected) { avatarQueue.push(img); pumpAvatars(); } }, 2500 + Math.random() * 2000);
+    };
+    img.onload = () => { img.hidden = false; img.parentElement?.classList.add('has-img'); }; el.append(img);
+    if (slot) {
+      avatarPictures.delete(slot); avatarPictures.set(slot, {url, img});
+      // Do not evict a picture which is currently on screen.
+      for (const [key, entry] of avatarPictures) {
+        if (avatarPictures.size <= AVATAR_CACHE_LIMIT) break;
+        if (!entry.img.isConnected && entry.img !== img) avatarPictures.delete(key);
+      }
+    }
     if (avatarSeen) avatarSeen.observe(img); else { img.loading = 'lazy'; img.src = url; }
     return el;
   }
@@ -463,7 +486,7 @@
       for (const p of all.filter(p => p.display_name.toLowerCase().includes(q)).slice(0, 8)) {
         const row = button('', () => openPerson(p.id), 'u-directory-row');
         const text = node('span', 'u-who-text'); text.append(node('strong', '', p.display_name), node('span', '', (p.group ? 'Group · ' : '') + networksOf(p).map(netLabel).join(' · ')));
-        row.append(netAvatar(p, 'small'), text); list.append(row);
+        row.append(netAvatar(p, 'small', 'new-message'), text); list.append(row);
       }
       if (!list.children.length) list.append(node('p', 'u-empty', 'No one matches'));
     };
@@ -561,7 +584,7 @@
     head.append(iconButton('back', 'Back', back, 'u-back')); // hidden in the desktop split: the list is right there
     const who = button('', onInfo || null, 'u-who'); who.disabled = !onInfo;
     const text = node('span', 'u-who-text'); text.append(node('strong', '', name)); if (subtitle) text.append(node('span', '', subtitle));
-    const face = node('span', 'u-av-wrap small'); face.append(withPicture(avatar(name, 'small'), picture));
+    const face = node('span', 'u-av-wrap small'); face.append(withPicture(avatar(name, 'small'), picture, 'thread-header'));
     if (network) { const b = netBadge(network, 'u-net'); b.setAttribute('aria-hidden', 'true'); face.append(b); }
     who.append(face, text); head.append(who);
     // 16.17: with a keyboard and no list beside the chat, ↑ / ↓ step to the previous / next chat (j / k sit on them)
@@ -612,7 +635,7 @@
           if (!shareText && !q && first !== letter) { letter = first; list.append(node('p', 'u-letter', /\p{L}/u.test(first) ? first : '#')); }
           const row = button('', () => { if (shareText) placeShared(p.id, shareText); closeOverlay(); openPerson(p.id); }, 'u-directory-row');
           const text = node('span', 'u-who-text'); text.append(node('strong', '', p.display_name), node('span', '', (p.group ? 'Group · ' : '') + networksOf(p).map(netLabel).join(' · ')));
-          row.append(netAvatar(p, 'small'), text); list.append(row);
+          row.append(netAvatar(p, 'small', 'directory'), text); list.append(row);
         }
         if (!list.children.length) list.append(node('p', 'u-empty', 'No one matches'));
       };
@@ -968,8 +991,8 @@
     if (f.startsWith('label:')) return (p.labels || []).includes(f.slice(6));
     return true;
   }
-  function netAvatar(p, size = '') {
-    const wrap = node('span', 'u-av-wrap' + (size ? ' ' + size : '')); wrap.append(withPicture(avatar(p.display_name, size), pictureURL(p.id, p.avatar)));
+  function netAvatar(p, size = '', surface = 'list') {
+    const wrap = node('span', 'u-av-wrap' + (size ? ' ' + size : '')); wrap.append(withPicture(avatar(p.display_name, size), pictureURL(p.id, p.avatar), surface + ':' + p.id));
     // Merged chats show every network's badge, overlapped (up to three).
     const nets = networksOf(p).slice(0, 3);
     nets.forEach((n, i) => { const b = netBadge(n, 'u-net' + (i ? ' u-net-' + i : '')); wrap.append(b); });
@@ -1699,7 +1722,7 @@
   function bubble(m, pos, ctx) {
     // Direction comes only from message.outgoing: own messages sit right in the accent colour and never carry a name.
     const row = node('div', 'u-row' + (m.outgoing ? ' outgoing' : ' incoming') + ' pos-' + pos + (ctx.group && !m.outgoing ? ' in-group' : '')); row.dataset.id = m.id; row.dataset.direction = m.outgoing ? 'out' : 'in';
-    if (ctx.group && !m.outgoing && (pos === 'last' || pos === 'single')) { const who = nameOf(m.sender), tag = ctx.faces?.[who]; const face = withPicture(avatar(who || '?', 'tiny u-row-av'), pictureURL(view.id, tag, who)); face.title = who; row.append(face); }
+    if (ctx.group && !m.outgoing && (pos === 'last' || pos === 'single')) { const who = nameOf(m.sender), tag = ctx.faces?.[who]; const face = withPicture(avatar(who || '?', 'tiny u-row-av'), pictureURL(view.id, tag, who), 'message:' + view.id + ':' + m.id); face.title = who; row.append(face); }
     const b = node('article', 'u-message' + (m.outgoing ? ' outgoing' : '') + (m.deleted ? ' deleted' : '') + (m.pending ? ' pending' : '') + (m.failed ? ' failed' : ''));
     const visual = !m.deleted && ['m.image', 'm.sticker', 'm.video'].includes(m.msgtype);
     if (visual && !m.original) b.classList.add('bare');
