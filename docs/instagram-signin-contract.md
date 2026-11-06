@@ -30,7 +30,7 @@ Facebook/Messenger only):
 
 | Flow ID | Operation | Initial step |
 | --- | --- | --- |
-| `instagram` | Uses an already verified Instagram web session | `cookies`, `fi.mau.meta.cookies`; named cookie fields include required `sessionid`, `csrftoken`, `ds_user_id`, `mid`, `ig_did` as advertised by the bridge |
+| `instagram` | Uses an already verified Instagram web session | `cookies`, `fi.mau.meta.cookies`; required `sessionid`, `csrftoken`, `ds_user_id`; optional `rur`, `shbid`, `shbts`, `mid`, `ig_did` |
 | `android` | Username/password via Instagram Android API, with CAA/native verification | `user_input`, `fi.mau.meta.instagram.credentials`, `username` + `password` |
 | `instagram-password` | Username/password via Instagram web API, with web verification | same credentials step |
 

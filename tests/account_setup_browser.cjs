@@ -62,11 +62,12 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
       if(lineOnly && /\/line\/(start|step|disconnect)$/.test(api)) { forbidden.push(api); return route.abort(); }
       if(instagramOnly && api==='/api/unified/connectors/instagram/start') {
         const b=JSON.parse(req.postData()); loginCalls.push({action:'start',flow:b.flow}); loginPhase=0;
-        if(b.flow==='instagram') return ok(loginStep('cookies','cookies',{cookies:{url:'https://www.instagram.com/',fields:['sessionid','csrftoken','ds_user_id'].map(id=>({id,required:id!=='csrftoken',sources:[{type:'cookie',name:id}]}))}}));
+        if(b.flow==='instagram') return ok(loginStep('cookies','cookies',{cookies:{url:'https://www.instagram.com/',fields:['sessionid','csrftoken','ds_user_id'].map(id=>({id,required:true,sources:[{type:'cookie',name:id}]}))}}));
         return ok(loginStep('user_input','credentials',{user_input:{fields:[{id:'username',name:'Username',type:'username'},{id:'password',name:'Password',type:'password'}]}}));
       }
       if(instagramOnly && api==='/api/unified/connectors/instagram/step') {
         const b=JSON.parse(req.postData()); loginCalls.push({action:'step',type:b.type,fields:Object.keys(b.fields||{})});
+        if(b.fields?.username==='synthetic-rejected') return route.fulfill({status:409,json:{ok:false,error:{code:'login_failed',message:'Instagram sign-in: The password you entered is incorrect. Try browser sign-in if this keeps happening.'}}});
         if(b.type==='cookies') {assert.deepEqual(Object.keys(b.fields).sort(),['csrftoken','ds_user_id','sessionid']);return ok({type:'complete'});}
         if(++loginPhase===1) return ok(loginStep('user_input','totp',{instructions:'Enter the code from your authenticator app.',user_input:{fields:[{id:'code',name:'Verification code',type:'2fa_code'}]}}));
         if(loginPhase===2) return ok(loginStep('display_and_wait','afad_wait',{instructions:'Approve this request in the Instagram app.',display_and_wait:{type:'nothing'}}));
@@ -114,7 +115,7 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
       await f.locator('.c-paste').fill(paste); await captures('browser-draft');
       assert.equal(await f.locator('.c-paste').inputValue(),paste,'skin changes preserve unsent cookie draft');
       await f.getByRole('button',{name:'Connect',exact:true}).click();
-      await f.getByText('Instagram DMs connected',{exact:true}).waitFor();
+      await f.getByText('Instagram connected',{exact:true}).waitFor();
       await f.getByRole('button',{name:'Done',exact:true}).click();
       await f.locator('.c-plus').click(); await f.locator('.c-add[data-network=instagram]').click();
       await f.getByRole('button',{name:'Username and password for Instagram DMs',exact:true}).click();
@@ -125,7 +126,14 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
       await f.locator('input[name=code]').fill('123456'); await f.getByRole('button',{name:'Continue',exact:true}).click();
       await f.getByRole('button',{name:'I approved it — continue',exact:true}).waitFor(); await captures('approval');
       await f.getByRole('button',{name:'I approved it — continue',exact:true}).click();
-      await f.getByText('Instagram DMs connected',{exact:true}).waitFor();
+      await f.getByText('Instagram connected',{exact:true}).waitFor();
+      await f.getByRole('button',{name:'Done',exact:true}).click();
+      await f.locator('.c-plus').click(); await f.locator('.c-add[data-network=instagram]').click();
+      await f.getByRole('button',{name:'Username and password for Instagram DMs',exact:true}).click();
+      await f.locator('input[name=username]').fill('synthetic-rejected'); await f.locator('input[name=password]').fill('synthetic-password');
+      await f.getByRole('button',{name:'Continue',exact:true}).click();
+      await f.getByText(/The password you entered is incorrect/).waitFor();
+      await f.getByRole('button',{name:'Use browser sign-in',exact:true}).waitFor(); await captures('rejection');
       assert.equal(starts.length,0,'Instagram never opens a remote browser'); assert.deepEqual(errors,[]); assert.deepEqual(forbidden,[]);
       summary.push({profile:profile.name,status:'PASS',coverage:'synthetic hosted Instagram browser cookies + credentials/code/approval only; no real login',loginCalls});
       await ctx.close(); continue;

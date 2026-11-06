@@ -183,7 +183,7 @@ async function lineSetupFailureAndClose() {
 }
 async function instagramBrowserAndPasswordSteps() {
   const root=new Element('main'), calls=[]; let phase=0, held=deferred();
-  const fields=['sessionid','csrftoken','ds_user_id'].map(id=>({id,required:id!=='csrftoken',sources:[{type:'cookie',name:id}]}));
+  const fields=['sessionid','csrftoken','ds_user_id'].map(id=>({id,required:true,sources:[{type:'cookie',name:id}]}));
   const credentials=step({step_id:'fi.mau.meta.instagram.credentials',user_input:{fields:[{id:'username',type:'username'},{id:'password',type:'password'}]}});
   const ui=window.MessengerConnectors(root,async(p,m,b)=>{
     calls.push({p,b:b&&JSON.parse(JSON.stringify(b))});
