@@ -42,7 +42,7 @@ class RustlsSecurityOverlay(unittest.TestCase):
         self.assertIn("git apply --check /engine-patches/0001-rustls-0.23.46.patch", dockerfile)
         self.assertIn("git apply --whitespace=error /engine-patches/0001-rustls-0.23.46.patch", dockerfile)
         self.assertIn("dac950e433d49280ebb9f8c46cfe4432287e0812186115e077bf83fee953377a  Cargo.lock", dockerfile)
-        self.assertIn("cargo build --locked -p wn-cli --bins -j1", dockerfile)
+        self.assertIn("cargo build --locked -p wn-cli --bins -j${CARGO_JOBS}", dockerfile)
         self.assertIn("unproven prebuilt wn/wnd carrier refused", dockerfile)
 
 

@@ -36,11 +36,16 @@ def public_key(value):
         raise EngineError('invalid_public_key', 'Use a lowercase npub or 64-character hex public key', 400)
     return value
 
-def timeline_row(m, me):
+def timeline_row(m, me, names=None):
     """One materialized Marmot message as the view's row: text, edits, delete tombstone, reactions, reply quote."""
     by=(m.get('reactions') or {}).get('by_emoji') or {}
     reactions=[{'key':k,'count':len(v) if isinstance(v,list) else int(v or 0),'mine':isinstance(v,list) and me in v} for k,v in by.items()]
     reactions=[r for r in reactions if r['count']>0]
+    for reaction in reactions:
+        senders = by[reaction['key']]
+        reaction['reactors'] = [{'id': ident, 'name': 'You' if ident == me else (names or {}).get(ident) or ident,
+                                 'mine': ident == me, 'avatar': None} for ident in dict.fromkeys(senders) if isinstance(ident, str)] if isinstance(senders, list) else []
+        reaction['identities_complete'] = len(reaction['reactors']) == reaction['count']
     preview=m.get('reply_preview') or None
     reply=None
     if m.get('reply_to_message_id'):
@@ -470,7 +475,8 @@ class MarmotEngine:
     def messages(self, group, limit=100, before=None, before_message_id=None):
         with self.mutex:
             self._require_ready()
-            self._dm_members(group)
+            members = self._dm_members(group)
+            names = {member[k]: member.get('display_name') or '' for member in members for k in ('account_id','member_id','npub') if member.get(k)}
             if not isinstance(limit,int) or isinstance(limit,bool) or not 1 <= limit <= 200:
                 raise EngineError('invalid_limit','Use a message limit between 1 and 200',400)
             if (before is None) != (before_message_id is None): raise EngineError('invalid_cursor','Supply both before and before_message_id',400)
@@ -480,7 +486,7 @@ class MarmotEngine:
             command={'Timeline':{'command':{'List':{'group_id':group,'group':None,'before':before,'before_message_id':before_message_id,'after':None,'after_message_id':None,'limit':limit}}}}
             result=self._execute({'Messages':{'command':command}})
             me=result.get('account_id') or ''
-            rows=[timeline_row(m,me) for m in result['messages'] if m.get('kind',9)==9 and not m.get('group_system')]
+            rows=[timeline_row(m,me,names) for m in result['messages'] if m.get('kind',9)==9 and not m.get('group_system')]
             raw=result['messages']
             cursor={'before':raw[0]['timeline_at'],'before_message_id':raw[0]['message_id']} if raw and (len(raw)==limit or result.get('has_more_before')) else None
             return {'messages':rows,'next_cursor':cursor}

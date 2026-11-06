@@ -71,11 +71,11 @@ const prov = (network, label, state, flows = []) => ({network, label, supported:
 
     // Settings: the account status lives here, without an "x of y" metric; dormant networks are an Add grid.
     await gear.click();
-    await page.locator('.c-card').first().waitFor();
+    await page.locator('.c-plus').waitFor();
     assert.equal(await page.locator('.u-sheet', {hasText: /of \d+ (accounts )?connected/}).count(), 0, 'no x-of-y score anywhere');
     // No duplicate banner: the account's own row says it needs reconnecting, above the connected list.
     assert.equal(await page.locator('.u-sheet .u-acct-text').count(), 0);
-    assert.match(await page.locator('.u-sheet .c-card').first().textContent(), /Instagram DMs.*Needs reconnecting/s);
+    assert.equal(await page.locator('.u-sheet .c-card').count(), 0, 'only explicit selection opens setup');
     // Every account is the same tile: connected tiles (dot + account) first, then Add, then dimmed "Soon" tiles.
     assert.ok(await page.locator('.c-tile.c-on').count() >= 1, 'connected accounts are tiles');
     assert.equal(await page.locator('.c-group, .c-row, details.c-later').count(), 0, 'no second account format');
@@ -90,7 +90,7 @@ const prov = (network, label, state, flows = []) => ({network, label, supported:
     await page.locator('.c-plus').click();
     await page.locator('.c-add').first().waitFor();
     const tiles = await page.locator('.c-add').evaluateAll(els => els.map(e => e.querySelector('.c-tile-name').textContent.trim()));
-    assert.deepEqual(tiles, ['ChatGPT Dots', 'Facebook Messenger', 'Google Messages', 'LinkedIn', 'X']);
+    assert.deepEqual(tiles, ['ChatGPT Dots', 'Facebook Messenger', 'Google Messages', 'Instagram DMs', 'LinkedIn', 'X']);
     assert.ok(await page.locator('.c-tile.c-soon').count() >= 1, 'not-available networks are dimmed tiles');
     assert.ok(await page.locator('.c-tile.c-soon').evaluateAll(els => els.every(e => e.disabled && /Soon/.test(e.textContent))));
     await shot('settings');

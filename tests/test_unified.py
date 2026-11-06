@@ -553,7 +553,7 @@ class SignalMvpTests(unittest.TestCase):
         rows = {m['id']: m for m in self.inbox.timeline(self.pid)['messages']}
         self.assertEqual(rows['$r']['original'], 'answer')
         self.assertEqual(rows['$r']['reply']['text'], 'question!')
-        self.assertEqual(rows['$q']['reactions'], [{'key': '👍', 'count': 1, 'mine': False}])
+        self.assertEqual(rows['$q']['reactions'], [{'key': '👍', 'count': 1, 'mine': False, 'reactors': [], 'identities_complete': False}])
         self.assertTrue(rows['$q']['edited'])
         self.ingest(self.event('$x', {}, etype='m.room.redaction', redacts='$re'))
         self.ingest(self.event('$y', {}, etype='m.room.redaction', redacts='$q'))
@@ -567,7 +567,7 @@ class SignalMvpTests(unittest.TestCase):
         self.inbox.mx = Mock(side_effect=[{'event_id': '$r1'}, {}, {'event_id': '$r2'}, {}])
         self.inbox.react('$q', {'key': '👍'})
         out = self.inbox.react('$q', {'key': '❤️'})
-        self.assertEqual(out['message']['reactions'], [{'key': '❤️', 'count': 1, 'mine': True}])
+        self.assertEqual(out['message']['reactions'], [{'key': '❤️', 'count': 1, 'mine': True, 'reactors': [{'id': '@owner:messenger.internal', 'name': 'You', 'mine': True, 'avatar': None}], 'identities_complete': True}])
         self.assertIn('/redact/%24r1/', self.inbox.mx.call_args_list[1].args[0])
         self.inbox.react('$q', {'key': '❤️'})  # tapping the same one again removes it
         self.assertEqual(self.inbox.row('$q')['reactions'], [])

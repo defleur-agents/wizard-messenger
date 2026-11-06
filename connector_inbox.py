@@ -10,7 +10,7 @@ from unified import weak_label, MXC
 
 # Cached room_meta written before this version may have dropped a bridged room
 # (protocol.id aliases): re-read room state once for those.
-META_VERSION = 3  # 3: member and room pictures
+META_VERSION = 4  # 4: exact joined-member IDs for identity-safe mention autocomplete
 # Bridged history (bridgev2 backfill on stock Synapse) arrives through /sync with
 # its original timestamps; only recent lines may notify.
 LIVE_WINDOW_MS = 15 * 60 * 1000
@@ -131,6 +131,7 @@ class ConnectorInbox(UnifiedInbox):
             room_type = info.get('com.beeper.room_type.v2') or channel.get('fi.mau.' + network + '.type') or info.get('com.beeper.room_type')
             meta['space'] = any(e['type'] == 'm.room.create' and e.get('content', {}).get('type') == 'm.space' for e in state) or room_type in ('space', 'personal_filtering_space')
             meta['kind'] = 'person' if room_type in ('dm', 'private') or (room_type is None and len(members) == 1) else 'group'
+            meta['joined'] = [e.get('state_key') for e in joined]
             meta['names'] = {e.get('state_key'): (e.get('content') or {}).get('displayname') for e in state if e['type'] == 'm.room.member' and (e.get('content') or {}).get('displayname')}
             if network == 'whatsapp' and isinstance(channel.get('id'), str):
                 meta['channel_id'] = channel['id']  # the portal jid: tells the Status Broadcast chat apart
@@ -162,7 +163,7 @@ class ConnectorInbox(UnifiedInbox):
             db.execute('INSERT OR REPLACE INTO room_meta VALUES (?,?)', (room, json.dumps(meta, ensure_ascii=False)))
             # A picture that arrives (or changes) later must reach an Inbox that is already open: bump the
             # chat so the list long-poll repaints it with the new picture tag, even with no new message.
-            touched = old is not None and (old.get('avatar'), old.get('avatars')) != (meta.get('avatar'), meta.get('avatars')) and \
+            touched = old is not None and any(old.get(k) != meta.get(k) for k in ('avatar', 'avatars', 'names', 'joined')) and \
                 db.execute('UPDATE identity SET seq=? WHERE address=?', (self.store.next_seq(), room)).rowcount
         self.rooms[room] = meta
         if touched:
@@ -283,16 +284,21 @@ class ConnectorInbox(UnifiedInbox):
                            content_type=mime, timeout=60)
 
     def refresh_pictures(self, batch=25):
-        """Re-read older rooms' state a few at a time on each sync pass, so every chat gets its picture."""
-        marker = 'meta_pictures_v%d' % META_VERSION
+        """Backfill versioned room metadata in bounded sync batches, including quiet groups.
+
+        The old picture-only marker may already be set on v3 rooms with avatars;
+        use a distinct marker so those rooms also acquire exact joined-member IDs.
+        """
+        marker = 'meta_members_v%d' % META_VERSION
         if self.store.get(marker):
             return
         try:
             with self.store.db() as db:
                 rooms = [r[0] for r in db.execute(
                     "SELECT i.address FROM identity i LEFT JOIN room_meta m ON m.room=i.address "
-                    "WHERE i.network NOT IN ('messenger','private') AND (m.json IS NULL OR m.json NOT LIKE '%\"avatars\"%') "
-                    "AND i.address NOT IN (SELECT value FROM json_each(?)) LIMIT ?", (json.dumps(sorted(self._picture_skip)), batch))]
+                    "WHERE i.network NOT IN ('messenger','private') AND (m.json IS NULL OR m.json NOT LIKE '%\"avatars\"%' "
+                    "OR COALESCE(json_extract(m.json,'$.v'),0) < ?) "
+                    "AND i.address NOT IN (SELECT value FROM json_each(?)) LIMIT ?", (META_VERSION, json.dumps(sorted(self._picture_skip)), batch))]
         except Exception:
             return
         if not rooms:
@@ -305,7 +311,8 @@ class ConnectorInbox(UnifiedInbox):
             except Exception:
                 pass
             with self.store.db() as db:
-                if not db.execute("SELECT 1 FROM room_meta WHERE room=? AND json LIKE '%\"avatars\"%'", (room,)).fetchone():
+                if not db.execute("SELECT 1 FROM room_meta WHERE room=? AND json LIKE '%\"avatars\"%' "
+                                  "AND COALESCE(json_extract(json,'$.v'),0)>=?", (room, META_VERSION)).fetchone():
                     self._picture_skip.add(room)
         self.store.changed()
 
