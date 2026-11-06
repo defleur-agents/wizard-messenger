@@ -65,7 +65,7 @@
     telegram: 'Links as a new Telegram device.',
     slack: 'Signs in as you, like the Slack desktop app. Works with Google and SSO workspaces.',
     line: 'Links as a LINE desktop device. LINE may show a PIN to confirm.',
-    instagram: 'Browser sign-in handles Instagram verification in your own browser. Use a computer for the recommended option. Username and password is an alternative.',
+    instagram: 'Browser sign-in opens Instagram in a private window right here, so it works on a phone and handles Instagram verification. Copying from a computer\u2019s browser, or username and password, are alternatives.',
     signal: 'Links as a Signal linked device.',
     facebook: 'Signs in like messenger.com in your browser. Facebook may ask for your encrypted-chats PIN.',
     twitter: 'Signs in like x.com in your browser, then asks for your X Chat passcode (4 digits).',
@@ -83,7 +83,7 @@
   const FLOW_LABEL = {
     qr: 'Show QR code', phone: 'Use a pairing code instead', email: 'Sign in with email', token: 'Use my browser sign-in',
     'dev.highest.matrix.line.qr_login': 'Show QR code', 'dev.highest.matrix.line.email_login': 'Sign in with email & password',
-    instagram: 'Sign in with browser (recommended)', android: 'Username and password', 'instagram-password': 'Username and password (web alternative)',
+    instagram: 'Copy from a computer\u2019s browser', android: 'Username and password', 'instagram-password': 'Username and password (web alternative)',
     messenger: 'Sign in with your browser', facebook: 'Use facebook.com instead', cookies: 'Sign in with your browser', google: 'Sign in with Google', browser: 'Sign in with your browser',
   };
   const STATE = {
@@ -187,7 +187,7 @@
       root.classList.remove('c-viewer'); resizeCleanup?.(); resizeCleanup = null;
       problem(error);
       button(root, 'Start again', async () => start(network, flow), 'primary wide');
-      if (network === 'instagram' && flow !== 'instagram') button(root, 'Use browser sign-in', () => start(network, 'instagram'));
+      if (network === 'instagram' && flow !== 'browser') button(root, 'Use browser sign-in', () => start(network, 'browser:instagram'));
       button(root, 'Back to accounts', async () => show());
     }
     async function advance(network, payload, fields, mine) {
@@ -284,7 +284,7 @@
         await step(network, flow, next, mine);
       } else if (result.type === 'challenge') {
         root.append(element('p', 'helper', label(network) + ' requires browser verification (such as a CAPTCHA or checkpoint). This view cannot safely complete it. Finish verification in the official app or website, then start a new login. Completing it elsewhere may not resume this bridge session.'));
-        if (network === 'instagram') button(root, 'Use browser sign-in', () => start(network, 'instagram'), 'primary wide');
+        if (network === 'instagram') button(root, 'Use browser sign-in', () => start(network, 'browser:instagram'), 'primary wide');
         button(root, 'Start again', async () => start(network, flow)); back();
       } else if (result.type === 'user_input') {
         if (result.instructions) root.append(element('p', 'helper', result.instructions));
@@ -398,7 +398,7 @@
       const params = result.cookies || {}, fields = params.fields || [], custom = PASTE_HOW[network];
       if (network === 'instagram' && fields.some(f => (f.sources || []).some(s => s.type === 'special'))) {
         root.append(element('p', 'helper', 'Instagram requires an interactive CAPTCHA that this password flow cannot display safely. Use browser sign-in instead and complete the check on instagram.com.'));
-        button(root, 'Use browser sign-in', () => start(network, 'instagram'), 'primary wide'); back(); return;
+        button(root, 'Use browser sign-in', () => start(network, 'browser:instagram'), 'primary wide'); back(); return;
       }
       if (result.instructions && network === 'instagram' && flow !== 'instagram') root.append(element('p', 'helper', result.instructions));
       let host = ''; try { host = new URL(params.url).hostname.replace(/^www\./, ''); } catch (_) { /* no url */ }
@@ -447,6 +447,7 @@
       linkedin: 'Sign in to LinkedIn as usual. Messenger connects when your feed opens.',
       facebook: 'Log in to Facebook as usual. Messenger connects when your news feed or chats open.',
       dots: 'Log in to ChatGPT as usual. Messenger connects when the chat page opens.',
+      instagram: 'Log in to Instagram as usual and finish any code or security check on the page. Messenger connects as soon as your inbox opens.',
       gmessages: 'Pick the Google account that uses Google Messages on your phone. You will then confirm on the phone.',
     };
     async function startBrowser(network, flow) {
@@ -631,12 +632,14 @@
       }
       else if (provider.state === 'unavailable') section.append(element('p', 'helper', 'The private bridge is not responding. Try again in a minute.'));
       // Browser sign-in replaces every copy-from-developer-tools step (Beeper-style).
-      const BROWSER_FLOW = {twitter: 'cookies', linkedin: 'cookies', dots: 'cookies', facebook: 'facebook', gmessages: 'google'};
+      const BROWSER_FLOW = {instagram: 'instagram', twitter: 'cookies', linkedin: 'cookies', dots: 'cookies', facebook: 'facebook', gmessages: 'google'};
       const web = {id: 'browser', name: 'Sign in with your browser'};
       let shown = flows;
       if (provider.network === 'instagram') {
         // Use the existing owner cookie form, not the remote browser framebuffer.
         shown = ['instagram', 'android', 'instagram-password'].flatMap(id => flows.filter(f => f.id === id));
+        // Recommended: the real site in a private Wizard Browser window (works on a phone). The copy-from-a-computer form stays as an alternative.
+        if (flows.some(f => f.id === 'instagram')) shown = [{id: 'browser:instagram', name: 'Sign in with browser (recommended)'}, ...shown];
       }
       else if (provider.state === 'unavailable') shown = flows;
       else if (provider.network === 'slack') shown = [web, ...flows.filter(f => f.id === 'email')];

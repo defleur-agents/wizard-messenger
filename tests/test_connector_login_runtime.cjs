@@ -13,6 +13,10 @@ class Element {
   contains(n) { return this===n || this.children.some(c => c.contains(n)); }
   remove() { if (this.parent) this.parent.children=this.parent.children.filter(n => n!==this); this.parent=null; }
   setAttribute(k,v) { this.attrs[k]=v; }
+  addEventListener() {}
+  setPointerCapture() {}
+  focus() {}
+  getBoundingClientRect() { return {left:0,top:0,width:1,height:1}; }
   getContext() { return {fillRect(){}}; }
   querySelector(selector) {
     const match=n=>selector.startsWith('.') ? n.classList.contains(selector.slice(1)) : n.tag===selector;
@@ -20,7 +24,7 @@ class Element {
     return null;
   }
 }
-const window = {setTimeout: (f, ms) => setTimeout(f, ms === 60000 ? ms : 0), clearTimeout, qrcode: () => ({addData(){},make(){},getModuleCount:()=>1,isDark:()=>true})};
+const window = {ResizeObserver: class { observe(){} disconnect(){} }, setTimeout: (f, ms) => setTimeout(f, ms === 60000 ? ms : 0), clearTimeout, qrcode: () => ({addData(){},make(){},getModuleCount:()=>1,isDark:()=>true})};
 vm.runInNewContext(fs.readFileSync('static/connectors.js','utf8'), {window,document:{createElement:t=>new Element(t)}});
 const all = root => [root,...root.children.flatMap(all)];
 const text = root => all(root).map(n=>n.textContent||'').join('\n');
@@ -187,6 +191,8 @@ async function instagramBrowserAndPasswordSteps() {
   const credentials=step({step_id:'fi.mau.meta.instagram.credentials',user_input:{fields:[{id:'username',type:'username'},{id:'password',type:'password'}]}});
   const ui=window.MessengerConnectors(root,async(p,m,b)=>{
     calls.push({p,b:b&&JSON.parse(JSON.stringify(b))});
+    if(p.endsWith('/browser/start')) return {id:'synthetic-browser'};
+    if(p.includes('/browser/synthetic-browser/frame')) return {state:'failed',message:'synthetic window closed'};
     if(p.endsWith('/start')) return b.flow==='instagram' ? step({type:'cookies',cookies:{url:'https://www.instagram.com/',fields}}) : credentials;
     if(p.endsWith('/step')) {
       if(b.type==='cookies') return {type:'complete'};
@@ -199,7 +205,12 @@ async function instagramBrowserAndPasswordSteps() {
   await ui.show(); await all(root).find(n=>n.tag==='button'&&n.dataset.network==='instagram').onclick();
   const actions=all(root).filter(n=>n.tag==='button');
   assert.equal(actions[0].textContent,'Sign in with browser (recommended)');
+  assert.ok(actions.some(n=>n.textContent==='Copy from a computer\u2019s browser'),'cURL form stays as the computer alternative');
   await actions[0].onclick();
+  const started=calls.find(c=>c.p.endsWith('/browser/start'));
+  assert.deepEqual([started.b.network,started.b.flow],['instagram','instagram'],'recommended sign-in opens the private in-app browser, which works on a phone');
+  assert.equal(calls.filter(c=>c.p.endsWith('/instagram/start')).length,0,'no bridge start was made from the page itself');
+  await ui.start('instagram','instagram');
   assert.match(text(root),/Network tab/); assert.match(text(root),/never into chat/);
   const paste=all(root).find(n=>n.tag==='textarea');
   paste.value="curl 'https://www.instagram.com/direct/inbox/' -b 'sessionid=synthetic-session; csrftoken=synthetic-csrf; ds_user_id=1234; other=not-forwarded'";
