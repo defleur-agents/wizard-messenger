@@ -234,7 +234,8 @@ class MentionTests(Base):
         row = self.rows()['$m']
         self.assertEqual(row['original'], 'welcome @Bram and @Ana!!')
         self.assertEqual([m['text'] for m in row['mentions']], ['@Bram', '@Ana'])
-        self.assertEqual(row['mentions'][0], {'text': '@Bram', 'net': 'whatsapp', 'acc': '316123'})
+        self.assertEqual({k: row['mentions'][0][k] for k in ('text', 'net', 'acc')}, {'text': '@Bram', 'net': 'whatsapp', 'acc': '316123'})
+        self.assertEqual(row['mentions'][0]['id'], OTHER)
         self.assertIsNone(row['media'])  # mentions never make a text line look like an attachment
 
     def test_owner_mention_is_marked_and_uses_his_name(self):
@@ -243,7 +244,8 @@ class MentionTests(Base):
                                                ['@owner:messenger.internal'])))
         row = self.rows()['$m']
         self.assertEqual(row['original'], 'hey @Miguel Ortiz look')
-        self.assertEqual(row['mentions'], [{'text': '@Miguel Ortiz', 'me': True}])
+        self.assertEqual([{k: m[k] for k in ('text', 'me')} for m in row['mentions']], [{'text': '@Miguel Ortiz', 'me': True}])
+        self.assertEqual(row['mentions'][0]['id'], '@owner:messenger.internal')
 
     def test_telegram_username_pill_keeps_username(self):
         t = self.inbox.store.identity('telegram', '!t', 'Devs', 'group')
@@ -258,7 +260,7 @@ class MentionTests(Base):
         self.ingest(self.event('$a', {'msgtype': 'm.text', 'body': 'Ana (WA) hi', 'm.mentions': {'user_ids': [GHOST]}}))
         self.assertEqual(self.rows()['$a']['original'], '@Ana hi')
         self.ingest(self.event('$b', {'msgtype': 'm.text', 'body': 'plain', 'formatted_body': '<a href="https://matrix.to/#/!room:x">room</a>'}))
-        self.assertNotIn('mentions', self.rows()['$b'])
+        self.assertEqual(self.rows()['$b']['mentions'], [])
         self.assertEqual(mention_pills({'formatted_body': 5}), [])
         self.assertEqual(substitute_mentions('abc', [('@u:x', 'zzz')], lambda u, t: ('N', {})), ('abc', []))
 

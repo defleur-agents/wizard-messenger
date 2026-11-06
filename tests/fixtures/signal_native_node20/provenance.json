@@ -1,0 +1,16 @@
+{
+  "source_job": "heavy_92b91366dc9543c890a8d666b0c2d9d1",
+  "source_revision": "ec1a38a81d1dfb543f237cc34c8c5ec2d731c9f8",
+  "root": "/srv/work/messenger-signal-release-ab-ec1a38a81d1d/baseline",
+  "returncode": 1,
+  "cases": 71,
+  "passed": 66,
+  "failed": 5,
+  "testNumber_source": "recorded TAP row in emission order (replay enrichment), NOT native JSONL capture",
+  "derivation": "Raw pair from same dual-reporter invocation; add only testNumber from corresponding native TAP row. Never enumerate or alter original event fields. Fresh queued run must prove reporter field.",
+  "sha256": {
+    "replay-enriched.jsonl": "a4df13076c3e8dde73f1d0c29118c5a29888809b85797e4cfe9ba90ebdd87e9c",
+    "recorded.tap": "80e28a7cbeb183cd537f554b4804aef8d31873aa2626a0d1aecaa87cd0dd01c6",
+    "recorded.jsonl": "4f6fefbd337d1392be2d49317cbe34e872cbac8610afe2b1a040883b42a84de4"
+  }
+}

@@ -84,6 +84,9 @@ class Element {
   removeAttribute(k) {delete this.attrs[k];if(k.startsWith('data-'))delete this.dataset[k.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())];}
   toggleAttribute(k,force) {const on=force===undefined?this.getAttribute(k)===null:!!force;if(on)this.setAttribute(k,'');else this.removeAttribute(k);return on;}
   focus() {if(this.ownerDocument)this.ownerDocument.activeElement=this;}
+  closest(selector) {let el=this;const alternatives=selector.split(',').map(s=>s.trim());while(el){if(alternatives.some(s=>matches(el,s)))return el;el=el.parent;}return null;}
+  getClientRects() {return this.hidden || !this.isConnected ? [] : [this.getBoundingClientRect()];}
+  checkVisibility() {let el=this;while(el){if(el.hidden)return false;el=el.parent;}return this.isConnected;}
   // Synthetic zero/default geometry, NEVER layout acceptance evidence.
   getBoundingClientRect() {return {x:0,y:0,top:0,left:0,right:this.clientWidth,bottom:this.clientHeight,width:this.clientWidth,height:this.clientHeight};}
   contains(child) {return child===this||this.children.some(c=>c.contains(child));}
@@ -119,6 +122,9 @@ function browserContext({document, url='https://synthetic.invalid/apps/messenger
   const context=events({document,location,history,crypto:webcrypto,URL,URLSearchParams,AbortController,
     TextEncoder,TextDecoder,performance,console,DOMException,Event,Blob,atob,btoa,structuredClone,
     innerWidth:390,innerHeight:844,navigator:{},localStorage:storage(),sessionStorage:storage(),
+    matchMedia:query=>({media:query,matches:false,addEventListener(){},removeEventListener(){}}),
+    // Explicit lifecycle surface; synthetic tests deliver records with trigger().
+    MutationObserver:class {constructor(callback){this.callback=callback;} observe(target,options){this.target=target;this.options=options;} disconnect(){this.target=null;} trigger(records=[]){this.callback(records,this);}},
     setTimeout:(...args)=>schedule('timeout',...args),setInterval:(...args)=>schedule('interval',...args),
     clearTimeout:id=>timers.delete(id),clearInterval:id=>timers.delete(id),
     requestAnimationFrame:fn=>schedule('animation',fn,16),cancelAnimationFrame:id=>timers.delete(id),

@@ -1,0 +1,1156 @@
+{
+  "frozen": {
+    "config_digest": "sha256:6c68782818b973d40f4949189d34564d46218a3c78e57b986a826814d579b362",
+    "manifest_digest": "sha256:75dde49255cdb88b789103170b69c68517a7acc6a8523fec3ee0f2174235b84e",
+    "raw_config": {
+      "architecture": "amd64",
+      "config": {
+        "Entrypoint": [
+          "/app/entrypoint.sh"
+        ],
+        "Env": [
+          "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "MESSENGER_DATA=/data",
+          "MESSENGER_PORT=8765",
+          "XDG_DATA_HOME=/data",
+          "XDG_RUNTIME_DIR=/run/messenger",
+          "WN_SECRET_STORE=keychain",
+          "WN_KEYCHAIN_SERVICE=org.wizardos.messenger.marmot.v1",
+          "PYTHONDONTWRITEBYTECODE=1",
+          "PYTHONUNBUFFERED=1"
+        ],
+        "ExposedPorts": {
+          "8765/tcp": {}
+        },
+        "Healthcheck": {
+          "Interval": 30000000000,
+          "Retries": 3,
+          "StartPeriod": 10000000000,
+          "Test": [
+            "CMD-SHELL",
+            "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3)\""
+          ],
+          "Timeout": 5000000000
+        },
+        "Labels": {
+          "org.opencontainers.image.licenses": "MIT",
+          "org.opencontainers.image.revision": "4566306576d3a6805da1ba531da3a89214dfd7af",
+          "org.opencontainers.image.source": "https://github.com/humanitylabs-org/wizard-messenger",
+          "org.opencontainers.image.title": "Wizard Messenger",
+          "org.opencontainers.image.version": "0.2.0-unified.15.14",
+          "org.wizardos.messenger.mdk-revision": "122bd90ffac60bb6311346e228d0f609a18521ee"
+        },
+        "User": "1000:1000",
+        "WorkingDir": "/app"
+      },
+      "created": "2026-10-31T17:24:01.989759854Z",
+      "history": [
+        {
+          "comment": "debuerreotype 0.17",
+          "created": "2026-10-05T00:00:00Z",
+          "created_by": "# debian.sh --arch 'amd64' out/ 'bookworm' '@1791158400'"
+        },
+        {
+          "created": "2026-10-12T19:47:45.751090766+07:00",
+          "created_by": "sh -c apt-get update && apt-get install -y --no-install-recommends python3 dbus gnome-keyring libglib2.0-bin ca-certificates && rm -rf /var/lib/apt/lists/*"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-12T19:47:47.394400289+07:00",
+          "created_by": "USER root",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-12T19:47:47.394400289+07:00",
+          "created_by": "RUN /bin/sh -c if ! command -v gnome-keyring-daemon >/dev/null; then       apt-get update && apt-get install -y --no-install-recommends python3 dbus gnome-keyring libglib2.0-bin ca-certificates && rm -rf /var/lib/apt/lists/*;     fi &&     (getent passwd 1000 >/dev/null || useradd --uid 1000 --create-home messenger) &&     mkdir -p /app /data /run/messenger && chown 1000:1000 /data /run/messenger # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-12T19:52:29.170696575+07:00",
+          "created_by": "COPY /out/wn /out/wnd /usr/local/bin/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-12T19:52:29.412686078+07:00",
+          "created_by": "RUN /bin/sh -c test \"$(wn --version)\" = 'wn 0.12.0' # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.136665278+07:00",
+          "created_by": "COPY engine.py server.py web.py messenger_addresses.py API-contract.json /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.165118287+07:00",
+          "created_by": "COPY vendor /app/vendor # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.196777688+07:00",
+          "created_by": "COPY static /app/static # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.237243887+07:00",
+          "created_by": "COPY favicon.svg icon.png icon-192.png /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.267050957+07:00",
+          "created_by": "COPY engine/entrypoint.sh /app/entrypoint.sh # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.30705072+07:00",
+          "created_by": "COPY engine/upstream-license.txt engine/provenance.json engine/Cargo.lock /app/upstream/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.506609386+07:00",
+          "created_by": "RUN /bin/sh -c chmod 755 /app/entrypoint.sh # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.506609386+07:00",
+          "created_by": "ENV MESSENGER_DATA=/data MESSENGER_PORT=8765 XDG_DATA_HOME=/data XDG_RUNTIME_DIR=/run/messenger WN_SECRET_STORE=keychain WN_KEYCHAIN_SERVICE=org.wizardos.messenger.marmot.v1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.506609386+07:00",
+          "created_by": "USER 1000:1000",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.52774286+07:00",
+          "created_by": "WORKDIR /app"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.52774286+07:00",
+          "created_by": "EXPOSE [8765/tcp]",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.52774286+07:00",
+          "created_by": "HEALTHCHECK {Test:[CMD-SHELL python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3)\"] Interval:30s Timeout:5s StartPeriod:10s StartInterval:0s Retries:3}",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.52774286+07:00",
+          "created_by": "LABEL org.opencontainers.image.title=Wizard Messenger org.opencontainers.image.version=0.1.2-beta.1 org.opencontainers.image.licenses=MIT org.wizardos.messenger.mdk-revision=122bd90ffac60bb6311346e228d0f609a18521ee",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-15T18:22:56.52774286+07:00",
+          "created_by": "ENTRYPOINT [\"/app/entrypoint.sh\"]",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-23T02:03:05.077332286+07:00",
+          "created_by": "USER root",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-23T02:03:05.077332286+07:00",
+          "created_by": "RUN /bin/sh -c if ! command -v gnome-keyring-daemon >/dev/null; then       apt-get update && apt-get install -y --no-install-recommends python3 dbus gnome-keyring libglib2.0-bin ca-certificates && rm -rf /var/lib/apt/lists/*;     fi &&     (getent passwd 1000 >/dev/null || useradd --uid 1000 --create-home messenger) &&     mkdir -p /app /data /run/messenger && chown 1000:1000 /data /run/messenger # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-23T02:03:08.799181266+07:00",
+          "created_by": "COPY /out/wn /out/wnd /usr/local/bin/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-23T02:03:09.270317174+07:00",
+          "created_by": "RUN /bin/sh -c test \"$(wn --version)\" = 'wn 0.12.0' # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.205346182+07:00",
+          "created_by": "COPY engine.py server.py web.py passkey.py messenger_addresses.py unified.py unified_setup.py translation.py API-contract.json /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.241573417+07:00",
+          "created_by": "COPY plumbing /app/plumbing # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.280019921+07:00",
+          "created_by": "COPY vendor /app/vendor # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.314856811+07:00",
+          "created_by": "COPY static /app/static # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.354460242+07:00",
+          "created_by": "COPY favicon.svg icon.png icon-192.png /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.385356513+07:00",
+          "created_by": "COPY engine/entrypoint.sh /app/entrypoint.sh # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.421302496+07:00",
+          "created_by": "COPY engine/upstream-license.txt engine/provenance.json engine/Cargo.lock /app/upstream/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.604930234+07:00",
+          "created_by": "RUN /bin/sh -c chmod 755 /app/entrypoint.sh # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.604930234+07:00",
+          "created_by": "ENV MESSENGER_DATA=/data MESSENGER_PORT=8765 XDG_DATA_HOME=/data XDG_RUNTIME_DIR=/run/messenger WN_SECRET_STORE=keychain WN_KEYCHAIN_SERVICE=org.wizardos.messenger.marmot.v1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.604930234+07:00",
+          "created_by": "USER 1000:1000",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.63349911+07:00",
+          "created_by": "WORKDIR /app"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.63349911+07:00",
+          "created_by": "EXPOSE [8765/tcp]",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.63349911+07:00",
+          "created_by": "HEALTHCHECK {Test:[CMD-SHELL python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3)\"] Interval:30s Timeout:5s StartPeriod:10s StartInterval:0s Retries:3}",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.63349911+07:00",
+          "created_by": "LABEL org.opencontainers.image.title=Wizard Messenger org.opencontainers.image.version=0.2.0-unified.1 org.opencontainers.image.licenses=MIT org.wizardos.messenger.mdk-revision=122bd90ffac60bb6311346e228d0f609a18521ee",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T19:47:39.63349911+07:00",
+          "created_by": "ENTRYPOINT [\"/app/entrypoint.sh\"]",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T15:37:51.758824669Z",
+          "created_by": "COPY server.py unified.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T15:37:51.831726293Z",
+          "created_by": "COPY static/app.js static/unified.js static/unified.css /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T15:37:51.831726293Z",
+          "created_by": "LABEL org.opencontainers.image.revision=9ada0a4f75aa45170147b87619b6244d45994e0e org.opencontainers.image.version=0.2.0-unified.11.8",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T16:13:11.968204647Z",
+          "created_by": "COPY server.py /app/server.py # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T16:13:11.997517677Z",
+          "created_by": "COPY static/app.js static/unified.js /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T16:13:11.997517677Z",
+          "created_by": "LABEL org.opencontainers.image.revision=cf5a3f180364ada1366a705dbf8162124d73c431",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T17:22:35.596389325Z",
+          "created_by": "ARG REVISION=bc80bb32313ba25dba09962ef82f48706c137010",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T17:22:35.596389325Z",
+          "created_by": "LABEL org.opencontainers.image.revision=bc80bb32313ba25dba09962ef82f48706c137010 org.opencontainers.image.version=0.2.0-unified.11.10 org.opencontainers.image.source=https://github.com/humanitylabs-org/wizard-messenger",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T17:22:35.596389325Z",
+          "created_by": "COPY server.py unified.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T17:22:35.687519677Z",
+          "created_by": "COPY static/app.js static/unified.js static/unified.css /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T18:26:55.588613337Z",
+          "created_by": "COPY server.py unified.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T18:26:55.675173102Z",
+          "created_by": "COPY static/app.js static/unified.js static/unified.css /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T18:26:55.675173102Z",
+          "created_by": "LABEL org.opencontainers.image.revision=0bdac3746a430b4a0ded64744ed31ec206af7689 org.opencontainers.image.version=0.2.0-unified.11.11",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T18:52:41.781987883Z",
+          "created_by": "COPY server.py unified.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T18:52:41.83320279Z",
+          "created_by": "COPY static/app.js static/unified.js static/unified.css /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-24T18:52:41.83320279Z",
+          "created_by": "LABEL org.opencontainers.image.revision=fd6f1ae225b45eec67c563e776cceafdc5331046 org.opencontainers.image.version=0.2.0-unified.11.12",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T13:10:34.865766128Z",
+          "created_by": "COPY server.py unified.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T13:17:07.988385457Z",
+          "created_by": "COPY static/app.js static/unified.js static/unified.css /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T13:17:07.988385457Z",
+          "created_by": "LABEL org.opencontainers.image.revision=a734f10a7513cf5694b0a348a1dea70d9fb9f279 org.opencontainers.image.version=0.2.0-unified.11.13",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:03:34.501265643Z",
+          "created_by": "USER root",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:03:34.501265643Z",
+          "created_by": "RUN /bin/sh -c if ! command -v gnome-keyring-daemon >/dev/null; then       apt-get update && apt-get install -y --no-install-recommends python3 dbus gnome-keyring libglib2.0-bin ca-certificates && rm -rf /var/lib/apt/lists/*;     fi &&     (getent passwd 1000 >/dev/null || useradd --uid 1000 --create-home messenger) &&     mkdir -p /app /data /run/messenger && chown 1000:1000 /data /run/messenger # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:03:37.652999168Z",
+          "created_by": "COPY /out/wn /out/wnd /usr/local/bin/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:03:38.15967332Z",
+          "created_by": "RUN /bin/sh -c test \"$(wn --version)\" = 'wn 0.12.0' # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.335153039Z",
+          "created_by": "COPY engine.py server.py web.py passkey.py messenger_addresses.py unified.py unified_setup.py translation.py API-contract.json /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.361196588Z",
+          "created_by": "COPY plumbing /app/plumbing # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.387894087Z",
+          "created_by": "COPY vendor /app/vendor # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.414161136Z",
+          "created_by": "COPY static /app/static # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.45803718Z",
+          "created_by": "COPY favicon.svg icon.png icon-192.png /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.497713029Z",
+          "created_by": "COPY engine/entrypoint.sh /app/entrypoint.sh # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.54104869Z",
+          "created_by": "COPY engine/upstream-license.txt engine/provenance.json engine/Cargo.lock /app/upstream/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.822392995Z",
+          "created_by": "RUN /bin/sh -c chmod 755 /app/entrypoint.sh # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.822392995Z",
+          "created_by": "ENV MESSENGER_DATA=/data MESSENGER_PORT=8765 XDG_DATA_HOME=/data XDG_RUNTIME_DIR=/run/messenger WN_SECRET_STORE=keychain WN_KEYCHAIN_SERVICE=org.wizardos.messenger.marmot.v1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.822392995Z",
+          "created_by": "USER 1000:1000",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.853811162Z",
+          "created_by": "WORKDIR /app"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.853811162Z",
+          "created_by": "EXPOSE [8765/tcp]",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.853811162Z",
+          "created_by": "HEALTHCHECK {Test:[CMD-SHELL python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3)\"] Interval:30s Timeout:5s StartPeriod:10s StartInterval:0s Retries:3}",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.853811162Z",
+          "created_by": "LABEL org.opencontainers.image.title=Wizard Messenger org.opencontainers.image.version=0.2.0-unified.1 org.opencontainers.image.licenses=MIT org.wizardos.messenger.mdk-revision=122bd90ffac60bb6311346e228d0f609a18521ee",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:28:13.853811162Z",
+          "created_by": "ENTRYPOINT [\"/app/entrypoint.sh\"]",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:33:28.054152352Z",
+          "created_by": "COPY server.py unified.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:33:28.110988764Z",
+          "created_by": "COPY static/app.js static/unified.js static/unified.css /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T17:33:28.110988764Z",
+          "created_by": "LABEL org.opencontainers.image.revision=2b9c5cd165839529e25ac472c51572af9b7de328 org.opencontainers.image.version=0.2.0-unified.11.15",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T18:26:02.741443982Z",
+          "created_by": "ARG REVISION=9d8793f3c9c844b908c690580c96033a5ce36705",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T18:26:02.741443982Z",
+          "created_by": "LABEL org.opencontainers.image.revision=9d8793f3c9c844b908c690580c96033a5ce36705 org.opencontainers.image.version=0.2.0-unified.12.0 org.opencontainers.image.source=https://github.com/humanitylabs-org/wizard-messenger",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T18:26:02.741443982Z",
+          "created_by": "COPY server.py web.py unified.py connector_setup.py connectors.py connector_inbox.py connector_web.py connector_sender.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T18:26:02.934897915Z",
+          "created_by": "COPY plumbing /app/plumbing # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-25T18:26:03.140832622Z",
+          "created_by": "COPY static /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-27T05:50:23.443978053Z",
+          "created_by": "COPY --chown=1000:1000 unified.js unified.css app.js /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-27T05:50:23.528341021Z",
+          "created_by": "COPY --chown=1000:1000 unified.py connector_sender.py API-contract.json /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-27T05:50:23.528341021Z",
+          "created_by": "LABEL org.opencontainers.image.revision=12c62aa1a3dd33a3891e88e7815620f8e9b1a147 org.opencontainers.image.version=0.2.0-unified.12.5",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-27T06:24:25.163379716Z",
+          "created_by": "COPY --chown=1000:1000 messenger_addresses.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-27T06:24:25.163379716Z",
+          "created_by": "LABEL org.opencontainers.image.revision=97db5617f26f3b90765ce48b6b780f6eeba6e298 org.opencontainers.image.version=0.2.0-unified.12.6",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-27T06:31:01.352771834Z",
+          "created_by": "COPY --chown=1000:1000 unified.js /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-27T06:31:01.352771834Z",
+          "created_by": "LABEL org.opencontainers.image.revision=b3eb7598851200fab0225e3bbc70254daf774fcd org.opencontainers.image.version=0.2.0-unified.12.7",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-27T14:07:42.158717211Z",
+          "created_by": "COPY --chown=1000:1000 app.js /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-27T14:07:42.158717211Z",
+          "created_by": "LABEL org.opencontainers.image.revision=0f062341c54f6743a986e1b9520bb2f3e273eb77 org.opencontainers.image.version=0.2.0-unified.12.8",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-27T19:55:48.06806296Z",
+          "created_by": "COPY --chown=1000:1000 app.js /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-27T19:55:48.06806296Z",
+          "created_by": "LABEL org.opencontainers.image.revision=f7398455549c0a0885b99e1fd56b064fd16cc324 org.opencontainers.image.version=0.2.0-unified.12.9",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-28T00:13:03.716742723Z",
+          "created_by": "ARG REVISION=2ff36a2e603353983cd0d2e91f35100a24323751",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-28T00:13:03.716742723Z",
+          "created_by": "LABEL org.opencontainers.image.revision=2ff36a2e603353983cd0d2e91f35100a24323751 org.opencontainers.image.version=0.2.0-unified.12.10 org.opencontainers.image.source=https://github.com/humanitylabs-org/wizard-messenger",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-28T00:13:03.716742723Z",
+          "created_by": "COPY server.py web.py unified.py connector_setup.py connectors.py connector_inbox.py connector_web.py connector_sender.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-28T00:13:03.789615326Z",
+          "created_by": "COPY plumbing /app/plumbing # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-28T00:14:58.738181819Z",
+          "created_by": "COPY static /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-28T00:28:38.534845017Z",
+          "created_by": "ARG REVISION=a70ceb7935a8355f451895b07548c0c9e3cb129a",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-28T00:28:38.534845017Z",
+          "created_by": "LABEL org.opencontainers.image.revision=a70ceb7935a8355f451895b07548c0c9e3cb129a org.opencontainers.image.version=0.2.0-unified.12.11 org.opencontainers.image.source=https://github.com/humanitylabs-org/wizard-messenger",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-28T00:28:38.534845017Z",
+          "created_by": "COPY --chmod=a+rX server.py web.py unified.py connector_setup.py connectors.py connector_inbox.py connector_web.py connector_sender.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-28T00:28:38.610690488Z",
+          "created_by": "COPY --chmod=a+rX plumbing /app/plumbing # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-28T00:28:38.712084872Z",
+          "created_by": "COPY --chmod=a+rX static /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-29T04:30:04.593979407Z",
+          "created_by": "ARG REVISION",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-29T04:30:04.593979407Z",
+          "created_by": "LABEL org.opencontainers.image.revision=288927b95469cc152acb2c7150ebfd27c7054fce org.opencontainers.image.version=0.2.0-unified.12.12 org.opencontainers.image.source=https://github.com/humanitylabs-org/wizard-messenger",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-29T04:30:04.593979407Z",
+          "created_by": "COPY --chmod=0644 server.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-29T04:30:04.608072456Z",
+          "created_by": "COPY --chmod=0644 static/app.js static/unified.js static/unified.css /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:23:41.648295978Z",
+          "created_by": "ARG REVISION",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:23:41.648295978Z",
+          "created_by": "LABEL org.opencontainers.image.revision=0dae933a0182f27ee0a248f093bf6541b625f086 org.opencontainers.image.version=0.2.0-unified.15.9 org.opencontainers.image.source=https://github.com/humanitylabs-org/wizard-messenger",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:23:41.648295978Z",
+          "created_by": "COPY --chmod=0644 engine.py server.py web.py trusted_owner.py unified.py unified_setup.py telegram_application.py history_cursor.py permissions.py agent_keys.py agent_tools.py wizard_agents.py drafts.py inbox_feed.py remote_authority.py owner_unix.py API-contract.json /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:23:41.670378533Z",
+          "created_by": "COPY --chmod=0644 connector_setup.py connectors.py connector_inbox.py connector_sender.py browser_signin.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:23:41.686102192Z",
+          "created_by": "COPY --chmod=0644 readiness/search.py readiness/__init__.py /app/readiness/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:23:41.70462418Z",
+          "created_by": "COPY --chmod=0644 push_notifications/__init__.py push_notifications/runtime.py push_notifications/security.py push_notifications/service-worker.js push_notifications/requirements.txt /app/push_notifications/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:23:41.750648136Z",
+          "created_by": "COPY --chmod=0644 plumbing/connectors-provenance.json plumbing/connectors-view-integration.patch plumbing/connectors-web-integration.patch plumbing/dots-template.json plumbing/dots-upstream-LICENSE plumbing/facebook-template.json plumbing/gmessages-template.json plumbing/instagram-template.json plumbing/line-template.json plumbing/line-upstream-LICENSE plumbing/line.Dockerfile plumbing/linkedin-template.json plumbing/permission-runtime-integration.patch plumbing/slack-template.json plumbing/twitter-template.json /app/plumbing/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:23:41.763375897Z",
+          "created_by": "COPY --chmod=0755 engine/entrypoint.sh /app/entrypoint.sh # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:23:41.787542485Z",
+          "created_by": "COPY --chmod=0644 static/index.html static/app.js static/app.css static/connectors.js static/unified.js static/unified.css /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:23:41.787542485Z",
+          "created_by": "USER 0",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:29:44.43917582Z",
+          "created_by": "RUN |1 REVISION=0dae933a0182f27ee0a248f093bf6541b625f086 /bin/sh -c chmod 0755 /app /app/readiness /app/push_notifications /app/plumbing /app/static # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:29:44.43917582Z",
+          "created_by": "USER 1000:1000",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:48:56.586195115Z",
+          "created_by": "LABEL org.opencontainers.image.revision=44b2d3e7ceaede7809985053250b4b8c4ad26f5f org.opencontainers.image.version=0.2.0-unified.15.10",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:48:56.586195115Z",
+          "created_by": "COPY --chmod=0644 server.py /app/server.py # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T08:48:56.600662743Z",
+          "created_by": "COPY --chmod=0644 unified.js app.js /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T09:45:21.242887461Z",
+          "created_by": "LABEL org.opencontainers.image.revision=7c886ac7033efaa7e53019bdd2fd9218ebdfa5dd org.opencontainers.image.version=0.2.0-unified.15.11",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T09:45:21.242887461Z",
+          "created_by": "COPY --chmod=0644 server.py /app/server.py # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T09:45:21.260810404Z",
+          "created_by": "COPY --chmod=0644 unified.js app.js /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T10:37:50.443037452Z",
+          "created_by": "ARG REVISION",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T10:37:50.443037452Z",
+          "created_by": "LABEL org.opencontainers.image.revision=eefe38a4a8b63285d3c732c7b24d91c71b8c2c14 org.opencontainers.image.version=0.2.0-unified.15.12",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T10:37:50.443037452Z",
+          "created_by": "COPY --chmod=0644 server.py /app/server.py # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T10:37:50.46198143Z",
+          "created_by": "COPY --chmod=0644 static/unified.js static/unified.css static/app.js /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T15:51:31.150863444Z",
+          "created_by": "ARG REVISION",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T15:51:31.150863444Z",
+          "created_by": "LABEL org.opencontainers.image.revision=dee754aa39bdc59e4cd1cc3ce983ddc5c2ee97ef org.opencontainers.image.version=0.2.0-unified.15.13 org.opencontainers.image.source=https://github.com/humanitylabs-org/wizard-messenger",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T15:51:31.150863444Z",
+          "created_by": "COPY --chmod=0644 engine.py server.py web.py trusted_owner.py unified.py unified_setup.py telegram_application.py history_cursor.py permissions.py agent_keys.py agent_tools.py wizard_agents.py drafts.py inbox_feed.py remote_authority.py owner_unix.py API-contract.json /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T15:58:37.413018488Z",
+          "created_by": "COPY --chmod=0644 connector_setup.py connectors.py connector_inbox.py connector_web.py connector_sender.py browser_signin.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T15:58:37.426386286Z",
+          "created_by": "COPY --chmod=0644 readiness/search.py readiness/__init__.py /app/readiness/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T15:58:37.44818078Z",
+          "created_by": "COPY --chmod=0644 push_notifications/__init__.py push_notifications/runtime.py push_notifications/security.py push_notifications/service-worker.js push_notifications/requirements.txt /app/push_notifications/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T15:58:37.499854703Z",
+          "created_by": "COPY --chmod=0644 plumbing/whatsapp-template.json plumbing/signal-template.json plumbing/telegram-template.json plumbing/connectors-provenance.json plumbing/connectors-view-integration.patch plumbing/connectors-web-integration.patch plumbing/dots-template.json plumbing/dots-upstream-LICENSE plumbing/facebook-template.json plumbing/gmessages-template.json plumbing/instagram-template.json plumbing/line-template.json plumbing/line-upstream-LICENSE plumbing/line.Dockerfile plumbing/linkedin-template.json plumbing/permission-runtime-integration.patch plumbing/slack-template.json plumbing/twitter-template.json /app/plumbing/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T15:58:37.511674516Z",
+          "created_by": "COPY --chmod=0755 engine/entrypoint.sh /app/entrypoint.sh # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T16:10:21.694620122Z",
+          "created_by": "COPY --chmod=0644 static/index.html static/app.js static/app.css static/connectors.js static/unified.js static/unified.css /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T16:10:21.694620122Z",
+          "created_by": "USER 0",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T16:10:21.877750832Z",
+          "created_by": "RUN |1 REVISION=dee754aa39bdc59e4cd1cc3ce983ddc5c2ee97ef /bin/sh -c chmod 0755 /app /app/readiness /app/push_notifications /app/plumbing /app/static # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T16:10:21.877750832Z",
+          "created_by": "USER 1000:1000",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T17:24:01.752008826Z",
+          "created_by": "ARG REVISION",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T17:24:01.752008826Z",
+          "created_by": "LABEL org.opencontainers.image.revision=4566306576d3a6805da1ba531da3a89214dfd7af org.opencontainers.image.version=0.2.0-unified.15.14 org.opencontainers.image.source=https://github.com/humanitylabs-org/wizard-messenger",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T17:24:01.752008826Z",
+          "created_by": "COPY --chmod=0644 engine.py server.py web.py trusted_owner.py unified.py unified_setup.py telegram_application.py history_cursor.py permissions.py agent_keys.py agent_tools.py wizard_agents.py drafts.py inbox_feed.py remote_authority.py owner_unix.py API-contract.json /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T17:24:01.779102844Z",
+          "created_by": "COPY --chmod=0644 connector_setup.py connectors.py connector_inbox.py connector_web.py connector_sender.py browser_signin.py /app/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T17:24:01.792490817Z",
+          "created_by": "COPY --chmod=0644 readiness/search.py readiness/__init__.py /app/readiness/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T17:24:01.815826051Z",
+          "created_by": "COPY --chmod=0644 push_notifications/__init__.py push_notifications/runtime.py push_notifications/security.py push_notifications/service-worker.js push_notifications/requirements.txt /app/push_notifications/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T17:24:01.873798659Z",
+          "created_by": "COPY --chmod=0644 plumbing/whatsapp-template.json plumbing/signal-template.json plumbing/telegram-template.json plumbing/connectors-provenance.json plumbing/connectors-view-integration.patch plumbing/connectors-web-integration.patch plumbing/dots-template.json plumbing/dots-upstream-LICENSE plumbing/facebook-template.json plumbing/gmessages-template.json plumbing/instagram-template.json plumbing/line-template.json plumbing/line-upstream-LICENSE plumbing/line.Dockerfile plumbing/linkedin-template.json plumbing/permission-runtime-integration.patch plumbing/slack-template.json plumbing/twitter-template.json /app/plumbing/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T17:24:01.885055834Z",
+          "created_by": "COPY --chmod=0755 engine/entrypoint.sh /app/entrypoint.sh # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T17:24:01.910672798Z",
+          "created_by": "COPY --chmod=0644 static/index.html static/app.js static/app.css static/connectors.js static/unified.js static/unified.css /app/static/ # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T17:24:01.910672798Z",
+          "created_by": "USER 0",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T17:24:01.989759854Z",
+          "created_by": "RUN |1 REVISION=4566306576d3a6805da1ba531da3a89214dfd7af /bin/sh -c chmod 0755 /app /app/readiness /app/push_notifications /app/plumbing /app/static # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-31T17:24:01.989759854Z",
+          "created_by": "USER 1000:1000",
+          "empty_layer": true
+        }
+      ],
+      "os": "linux",
+      "rootfs": {
+        "diff_ids": [
+          "sha256:e58989146fcec76699871403b9897b5c014af1ccd85f5a9300a215e7975525d7",
+          "sha256:bdbe05f95b4a10f9c3130a7b999c3597e7ebde119a5349fefc224bd1661c13da",
+          "sha256:86ffd590332b2654965f186c3515f07708e0d1cf79e803701fca55d4acd628fb",
+          "sha256:ea2e92e34ac456f19732dcdfa53ce11b3efce30b420e8009fa20bb015a788339",
+          "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+          "sha256:286ddf6aeabb3d6430769116fb0f11317f8c3df624320d8be428b12c464e541b",
+          "sha256:b684a91de8920e84eaa10c33cf4b89a50cdeffd719fb3266e47f6d24b5ddf120",
+          "sha256:f681309728139acf692e460b517e18602022a38fa5fe153b0dc9da8fb2c620ba",
+          "sha256:ce5c71c3e7d6d7f854d1d336db86afad12c4cf868c307029608b72691069fdec",
+          "sha256:84049d8dd012188c09d353c8163228f3a24c60e8c4d5268fd4530943e961405a",
+          "sha256:0808ba544e1401b7b0b8d39932b2cda18eacc8c6c4d01f91384631d1f969ea8f",
+          "sha256:f8cd3f5a87382c25c90a1bad8aef6ccae4941d39cbe968d43f3b5ad7701ae01c",
+          "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+          "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+          "sha256:7e29b0b1c9f40cb74df56eac0eaea5ff6b59129a59c81fc280b45b281c144282",
+          "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+          "sha256:01022d1fbb990ebc61c6cf09dbbc3896457fc8a0a64a952d488ed64e3b00e02b",
+          "sha256:2bdcb29c39519f410d8ab7dc0c25d435bd6b05e4935b37c591f165a43b72a7bf",
+          "sha256:d539f0823845890f2f41c5901dcd9afeaa64a91b28c36910ff1a1755ea4f1f7d",
+          "sha256:c22c4434458fce741fedbf3460ba270de1d120c4127a8b96da942ff1633a135f",
+          "sha256:0dd57627d8b6a4f37e0587e231b2aa15ca88ce535f97d74160c17dacf57afe3a",
+          "sha256:63492b837410c7487c093272aaa62fd37227e5d07521aa73dd3726d1ab7bd656",
+          "sha256:5abf552e269abaef1fc53c164296c7bcd2c88a07b6677795b91b39b2a391e2b7",
+          "sha256:511e52cafbbf82edf96beea36139f2850c39900dd70bcf51c55a247a8fa6c485",
+          "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+          "sha256:44a39b0143d7f45650444f767440093ca8a85582ba07f74d3c9040e85456dc62",
+          "sha256:443d07743ac85b1c9bcaf09b99a3de9172d64335476de785a129cc162edaa695",
+          "sha256:8d1c40204d531b061b80c88243045c37ea2a3698c3d3fc4c4e99565beb90c65a",
+          "sha256:92a67152acf4ec758e1027976f79c9285aacc4492ff144897ee242101b6b3b46",
+          "sha256:aa54b9b21bc34512ca8067a887f680f63c229a3404bc5395b5cc8f484f791ee5",
+          "sha256:0437d8f1cf68cd71df268a78398e6b1577b8b1cb5a6c6a6182d5eb703c19e607",
+          "sha256:f032b27181183c4f3ae0cb867ecc04ef8217d4b33194367db248fcff2bf92d7d",
+          "sha256:3b94303f195b60a7de7581d67afbdc7f3f325fb22381d052a168b3a9ae7a1c3b",
+          "sha256:1376dc66694ac79d2e56eade6017ca1d5e4d32c272818a64a2e480785bab9883",
+          "sha256:578e52de5f5c504f84bb3c2563332fe0f8b04471537a284c7d08eda2eab01701",
+          "sha256:bb8522b9768773fade6723f540136ad4d8f0118e380295d81b3128dea1c6f40d",
+          "sha256:c13b492fc4b3247ebfa8d9fb2dd9d0fc5be02047174bbf273ccb957a7257a38b",
+          "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+          "sha256:0b69d06167752ed3713d15a3bc7a5450738d8d37620af55100cd99ae9e2fe8e3",
+          "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+          "sha256:858d0403b8bf0883ac085e17fbd1b1e1ec7af5442fea2fe78c9939663625eccc",
+          "sha256:bc08ddef2405de162f8e281949368c512ac78b4630e1b2b16d85dbe4ff1b8dae",
+          "sha256:9e8965a9bc9380223ce7a5133462ff99e50d09d12d8a74105357f8ba794d91b7",
+          "sha256:feff1b4925c2ead09b9ed35923dab16aac461e3f8e8cfdc08d78587a02b91ef0",
+          "sha256:8d07b02ec031cf7a29bfa157e0009e219254cda8fc4231120adc61fc1ec94050",
+          "sha256:6407e75e80f6e93caefee111356cc797e4a53d5361531e524b4e037ce23712f3",
+          "sha256:17d452f14f50959c029839d2f40250c9375ffc1ad4bdcc3836333da18cb3e711",
+          "sha256:7209083c5e37e664d382e50e48985bf80a66948284646914151f6c7b52986f47",
+          "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+          "sha256:f4a7a754903b2d922602ecc8bb0b73306238379ffb3572591eba4a91dbb3aea5",
+          "sha256:67fb1891c15ae9cd1154ae21e511b619179520daed14dbfddcc7aafd8e67eff7",
+          "sha256:ab87665510f5afaef09bccb8f793cc8158279c4fbd3c33a2fd20c92d79cf70a4",
+          "sha256:3ccb467a583ccc9f63918205d167a5b18d0192e197d52f04ecac877712c1198a",
+          "sha256:f88b61fbd4e130a0308b8a72e3d5b7f0a8d41e2cb61c9c19a189f1c154795b66",
+          "sha256:0b510522c3ff981a812950fb57c6e15c10d7b3cd897305facea3fdfb8dc94421",
+          "sha256:ffbd6efd47be2acc2d62a5af65ea184293ec07f9f11258945087166c98a3d1ae",
+          "sha256:33358b02693bfabf4bd6bff1798ab7eb166c014438e4b92bf1ba745583de7ea2",
+          "sha256:405de3f3c97202e61df8fd41478b51f029e626e32302f84fc8d6a74b24b2d572",
+          "sha256:93bc3887d2e3de6f94b829f70f049c459ca05334554667a7cee17dcb5db5f550",
+          "sha256:9eb9fc1cafaddf293b6111fa62844b72bbd50cb17b3499dcc8c49950d23e9286",
+          "sha256:b29a4b30a59996aa9f2e7049646b0107adbfe413866dc2cd535129c8a0a98f80",
+          "sha256:0ff2942a5fce1a70e514de096f4b89a69a00d778b9aa5cb65ebdde3c8a8a5b54",
+          "sha256:59f2a8a1f9cd5527e142c7b1bdb2250e8751b4a2dbc768a1ba0a8a1eb908c05c",
+          "sha256:6aa80a0de57b07eed0cc0207d8eba513e5044ad64647858bda1e51550121fe54",
+          "sha256:bdada3eaea5e22c7fa8b4bf73d2c62162762f90e6fad15454cf509cc263b5bbe",
+          "sha256:68752eaec1554844de064471a5bc83e64f3d9078c9b3716ba2f907103dba7aec",
+          "sha256:81402b626164eef93941509fd734f1190a9effd3ad7746f9b6ee778c3d1e204b",
+          "sha256:c9deed2f83a2d04369501727e61a9a4decc96fdad0035241a4d9998913a49cbf",
+          "sha256:97444c267477dd2f1f16c4ca57f609ed88b51e93c2e18069ac9d101165813755",
+          "sha256:b96f7b434551453635555a73d4af3a02f8b2f57cd6abb2f1b62b177dbf404ad0",
+          "sha256:3e6f8c546e1ebfc0757132622cd5e9b3b410f7b8bdd8ae4540cd5e0fdcae7219",
+          "sha256:2f1c060ea1cd72e2dc0f825f127f700a27c4dc46ea1395cf80c393f108786423",
+          "sha256:c640968fe168d80149bd95bcf385988c4684f6a9d74f186cdd39b4ba6b3520ec",
+          "sha256:a6d3dd17543a8bc65ccbc243daf1d1b19cd379a87c6825499e131f8ed94657a1",
+          "sha256:b906159f19b6738d905732ca444536d9d2167adc41586b70b4d235093e574f45",
+          "sha256:51b170247d011bfcc2a0ff8e7db52d9b8140405720b7b610e00bba62cb715173",
+          "sha256:25df1f35ca3b4de8dfb4b4a7f452358f3bcc853b2a105c4b61494e6d61748bb8",
+          "sha256:60fb90c4e37a0712415ebf4b779c420a05cf43918fc331f2e3721fc221c00f4c",
+          "sha256:535c23c587a6806ab5e6a8c78c4aa72729733900578aed668e69925c7b4b2ca6",
+          "sha256:a59e095c4565db664874cc9e685d72b808e9781e06b87223251c98571951e42d",
+          "sha256:2c3f9c869e155489c5fdb061036b9bdbe4946affec57688d17e5d6323b13e925",
+          "sha256:0d8a63774a86da13ffbf65a307e3afe1752cf2719e6dcfc60c1f2dc7643204c3",
+          "sha256:7a23af9b31f3d6b2ea77ad8f39d1cedb99d90412251111b3a082db52982c29e0",
+          "sha256:4444b6a73e5e64f02a3dd00d1da74c831278c49020cb1891b87bfd6c4c1f11b7",
+          "sha256:d643ddadf0c6663c38b3ddbce48a0612c598da77631e4edbd7930abc7aa77ec0",
+          "sha256:3de0d4dab0abf373899c69812b741fa1fbda80f70b79fce3a1f264696194c20b",
+          "sha256:b019bc367279ac05e4bba67bf09a4935fa2a1123ed98e85819bdd456f9952f0e",
+          "sha256:cc487c514bb0130ec816d9ffc090305a8f04b43baa2a8023a31ec19491a7202d",
+          "sha256:a8690580e0cb7c9e5139b96bfdb2009affbf8e18d7f9cc0bfdb0c67ef0be3116",
+          "sha256:6ec96c751a95c216be6195fb1e9f4e46eafe4f7d567558eb62342d0e3aaa2b12",
+          "sha256:d523dfc5a67aac6910c3ced8110b60f33c53676611bb1a8319d9a3c47c6ee058",
+          "sha256:996bcfbe4e172ce4cf0d6b8a567ae6bedcee2234fa75ec8a58b41f60fa3a8a1f",
+          "sha256:a2a85022a888e7eda60fabab8a0c918d077a11da17f240bbf91c434588b3cf21",
+          "sha256:530d4f7c193a19de74351e3115cb49859fb48ce889901988c7edf56d72846930",
+          "sha256:b5c139642ef4f3e174bac10e942295949aa3b68b1f6f9af87bc6cb40c61a2bcf",
+          "sha256:17bf59f9a71f9925ba74259cfe6af9d6fcc1fa67952cb43ee2c1509812300ee9",
+          "sha256:a413166f33e682a656a2a755a6fc2a45c5884a8e85c79fe61502c13ab99d95b8",
+          "sha256:9730b2800735cd3fdfdf72294762abd3a2509ddd340268aaba12df995dbc4107"
+        ],
+        "type": "layers"
+      }
+    }
+  },
+  "loaded": {
+    "Architecture": "amd64",
+    "Config": {
+      "AttachStderr": false,
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "Cmd": null,
+      "Domainname": "",
+      "Entrypoint": [
+        "/app/entrypoint.sh"
+      ],
+      "Env": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "MESSENGER_DATA=/data",
+        "MESSENGER_PORT=8765",
+        "XDG_DATA_HOME=/data",
+        "XDG_RUNTIME_DIR=/run/messenger",
+        "WN_SECRET_STORE=keychain",
+        "WN_KEYCHAIN_SERVICE=org.wizardos.messenger.marmot.v1",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "PYTHONUNBUFFERED=1"
+      ],
+      "ExposedPorts": {
+        "8765/tcp": {}
+      },
+      "Healthcheck": {
+        "Interval": 30000000000,
+        "Retries": 3,
+        "StartPeriod": 10000000000,
+        "Test": [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3)\""
+        ],
+        "Timeout": 5000000000
+      },
+      "Hostname": "",
+      "Image": "",
+      "Labels": {
+        "org.opencontainers.image.licenses": "MIT",
+        "org.opencontainers.image.revision": "4566306576d3a6805da1ba531da3a89214dfd7af",
+        "org.opencontainers.image.source": "https://github.com/humanitylabs-org/wizard-messenger",
+        "org.opencontainers.image.title": "Wizard Messenger",
+        "org.opencontainers.image.version": "0.2.0-unified.15.14",
+        "org.wizardos.messenger.mdk-revision": "122bd90ffac60bb6311346e228d0f609a18521ee"
+      },
+      "OnBuild": null,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Tty": false,
+      "User": "1000:1000",
+      "Volumes": null,
+      "WorkingDir": "/app"
+    },
+    "Id": "sha256:6c68782818b973d40f4949189d34564d46218a3c78e57b986a826814d579b362",
+    "Os": "linux",
+    "RootFS": {
+      "Layers": [
+        "sha256:e58989146fcec76699871403b9897b5c014af1ccd85f5a9300a215e7975525d7",
+        "sha256:bdbe05f95b4a10f9c3130a7b999c3597e7ebde119a5349fefc224bd1661c13da",
+        "sha256:86ffd590332b2654965f186c3515f07708e0d1cf79e803701fca55d4acd628fb",
+        "sha256:ea2e92e34ac456f19732dcdfa53ce11b3efce30b420e8009fa20bb015a788339",
+        "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+        "sha256:286ddf6aeabb3d6430769116fb0f11317f8c3df624320d8be428b12c464e541b",
+        "sha256:b684a91de8920e84eaa10c33cf4b89a50cdeffd719fb3266e47f6d24b5ddf120",
+        "sha256:f681309728139acf692e460b517e18602022a38fa5fe153b0dc9da8fb2c620ba",
+        "sha256:ce5c71c3e7d6d7f854d1d336db86afad12c4cf868c307029608b72691069fdec",
+        "sha256:84049d8dd012188c09d353c8163228f3a24c60e8c4d5268fd4530943e961405a",
+        "sha256:0808ba544e1401b7b0b8d39932b2cda18eacc8c6c4d01f91384631d1f969ea8f",
+        "sha256:f8cd3f5a87382c25c90a1bad8aef6ccae4941d39cbe968d43f3b5ad7701ae01c",
+        "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+        "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+        "sha256:7e29b0b1c9f40cb74df56eac0eaea5ff6b59129a59c81fc280b45b281c144282",
+        "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+        "sha256:01022d1fbb990ebc61c6cf09dbbc3896457fc8a0a64a952d488ed64e3b00e02b",
+        "sha256:2bdcb29c39519f410d8ab7dc0c25d435bd6b05e4935b37c591f165a43b72a7bf",
+        "sha256:d539f0823845890f2f41c5901dcd9afeaa64a91b28c36910ff1a1755ea4f1f7d",
+        "sha256:c22c4434458fce741fedbf3460ba270de1d120c4127a8b96da942ff1633a135f",
+        "sha256:0dd57627d8b6a4f37e0587e231b2aa15ca88ce535f97d74160c17dacf57afe3a",
+        "sha256:63492b837410c7487c093272aaa62fd37227e5d07521aa73dd3726d1ab7bd656",
+        "sha256:5abf552e269abaef1fc53c164296c7bcd2c88a07b6677795b91b39b2a391e2b7",
+        "sha256:511e52cafbbf82edf96beea36139f2850c39900dd70bcf51c55a247a8fa6c485",
+        "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+        "sha256:44a39b0143d7f45650444f767440093ca8a85582ba07f74d3c9040e85456dc62",
+        "sha256:443d07743ac85b1c9bcaf09b99a3de9172d64335476de785a129cc162edaa695",
+        "sha256:8d1c40204d531b061b80c88243045c37ea2a3698c3d3fc4c4e99565beb90c65a",
+        "sha256:92a67152acf4ec758e1027976f79c9285aacc4492ff144897ee242101b6b3b46",
+        "sha256:aa54b9b21bc34512ca8067a887f680f63c229a3404bc5395b5cc8f484f791ee5",
+        "sha256:0437d8f1cf68cd71df268a78398e6b1577b8b1cb5a6c6a6182d5eb703c19e607",
+        "sha256:f032b27181183c4f3ae0cb867ecc04ef8217d4b33194367db248fcff2bf92d7d",
+        "sha256:3b94303f195b60a7de7581d67afbdc7f3f325fb22381d052a168b3a9ae7a1c3b",
+        "sha256:1376dc66694ac79d2e56eade6017ca1d5e4d32c272818a64a2e480785bab9883",
+        "sha256:578e52de5f5c504f84bb3c2563332fe0f8b04471537a284c7d08eda2eab01701",
+        "sha256:bb8522b9768773fade6723f540136ad4d8f0118e380295d81b3128dea1c6f40d",
+        "sha256:c13b492fc4b3247ebfa8d9fb2dd9d0fc5be02047174bbf273ccb957a7257a38b",
+        "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+        "sha256:0b69d06167752ed3713d15a3bc7a5450738d8d37620af55100cd99ae9e2fe8e3",
+        "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+        "sha256:858d0403b8bf0883ac085e17fbd1b1e1ec7af5442fea2fe78c9939663625eccc",
+        "sha256:bc08ddef2405de162f8e281949368c512ac78b4630e1b2b16d85dbe4ff1b8dae",
+        "sha256:9e8965a9bc9380223ce7a5133462ff99e50d09d12d8a74105357f8ba794d91b7",
+        "sha256:feff1b4925c2ead09b9ed35923dab16aac461e3f8e8cfdc08d78587a02b91ef0",
+        "sha256:8d07b02ec031cf7a29bfa157e0009e219254cda8fc4231120adc61fc1ec94050",
+        "sha256:6407e75e80f6e93caefee111356cc797e4a53d5361531e524b4e037ce23712f3",
+        "sha256:17d452f14f50959c029839d2f40250c9375ffc1ad4bdcc3836333da18cb3e711",
+        "sha256:7209083c5e37e664d382e50e48985bf80a66948284646914151f6c7b52986f47",
+        "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+        "sha256:f4a7a754903b2d922602ecc8bb0b73306238379ffb3572591eba4a91dbb3aea5",
+        "sha256:67fb1891c15ae9cd1154ae21e511b619179520daed14dbfddcc7aafd8e67eff7",
+        "sha256:ab87665510f5afaef09bccb8f793cc8158279c4fbd3c33a2fd20c92d79cf70a4",
+        "sha256:3ccb467a583ccc9f63918205d167a5b18d0192e197d52f04ecac877712c1198a",
+        "sha256:f88b61fbd4e130a0308b8a72e3d5b7f0a8d41e2cb61c9c19a189f1c154795b66",
+        "sha256:0b510522c3ff981a812950fb57c6e15c10d7b3cd897305facea3fdfb8dc94421",
+        "sha256:ffbd6efd47be2acc2d62a5af65ea184293ec07f9f11258945087166c98a3d1ae",
+        "sha256:33358b02693bfabf4bd6bff1798ab7eb166c014438e4b92bf1ba745583de7ea2",
+        "sha256:405de3f3c97202e61df8fd41478b51f029e626e32302f84fc8d6a74b24b2d572",
+        "sha256:93bc3887d2e3de6f94b829f70f049c459ca05334554667a7cee17dcb5db5f550",
+        "sha256:9eb9fc1cafaddf293b6111fa62844b72bbd50cb17b3499dcc8c49950d23e9286",
+        "sha256:b29a4b30a59996aa9f2e7049646b0107adbfe413866dc2cd535129c8a0a98f80",
+        "sha256:0ff2942a5fce1a70e514de096f4b89a69a00d778b9aa5cb65ebdde3c8a8a5b54",
+        "sha256:59f2a8a1f9cd5527e142c7b1bdb2250e8751b4a2dbc768a1ba0a8a1eb908c05c",
+        "sha256:6aa80a0de57b07eed0cc0207d8eba513e5044ad64647858bda1e51550121fe54",
+        "sha256:bdada3eaea5e22c7fa8b4bf73d2c62162762f90e6fad15454cf509cc263b5bbe",
+        "sha256:68752eaec1554844de064471a5bc83e64f3d9078c9b3716ba2f907103dba7aec",
+        "sha256:81402b626164eef93941509fd734f1190a9effd3ad7746f9b6ee778c3d1e204b",
+        "sha256:c9deed2f83a2d04369501727e61a9a4decc96fdad0035241a4d9998913a49cbf",
+        "sha256:97444c267477dd2f1f16c4ca57f609ed88b51e93c2e18069ac9d101165813755",
+        "sha256:b96f7b434551453635555a73d4af3a02f8b2f57cd6abb2f1b62b177dbf404ad0",
+        "sha256:3e6f8c546e1ebfc0757132622cd5e9b3b410f7b8bdd8ae4540cd5e0fdcae7219",
+        "sha256:2f1c060ea1cd72e2dc0f825f127f700a27c4dc46ea1395cf80c393f108786423",
+        "sha256:c640968fe168d80149bd95bcf385988c4684f6a9d74f186cdd39b4ba6b3520ec",
+        "sha256:a6d3dd17543a8bc65ccbc243daf1d1b19cd379a87c6825499e131f8ed94657a1",
+        "sha256:b906159f19b6738d905732ca444536d9d2167adc41586b70b4d235093e574f45",
+        "sha256:51b170247d011bfcc2a0ff8e7db52d9b8140405720b7b610e00bba62cb715173",
+        "sha256:25df1f35ca3b4de8dfb4b4a7f452358f3bcc853b2a105c4b61494e6d61748bb8",
+        "sha256:60fb90c4e37a0712415ebf4b779c420a05cf43918fc331f2e3721fc221c00f4c",
+        "sha256:535c23c587a6806ab5e6a8c78c4aa72729733900578aed668e69925c7b4b2ca6",
+        "sha256:a59e095c4565db664874cc9e685d72b808e9781e06b87223251c98571951e42d",
+        "sha256:2c3f9c869e155489c5fdb061036b9bdbe4946affec57688d17e5d6323b13e925",
+        "sha256:0d8a63774a86da13ffbf65a307e3afe1752cf2719e6dcfc60c1f2dc7643204c3",
+        "sha256:7a23af9b31f3d6b2ea77ad8f39d1cedb99d90412251111b3a082db52982c29e0",
+        "sha256:4444b6a73e5e64f02a3dd00d1da74c831278c49020cb1891b87bfd6c4c1f11b7",
+        "sha256:d643ddadf0c6663c38b3ddbce48a0612c598da77631e4edbd7930abc7aa77ec0",
+        "sha256:3de0d4dab0abf373899c69812b741fa1fbda80f70b79fce3a1f264696194c20b",
+        "sha256:b019bc367279ac05e4bba67bf09a4935fa2a1123ed98e85819bdd456f9952f0e",
+        "sha256:cc487c514bb0130ec816d9ffc090305a8f04b43baa2a8023a31ec19491a7202d",
+        "sha256:a8690580e0cb7c9e5139b96bfdb2009affbf8e18d7f9cc0bfdb0c67ef0be3116",
+        "sha256:6ec96c751a95c216be6195fb1e9f4e46eafe4f7d567558eb62342d0e3aaa2b12",
+        "sha256:d523dfc5a67aac6910c3ced8110b60f33c53676611bb1a8319d9a3c47c6ee058",
+        "sha256:996bcfbe4e172ce4cf0d6b8a567ae6bedcee2234fa75ec8a58b41f60fa3a8a1f",
+        "sha256:a2a85022a888e7eda60fabab8a0c918d077a11da17f240bbf91c434588b3cf21",
+        "sha256:530d4f7c193a19de74351e3115cb49859fb48ce889901988c7edf56d72846930",
+        "sha256:b5c139642ef4f3e174bac10e942295949aa3b68b1f6f9af87bc6cb40c61a2bcf",
+        "sha256:17bf59f9a71f9925ba74259cfe6af9d6fcc1fa67952cb43ee2c1509812300ee9",
+        "sha256:a413166f33e682a656a2a755a6fc2a45c5884a8e85c79fe61502c13ab99d95b8",
+        "sha256:9730b2800735cd3fdfdf72294762abd3a2509ddd340268aaba12df995dbc4107"
+      ],
+      "Type": "layers"
+    }
+  },
+  "provenance": {
+    "archive_sha256": "1a2e3e048f1ed25a2380f068feff2717238c4fdeed0b1488a58e404c155f9ee5",
+    "legacy_layer_paths_equal": true,
+    "observation": "forum read-only exact imported base; no load/build/test"
+  }
+}

@@ -267,6 +267,31 @@ button { touch-action: manipulation; }
 .u-selected > .u-message, .u-selected > .bubble { outline: 2px solid var(--wz-accent, var(--accent)); outline-offset: 2px; }
 .u-selecting .u-message, .u-selecting .bubble { cursor: pointer; }
 /* reactions */
+/* Group mentions and reactor identities extend the existing composer/strip. */
+.u-composer { position: relative; }
+.u-field { position: relative; background: var(--wz-surface-raised, var(--raised)); border-radius: 22px; }
+.u-composer .u-field textarea { position: relative; background: transparent; }
+.u-mention-mirror { position: absolute; inset: 0; overflow: hidden; pointer-events: none; white-space: pre-wrap; overflow-wrap: break-word; color: transparent; font: inherit; line-height: 20px; padding: 12px 18px; border-radius: inherit; }
+.u-mention-mirror mark { color: transparent; background: var(--wz-accent-soft, var(--accent-soft)); border-radius: 4px; }
+.u-mention { color: var(--wz-accent, var(--accent)); text-decoration: none; font-weight: 600; border-radius: 4px; }
+.u-mentioned .u-message { outline: 2px solid var(--wz-accent, var(--accent)); outline-offset: 2px; }
+.u-mention-notice { display: block; font-size: .8rem; font-weight: 600; color: var(--wz-accent, var(--accent)); margin-bottom: 5px; }
+.u-mention-picker, .u-reactor-tooltip { background: var(--wz-panel, var(--panel-tint)); color: var(--wz-text, var(--ink)); border: 1px solid var(--wz-border, var(--line)); box-shadow: var(--wz-shadow, none); }
+.u-mention-picker { position: absolute; bottom: 100%; left: 12px; right: 12px; z-index: 30; max-height: min(40vh, 290px); overflow: auto; padding: 8px; border-radius: 16px; }
+.u-mention-option { display: flex; align-items: center; text-align: left; gap: 10px; width: 100%; padding: 8px; color: inherit; border-radius: 10px; overflow-wrap: anywhere; }
+.u-mention-option[aria-selected="true"], .u-mention-option:active, .u-react.pressed { background: var(--wz-accent-soft, var(--accent-soft)); outline: 1px solid var(--wz-accent, var(--accent)); }
+.u-react { position: relative; }
+.u-reactor-tooltip { position: absolute; z-index: 40; max-width: 270px; padding: 10px; border-radius: 12px; text-align: left; font-weight: 400; pointer-events: none; overflow: auto; }
+.u-mention-picker, .u-reactor-tooltip { box-sizing: border-box; overflow-wrap: anywhere; }
+.u-reactor-row > span:last-child, .u-mention-option > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.u-reactor-row > .avatar, .u-mention-option > .avatar { flex-shrink: 0; }
+.u-reactor-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; overflow-wrap: anywhere; white-space: normal; }
+.u-reactor-tabs { display: flex; gap: 6px; overflow: auto; padding: 5px 0; flex-shrink: 0; }
+.u-reactor-tabs button { flex-shrink: 0; }
+.u-reactor-tabs [aria-selected="true"] { color: var(--wz-accent, var(--accent)); border-color: currentColor; }
+.u-reactor-list { overflow: auto; }
+.u-mention-picker[hidden], .u-reactor-tooltip[hidden] { display: none; }
+
 .u-reactions { display: flex; gap: 4px; margin: -6px 8px 0; position: relative; z-index: 1; flex-wrap: wrap; }
 .u-react { min-height: 26px; min-width: 0; padding: 0 8px; border-radius: 13px; font-size: 14px; background: var(--raised-2); border: 2px solid var(--bg); color: var(--ink); }
 .u-react.mine { background: #2c4a86; }
@@ -621,9 +646,33 @@ html:not([data-color-scheme=light]) .u-chips .net-badge.u-chip-icon[data-network
 .u-chip.net:hover .u-chip-icon, .u-chip.net[aria-pressed=true] .u-chip-icon { filter: none; opacity: 1; }
 .u-chips .u-chip .u-chip-count { min-width: 0; height: auto; padding: 0; background: none; color: var(--ink-3); font-weight: 600; }
 .u-chips .u-chip[aria-pressed=true] .u-chip-count { background: none; color: inherit; }
-/* Live sign-in: fit the window height, drag to scroll */
-.c-live { width: auto; height: min(66vh, 760px); max-width: 100%; }
-.c-live-img { touch-action: none; }
+/* Owner sign-in uses the existing sheet and framebuffer, not another browser. The app's
+   actual window bounds the stage: vh alone ignores the sheet header, help and controls. */
+.u-sheet:has(.c-viewer) {
+  display: flex; flex-direction: column; width: 100%; max-width: 860px;
+  height: 100%; max-height: 100%; min-height: 0; margin: 0; padding: 8px 12px;
+  overflow: auto; background: var(--panel-solid); color: var(--ink);
+}
+.u-sheet:has(.c-viewer) > :not(header):not(.c-viewer):not(.grabber) { display: none; }
+.u-sheet:has(.c-viewer) > header { flex: 0 0 auto; margin: 0; }
+.u-sheet:has(.c-viewer) > .grabber { display: none; }
+.c-viewer { flex: 1 1 0; min-height: 400px; min-width: 0; display: grid; grid-template-rows: auto auto auto minmax(80px, 1fr) auto auto; gap: 6px; }
+.c-viewer .c-step-head { gap: 8px; margin: 0; }
+.c-viewer .c-step-head h3 { font-size: 1rem; margin: 0; color: var(--ink); }
+.c-viewer .c-mark.big { width: 28px; height: 28px; flex-basis: 28px; }
+.c-live-help { min-width: 0; color: var(--ink-2); font-size: .875rem; }
+.c-live-help summary { cursor: pointer; padding: 4px 0; }
+.c-live-help[open] { max-height: 120px; overflow: auto; }
+.c-live-tools { display: flex; flex-wrap: wrap; gap: 6px; }
+.c-viewer .c-live { width: 100%; height: 100%; min-height: 0; min-width: 0; max-width: none; margin: 0; overflow: auto; border-radius: 8px; background: var(--panel-solid); border: 1px solid var(--line-2); }
+.c-viewer .c-live-img { max-width: none; max-height: none; margin: auto; object-fit: fill; }
+.c-viewer .c-live.full-size .c-live-img { margin: 0; }
+.c-viewer .c-live-keys { max-width: none; width: 100%; margin: 0; gap: 4px; }
+.c-viewer .c-live-type { min-height: 40px; height: 40px; margin: 0; padding: 8px; font-size: 1rem; }
+.c-viewer .c-live-key { min-height: 40px; padding: 0 8px; font-size: .8125rem; }
+.c-viewer button, .c-viewer textarea { background: var(--panel-raised-tint); color: var(--ink); border-color: var(--line-2); }
+.c-viewer .c-waiting { margin: 0; min-height: 18px; font-size: .75rem; overflow-wrap: anywhere; color: var(--ink-2); }
+@media (max-width: 600px) { .u-overlay:has(.c-viewer) { padding: 6px; } .u-sheet:has(.c-viewer) { border-radius: 12px; } }
 /* Settings: solid sheet, compact grouped rows (desktop and phone alike) */
 :root { --sheet-solid: #1b1b1e; }
 html[data-color-scheme=light] { --sheet-solid: #f6f6f8; }
