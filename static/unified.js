@@ -789,7 +789,25 @@
       const more = button('More results', () => { more.disabled = true; loadSearch(searchGeneration, searchView.cursor); }); list.append(more);
     }
   }
+  // A feed/backfill repaint must not detach a chat button between pointerdown
+  // and click: browsers then target the list instead and the chat never opens.
+  // Keep the pressed row in place until its click has dispatched; reconcile next.
+  let listPress = null, listPaintPending = false, listPressExpiry = null;
+  const releaseListPress = () => {
+    listPress = null; clearTimeout(listPressExpiry);
+    if (listPaintPending) { listPaintPending = false; drawList(); }
+  };
+  document.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || !e.target.closest?.('.u-person')) return;
+    listPress = e.pointerId; clearTimeout(listPressExpiry);
+    listPressExpiry = setTimeout(releaseListPress, 5000);
+  }, true);
+  for (const type of ['pointerup', 'pointercancel']) document.addEventListener(type, e => {
+    if (e.pointerId === listPress) setTimeout(releaseListPress, 0);
+  }, true);
+  window.addEventListener('blur', releaseListPress);
   function drawList() {
+    if (listPress !== null) { listPaintPending = true; return; }
     if (contacts.ok) applyContacts();
     if (s.search != null) {
       if (searchView.query !== s.search) scheduleSearch(); else drawSearch();

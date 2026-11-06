@@ -33,4 +33,6 @@ Reuse:
 
 See docs/group-mentions-reactions.md for channel limitations, copied Telegram patterns and bounded acceptance.
 
+EXTEND existing drawList scheduling: keep a pressed chat row attached until its click dispatches; defer only the list repaint, never the chat open or backend ingestion.
+
 NEW: none.
