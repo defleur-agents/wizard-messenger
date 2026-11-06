@@ -13,7 +13,7 @@ def verify():
     m=json.loads((ROOT/'manifest.json').read_text())
     for n,h in m['files'].items(): assert digest_file(ROOT/n)==h,n
     custody=json.loads((ROOT/'capsule/source-custody.json').read_text())
-    for group,names in [('messenger',['approved-source','candidate','engine-source','recipe-source','live-source','current-live-source']),('shell',['shell']),('wam',['wam'])]:
+    for group,names in [('messenger',['approved-source','candidate','engine-source','recipe-source','live-source','current-live-source','baseline-recipe','signal-source']),('shell',['shell']),('wam',['wam'])]:
         probe=ROOT/('verify-'+group+'.git');assert not probe.exists()
         call(['git','init','--bare','-q',str(probe)])
         try:
@@ -120,6 +120,11 @@ ROOT_OUTPUTS = ('registry.log', 'dockerd.log', 'driver.log',
                 'daemon-validate.log', 'daemon-negative.log', 'daemon-status.txt')
 def phase(name):
     R['phase'] = name
+    if R.get('resource_initial') and name not in ('outer_cleanup', 'finalize'):
+        from resource_guard import resource_sample
+        plan=json.loads((ROOT/'capsule/resource-plan.json').read_text())
+        row=resource_sample(ROOT,name,plan,R['resource_initial'])
+        R.setdefault('resource_samples',[]).append(row)
 
 def problem(kind, exc):
     # Preserve the first phase failure; diagnostic I/O never masks it.
@@ -211,6 +216,11 @@ def cleanup_observation():
 def main():
     phase('verify_inputs')
     i=verify()
+    from resource_guard import acquire_resource_locks,resource_sample
+    plan=json.loads((ROOT/'capsule/resource-plan.json').read_text())
+    R['resource_light_lock_fd']=acquire_resource_locks(plan)
+    R['resource_initial']={'used_bytes':int(subprocess.check_output(['du','-s','-B1',str(ROOT)],text=True).split()[0])}
+    phase('resource_admission')
     R.update(source=i['source'], manifest_sha256=digest_file(ROOT/'manifest.json'),
         durable_retention_required=True, release_accepted=False, live_activation=False)
     phase('prepare_private_outputs')
@@ -218,14 +228,20 @@ def main():
     for p in [OUT,WORK,WORK/'home',WORK/'tmp',WORK/'state',WORK/'work']:
         p.mkdir(exist_ok=True); p.chmod(0o700)
     prepare_outputs()
+    (WORK/'resource-initial.json').write_text(json.dumps(R['resource_initial']))
     phase('verify_tools')
     b,cfg,node,deps=tools(i)
     phase('verify_images')
     images=ROOT/'images'; images.mkdir(exist_ok=True); ids={}
     for ref in i['images']:
+        phase('image:'+ref)
         dest=images/(hashlib.sha256(ref.encode()).hexdigest()[:20]+'.tar')
         ids[ref]=export(ref,dest) if not dest.with_suffix('.identity.json').exists() else json.loads(dest.with_suffix('.identity.json').read_text())
         assert digest_file(dest)==ids[ref]['archive_sha256']
+        if ref==i['base']:
+            assert ids[ref]['platform_manifest_digest']==i['published_artifact']['amd64_manifest']
+            assert ids[ref]['config_digest']==i['published_artifact']['config_digest']
+            assert ids[ref]['archive_bytes']<=plan['new_image_uncompressed_cap_bytes']
     (images/'identities.json').write_text(json.dumps(ids,indent=2)+'\n')
     R['input_image_identities_sha256']=digest_file(images/'identities.json')
     script=WORK/'inner.sh';script.write_text(INNER);script.chmod(0o700)
@@ -258,8 +274,12 @@ def main():
     driver=json.loads(safe_read(OUT/'delivery.json')) if (OUT/'delivery.json').exists() else {}
     for name in ['driver_pass','packaging_pass','canonical_pass','lifecycle_pass']:
         R[name]=driver.get('pass' if name=='driver_pass' else name) is True
+    R['converter_ingress_native_pass']=driver.get('converter_ingress_native_pass') is True
     R['pass']=bool(rc==0 and R['driver_pass'] and R.get('absence_pass') is True
+        and R['converter_ingress_native_pass']
         and not any(R.get(k) for k in ['primary_errors','cleanup_errors','artifact_errors']))
+    R['native_accepted']=R['pass']
+    R['native_gate_note']='Exact-artifact native gates only; parent visual/retention/live-promotion gates remain separate'
     return 0 if R['pass'] else 1
 
 def finalize():
@@ -283,6 +303,10 @@ def finalize():
             except BaseException as e:problem('artifact_errors',e)
     if any(R.get(k) for k in ['primary_errors','cleanup_errors','artifact_errors']) or R.get('absence_pass') is not True:
         R['pass']=False
+    R['minimal_delivery_pass']=bool(R['pass'] and R.get('converter_ingress_native_pass') is True)
+    R['native_accepted']=False  # Parent owns admission; this is not the omitted full campaign.
+    R['full_campaign_status']='UNRUN'
+    R['native_gate_note']='Minimal delivery only: package, one converter-ingress method, canonical shell and update/rollback/repromote; parent owns visual admission, live backup, retention and promotion.'
     tmp=OUT/'receipt.json.part'
     fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
     with os.fdopen(fd,'w') as f:
