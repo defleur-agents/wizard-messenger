@@ -190,7 +190,7 @@ class CachedDirectory:
         path = root / 'people.sqlite3'
         if path.exists():
             with sqlite3.connect('file:' + str(path) + '?mode=ro', uri=True) as db:
-                if db.execute('SELECT 1 FROM kv LIMIT 1').fetchone():
+                if db.execute("SELECT 1 FROM kv WHERE key NOT IN ('label_seed_v1','labels_rev') LIMIT 1").fetchone():
                     raise ValueError('Local Matrix/bridge credentials forbidden in remote-required mode')
         if any(k.startswith(('MATRIX_', 'TELEGRAM_BRIDGE_', 'MESSENGER_BRIDGE_')) for k in os.environ):
             raise ValueError('Local provider configuration forbidden in remote-required mode')

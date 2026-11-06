@@ -62,7 +62,7 @@ test('shipping mount/auth/signout and pagehide execute at phone and desktop widt
     const api=async(path)=>{
       calls.push(path);
       const responses={'api/unified/people':{people:[],seq:0},'api/unified/groups':{groups:[],seq:0},
-        'api/unified/connectors':{providers:[]},'api/unified/telegram/status':{},'api/drafts':{drafts:[]},'api/unified/directory':{people:[],groups:[]}};
+        'api/unified/connectors':{providers:[]},'api/unified/telegram/status':{},'api/drafts':{drafts:[]},'api/unified/directory':{people:[],groups:[]},'api/unified/labels':{labels:[],rev:0}};
       if(!(path in responses)){unexpected.push(path);throw new Error('Unexpected contract API '+path);}
       return responses[path];
     };
