@@ -57,13 +57,32 @@ python3 "$ROOT/capsule/registry_fixture.py" "$ROOT" >"$OUT/registry.log" 2>&1 &
 RPID=$!
 mkdir -p "$WORK/graph" "$WORK/exec" "$WORK/socket" "$WORK/cdi" "$WORK/extensions"
 # Use the existing admitted sudo capability; never chmod/chown the worker host socket or alter privilege policy.
-phase daemon_start
-"$BIN/dockerd" --config-file "$WORK/daemon.json" --host "unix://$WORK/socket/docker.sock" --data-root "$WORK/graph" --exec-root "$WORK/exec" --pidfile "$WORK/daemon.pid" \
- --bridge wzmsg0 --bip 172.30.0.1/24 --default-address-pool base=172.31.0.0/16,size=24 --iptables=true --ip6tables=false \
+# Docker 29.9 forbids --bridge with --bip; configure our exact owned bridge instead.
+# These commands execute only inside the existing private mount+network namespace.
+phase bridge_setup
+ip link add wzmsg0 type bridge
+ip addr add 172.30.0.1/24 dev wzmsg0
+ip link set wzmsg0 up
+daemon() {
+exec "$BIN/dockerd" --config-file "$WORK/daemon.json" --host "unix://$WORK/socket/docker.sock" --data-root "$WORK/graph" --exec-root "$WORK/exec" --pidfile "$WORK/daemon.pid" \
+ "$@" --default-address-pool base=172.31.0.0/16,size=24 --iptables=true --ip6tables=false \
  --cdi-spec-dir "$WORK/cdi" --extension-dir "$WORK/extensions" --init-path "$BIN/docker-init" \
  --userland-proxy-path "$BIN/docker-proxy" --exec-opt native.cgroupdriver=cgroupfs --cgroup-parent "$RUN" \
  --insecure-registry ghcr.io --insecure-registry dock.mau.dev --insecure-registry registry-1.docker.io --insecure-registry docker.io --registry-mirror http://127.0.0.1 \
- --feature containerd-snapshotter=false --storage-driver overlay2 --containerd-namespace "$RUN" --containerd-plugins-namespace "${RUN}p" --label "wizard.qa.run=$RUN" >"$OUT/dockerd.log" 2>&1 &
+ --feature containerd-snapshotter=false --storage-driver overlay2 --containerd-namespace "$RUN" --containerd-plugins-namespace "${RUN}p" --label "wizard.qa.run=$RUN"
+}
+phase daemon_options
+(daemon --bridge wzmsg0 --validate) >"$OUT/daemon-validate.log" 2>&1
+# Exact original argv negative control, confined to this namespace. --validate alone
+# accepts the original invalid combination, so is insufficient regression evidence.
+phase daemon_negative
+negative_rc=0
+(daemon --bridge wzmsg0 --bip 172.30.0.1/24) >"$OUT/daemon-negative.log" 2>&1 || negative_rc=$?
+[ "$negative_rc" = 1 ]
+grep -Fq 'failed to start daemon: You specified -b & --bip, mutually exclusive options. Please specify only one' "$OUT/daemon-negative.log"
+phase daemon_start
+ready=0
+daemon --bridge wzmsg0 >"$OUT/dockerd.log" 2>&1 &
 DPID=$!
 cleanup() {
  inner_rc=$?
@@ -78,6 +97,8 @@ cleanup() {
  kill -TERM "$DPID" "$RPID" 2>/dev/null
  for i in $(seq 1 30); do kill -0 "$DPID" 2>/dev/null || break; sleep 1; done
  kill -KILL "$DPID" "$RPID" 2>/dev/null
+ daemon_rc=0; wait "$DPID" || daemon_rc=$?
+ printf '%s %s\n' "$ready" "$daemon_rc" >"$OUT/daemon-status.txt"
 }
 trap cleanup EXIT INT TERM
 phase daemon_readiness
@@ -95,7 +116,8 @@ setpriv --reuid=1000 --regid=1000 --clear-groups env -i PATH="$BIN:/usr/bin:/bin
 # these 0600 inodes. Native ownership/append proof remains a Forum gate.
 ROOT_OUTPUTS = ('registry.log', 'dockerd.log', 'driver.log',
                 'nested-before-cleanup.txt', 'nested-after-cleanup.txt',
-                'nested-cleanup-status.txt', 'root-phase.txt', 'root-failure-phase.txt')
+                'nested-cleanup-status.txt', 'root-phase.txt', 'root-failure-phase.txt',
+                'daemon-validate.log', 'daemon-negative.log', 'daemon-status.txt')
 def phase(name):
     R['phase'] = name
 
@@ -166,14 +188,25 @@ def cleanup_observation():
         status = safe_read(OUT/'nested-cleanup-status.txt').decode().strip()
         c['nested_query_status'] = status
         c['nested_containers_empty'] = status == '0 0' and not safe_read(OUT/'nested-after-cleanup.txt').strip()
+        ds = safe_read(OUT/'daemon-status.txt').decode().strip().split()
+        c['daemon_ready'] = ds[0] == '1' if len(ds) == 2 and ds[0] in ('0', '1') else None
+        c['daemon_exit'] = int(ds[1]) if len(ds) == 2 and ds[1].isdigit() else None
+        c['daemon_state'] = ('ready' if c['daemon_ready'] is True else
+            'never_started_config_rejected' if c['daemon_ready'] is False and c['daemon_exit'] == 1
+            and b'You specified -b & --bip, mutually exclusive options' in safe_read(OUT/'dockerd.log')
+            and not safe_read(OUT/'driver.log') else 'never_ready' if c['daemon_ready'] is False else 'unknown')
+        c['nested_query_assessment'] = ('empty' if c['nested_containers_empty'] else
+            'failed_after_ready' if c['daemon_ready'] is True else
+            'not_observable_daemon_never_started' if c['daemon_state'] == 'never_started_config_rejected' else 'unknown')
         c['private_graph_removed'] = all(not (WORK/n).exists() for n in ['graph','exec','socket'])
         c['known'] = not R.get('cleanup_errors')
     except BaseException as e:
         problem('cleanup_errors', e)
-    R['absence_pass'] = bool(c['known'] and not c.get('stray_processes', True)
+    R['resource_absence_pass'] = bool(c['known'] and not c.get('stray_processes', True)
         and not c.get('mounts', True) and c.get('host_bridge_present') is False
-        and c.get('cgroup_present') is False and c.get('nested_containers_empty') is True
-        and c.get('private_graph_removed') is True)
+        and c.get('cgroup_present') is False and c.get('private_graph_removed') is True)
+    # Failed/unknown nested queries never become successful container emptiness.
+    R['absence_pass'] = R['resource_absence_pass'] and c.get('nested_containers_empty') is True
 
 def main():
     phase('verify_inputs')
@@ -197,7 +230,7 @@ def main():
     R['input_image_identities_sha256']=digest_file(images/'identities.json')
     script=WORK/'inner.sh';script.write_text(INNER);script.chmod(0o700)
     # env -i is applied after sudo as well: no host daemon proxy/plugin env leaks.
-    env=dict(ROOT=str(ROOT),WORK=str(WORK),OUT=str(OUT),RUN=RUN,BIN=str(b),CONFIG=str(cfg),NODE=str(node),DEPS=str(deps),PATH=str(b)+':/usr/bin:/bin',HOME=str(WORK/'home'))
+    env=dict(ROOT=str(ROOT),WORK=str(WORK),OUT=str(OUT),RUN=RUN,BIN=str(b),CONFIG=str(cfg),NODE=str(node),DEPS=str(deps),PATH=str(b)+':/usr/bin:/bin:/usr/sbin:/sbin',HOME=str(WORK/'home'))
     p=None; rc=None
     phase('namespace_launch')
     try:
