@@ -38,10 +38,17 @@ try{
 let f=page;
 if(mode==='standalone')await page.goto(origin+'/app/');else{await page.goto(origin+'/wizard-os-home/?shell='+ (mode==='phone'?'phone':'desktop'));await page.waitForFunction(()=> (window.__wos||window.__wux)&&window.WizCore);await page.evaluate(()=>WizCore.appsLoaded());await page.evaluate(mode=>(mode==='phone'?__wos:__wux).openApp(WizCore.apps(mode==='phone'?'mobile':'desktop').APP.messenger),mode);await page.waitForFunction(()=>[...document.querySelectorAll('iframe')].some(f=>f.src.endsWith('/app/')));f=page.frameLocator('iframe[src$="/app/"]');await page.evaluate(s=>{WosSkin.set(s);WizAppearance.sync();},skin);}
 await f.locator('.u-person').first().waitFor();
-const row=f.locator('.u-person[data-pid="synthetic-dm"]');const b=await row.boundingBox();await page.mouse.move(b.x+b.width/2,b.y+b.height/2);await page.mouse.down();
+// Wait for the DM row itself (the list paints rows as each endpoint answers), then press, repaint, release.
+// Phone presses with a real touch (CDP touchStart/touchEnd), as a finger would; desktop uses the mouse.
+// In the shell the app frame slides in (phone: from the right). Measure only once its rect has stopped moving
+// (phone: settled at x=0); otherwise a raw CDP touch lands off-screen at the mid-animation position.
+async function settledFrame(){let prev='';for(let i=0;i<100;i++){const r=await page.locator('iframe[src$="/app/"]').boundingBox();const k=r&&[r.x,r.y,r.width,r.height].map(Math.round).join();if(r&&k===prev&&(mode!=='phone'||Math.abs(r.x)<1))return;prev=k;await page.waitForTimeout(50);}throw new Error('app frame never settled');}
+const row=f.locator('.u-person[data-pid="synthetic-dm"]');await row.waitFor();if(mode!=='standalone')await settledFrame();const b=await row.boundingBox();const at={x:b.x+b.width/2,y:b.y+b.height/2};
+const touch=mode==='phone'?await ctx.newCDPSession(page):null;
+if(touch)await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[at]});else{await page.mouse.move(at.x,at.y);await page.mouse.down();}
 // Exact production repaint path, synchronously between press and release.
 await f.locator('html').evaluate(()=>window.MessengerUnified.setNativeRows([]));
-await page.mouse.up();
+if(touch)await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});else await page.mouse.up();
 await f.locator('.u-composer textarea').waitFor({timeout:3000});
 const draft=f.locator('.u-composer textarea');await draft.click();await page.keyboard.type('Synthetic click works');assert.equal(await draft.inputValue(),'Synthetic click works');assert.equal(await draft.evaluate(e=>e===document.activeElement),true);
 if(mode!=='phone'){
