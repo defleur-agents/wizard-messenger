@@ -65,6 +65,36 @@ class InstagramLoginTests(unittest.TestCase):
                 sender(network=network, base='http://' + network + (':29330' if network == 'instagram' else ':29335'), path=path, method='POST', body={'password': 'test-secret'})
             self.assertEqual('incorrect' in str(exc.exception), network == 'instagram')
 
+    def test_instagram_runs_in_the_private_in_app_browser(self):
+        import browser_signin
+        self.assertEqual(browser_signin.GENERIC['instagram'][0], 'instagram')
+        self.assertIn(browser_signin.GENERIC['instagram'][0], PROVIDERS['instagram'].flows)
+        seen = {}
+        class FakeSession:
+            def __init__(self, network, width, height, mobile, url=None, user_agent=None, step=None):
+                seen.update(network=network, url=url, mobile=mobile, fields=[f['id'] for f in step['cookies']['fields']])
+                self.id = 'synthetic'
+        controller = Mock()
+        controller.raw_start.return_value = ({'type': 'cookies', 'cookies': {'url': 'https://www.instagram.com/accounts/login/', 'fields': [{'id': 'sessionid'}, {'id': 'csrftoken'}, {'id': 'ds_user_id'}]}}, None)
+        with patch.object(browser_signin, 'Session', FakeSession), patch.object(browser_signin.threading, 'Thread'):
+            result = browser_signin.BrowserSignIn(controller).dispatch('POST', ['start'], {'network': 'instagram', 'flow': 'instagram', 'width': 400, 'height': 700}, {})
+        controller.raw_start.assert_called_once_with('instagram', 'instagram')
+        self.assertEqual(result, {'id': 'synthetic', 'title': 'Instagram'})
+        self.assertEqual(seen, {'network': 'instagram', 'url': 'https://www.instagram.com/accounts/login/', 'mobile': False, 'fields': ['sessionid', 'csrftoken', 'ds_user_id']})
+
+    def test_reasonless_rejection_names_code_and_points_to_browser_sign_in(self):
+        sender = LocalOwnerSender()
+        path = '/_matrix/provision/v3/login/step/p/credentials/user_input?user_id=%40owner%3Amessenger.internal'
+        for body in ({'errcode': 'M_FORBIDDEN'}, {'errcode': 'bad code <b>', 'error': ''}, {}):
+            error = HTTPError('http://synthetic.invalid', 403, 'synthetic', {}, io.BytesIO(json.dumps(body).encode()))
+            with patch.object(sender.opener, 'open', side_effect=error), self.assertRaises(EngineError) as exc:
+                sender(network='instagram', base='http://instagram:29330', path=path, method='POST', body={'password': 'test-secret'})
+            text = str(exc.exception)
+            self.assertIn('Sign in with browser (recommended)', text)
+            self.assertNotIn('Bridge sign-in could not complete', text)
+            self.assertNotIn('<b>', text)
+            self.assertEqual('M_FORBIDDEN' in text, body.get('errcode') == 'M_FORBIDDEN')
+
     def test_redaction_encoding_structure_and_cap(self):
         body = {'password': 'p@ss word', 'code': '654321', 'cookies': {'sessionid': 'short-secret'}}
         result = sanitized_login_error('Wrong password p@ss word p%40ss%20word p%40ss+word; 654321 short-secret https://instagram.com/?secret=x person@example.com sessionid=othersecret <b>Try again</b>\u202e', body, 'private-auth')

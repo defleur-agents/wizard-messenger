@@ -52,6 +52,7 @@ function fixture() {
     const drafts = [], updates = [];
     let draftSeq = 0;
     const ctx = await browser.newContext({viewport: {width: 1280, height: 860}, deviceScaleFactor: 1, colorScheme: tokens.scheme});
+    await ctx.addInitScript(() => { try { localStorage.setItem('messenger.inboxView', 'compact'); } catch {} }); // this test reads the compact rows; Chats is the default since 16.27
     await ctx.addInitScript(([s, tk]) => {
       const noop = () => {};
       window.WizardApp = {ready: noop, update: {hold: () => ({release: noop})}, back: {register: noop}, on: noop, nav: {}, toast: noop, badge: {set: noop}};

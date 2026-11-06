@@ -242,6 +242,11 @@ class LocalOwnerSender:
                     reason = sanitized_login_error(data.get('error') if isinstance(data, dict) else None, body, token, fingerprints)
                     if reason:
                         fail('login_failed', 'Instagram sign-in: ' + reason + ' Try browser sign-in if this keeps happening.', 409)
+                if network == 'instagram' and status in (400, 401, 403):
+                    # No usable reason from Instagram: name the bridge's own error code (a fixed-format id, never
+                    # provider text) and point at the route that works.
+                    tag = code if isinstance(code, str) and re.fullmatch(r'[A-Z0-9_.]{1,64}', code) else 'no reason given'
+                    fail('login_failed', 'Instagram turned this sign-in down without saying why (' + tag + '). Use Sign in with browser (recommended) instead.', 409)
                 if status in (400, 401, 403):
                     fail('login_failed', 'Bridge sign-in could not complete. Review verification in the provider app, then start again.', 409)
             fail('owner_transport_failed', 'Private owner transport failed', 502)

@@ -61,3 +61,12 @@ Reuse:
 - labels: EXTEND unified.py room_label + unified.js paintFilters
 - label-catalogue: NEW unified.py label_catalog (only addition)
 - sheet-overlay: REUSE unified.js overlay/closeOverlay/actionMenu
+
+## Inbox view: Chats or Compact (16.27)
+
+| Capability | Existing implementation | Decision |
+|---|---|---|
+| Chat list row with or without the last-message line | unified.js drawList() `compact` flag (u-compact class), set by the old Settings "Message previews in the list" switch (default off since 15.12) | EXTEND: one renderer, flag now driven by Settings > Inbox view (Chats default, Compact), key messenger.inboxView; the switch is replaced, not duplicated |
+
+Reuse:
+- inbox-rows: EXTEND unified.js drawList + previewsOn()/setInboxView()
