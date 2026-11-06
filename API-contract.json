@@ -649,6 +649,54 @@
     },
     {
       "method": "GET",
+      "path": "/api/unified/people/{id}/catch-up",
+      "auth": true,
+      "result": "owner session only (machine/agent keys get 403 in every mode): {grant:{mode,until}|null, cached:{bullets:[{kind,text,refs}],count,parts,model,basis,created}|null, job:{state,done,total,count}|null, model, models, default}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/people/{id}/catch-up",
+      "auth": true,
+      "result": "owner session only: starts a Tinfoil summary of ALL unread messages (no cap; long chats are read in parts and merged); 403 catchup_not_allowed without a grant; returns {job}",
+      "body": {
+        "since": "optional ms timestamp to start from"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/people/{id}/catch-up/grant",
+      "auth": true,
+      "result": "owner session only: records the owner's choice for this chat; Tinfoil summarization only, never agent access",
+      "body": {
+        "mode": "once | day | always"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/people/{id}/catch-up/revoke",
+      "auth": true,
+      "result": "owner session only: removes the grant; clear:true also deletes the cached summary",
+      "body": {
+        "clear": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/unified/catch-up/settings",
+      "auth": true,
+      "result": "owner session only: {model, models:[glm-5-3, deepseek-v4-1-flash], default, grants:[{person_id,name,mode,until}]}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/catch-up/settings",
+      "auth": true,
+      "result": "owner session only: sets the summary model (Tinfoil models only)",
+      "body": {
+        "model": "glm-5-3"
+      }
+    },
+    {
+      "method": "GET",
       "path": "/api/unified/labels",
       "auth": true,
       "result": "owner session only (machine/agent keys get 403): {labels:[{name,chats}], rev}; includes empty labels"
