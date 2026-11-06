@@ -3785,18 +3785,26 @@
     row.append(node('strong', 'u-agent-name', name), choice);
     return row;
   }
-  // Message previews in the chat list: off by default (compact list), remembered on this device.
-  const PREVIEWS_KEY = 'messenger.previews';
-  function previewsOn() { try { return localStorage.getItem(PREVIEWS_KEY) === '1'; } catch { return false; } }
-  function setPreviews(on) {
-    try { if (on) localStorage.setItem(PREVIEWS_KEY, '1'); else localStorage.removeItem(PREVIEWS_KEY); } catch { /* this visit only */ }
-    $('messenger')?.classList.toggle('u-compact', !on); drawList();
+  // Inbox view (James, 6 Nov 2026): "Chats" is the default, the way Messenger has always read: picture, name, last message
+  // (a group names its sender), time and unread badge. "Compact" is the denser 16.x row (name, time, badge; no last line).
+  // One row renderer in drawList() draws both; this only flips the flag. Saves at once and is remembered on this device.
+  const VIEW_KEY = 'messenger.inboxView';
+  const VIEWS = [['chats', 'Chats', 'Last message under each name'], ['compact', 'Compact', 'Names only, more chats on screen']];
+  function inboxView() { try { const v = localStorage.getItem(VIEW_KEY); if (v === 'chats' || v === 'compact') return v; } catch { /* default */ } return 'chats'; }
+  const previewsOn = () => inboxView() === 'chats';
+  function setInboxView(view) {
+    try { localStorage.setItem(VIEW_KEY, view); } catch { /* this visit only */ }
+    $('messenger')?.classList.toggle('u-compact', view === 'compact'); drawList();
   }
-  function previewsRow() {
-    const row = node('label', 'u-more-row u-more-previews'), sw = node('input', 'u-switch');
-    sw.type = 'checkbox'; sw.setAttribute('role', 'switch'); sw.checked = previewsOn(); sw.onchange = () => setPreviews(sw.checked);
-    row.append(node('span', 'u-more-label', 'Message previews in the list'), sw);
-    return row;
+  function inboxViewRow() {
+    const row = node('div', 'u-more-row u-more-view'), group = node('div', 'u-view-choice'); group.setAttribute('role', 'radiogroup'); group.setAttribute('aria-label', 'Inbox view');
+    row.append(node('span', 'u-more-label', 'Inbox view'), group);
+    const paint = () => { for (const b of group.children) { const on = b.dataset.view === inboxView(); b.setAttribute('aria-checked', String(on)); b.classList.toggle('on', on); } };
+    for (const [id, label, hint] of VIEWS) {
+      const b = button(label, () => { setInboxView(id); paint(); }, 'u-view-btn'); b.dataset.view = id; b.title = hint;
+      b.setAttribute('role', 'radio'); group.append(b);
+    }
+    paint(); return row;
   }
   // A quiet list row that opens another page.
   function moreLink(label, fn, cls = '') {
@@ -3810,7 +3818,7 @@
   function moreSettings(sheet) {
     const head = node('h3', 'u-more-head', 'Agent access'), agents = node('div', 'u-settings-group u-more u-more-agents');
     const group = node('div', 'u-settings-group u-more u-more-other');
-    group.append(previewsRow());
+    group.append(inboxViewRow());
     sheet.append(head, agents, group);
     // Each part stays away while it has nothing to show.
     const sync = () => {
