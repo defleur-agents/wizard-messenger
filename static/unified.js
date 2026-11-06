@@ -798,12 +798,12 @@
   //  2. One icon-only button per network (narrows the row-1 view), then Filters (Type, Labels) on the right. Networks
   //     that do not fit fold into a "+N" button opening the same menu, never a scroll.
   const SEG_KEY = 'messenger-inbox-seg', NET_KEY = 'messenger-inbox-net', TYPE_KEY = 'messenger-inbox-type', LABEL_KEY = 'messenger-inbox-label';
-  const SEGMENTS = [['all', 'All'], ['unread', 'Unread'], ['medium', 'Medium'], ['low', 'Low']];
-  const TYPES = [['all', 'All chats'], ['direct', 'Direct'], ['groups', 'Groups'], ['merged', 'Merged']];
+  const SEGMENT_LABELS = [['all', 'All'], ['unread', 'Unread'], ['medium', 'Medium'], ['low', 'Low']];
+  const TYPE_LABELS = [['all', 'All chats'], ['direct', 'Direct'], ['groups', 'Groups'], ['merged', 'Merged']];
   const kept = key => { try { return sessionStorage.getItem(key) || ''; } catch { return ''; } };
   const keep = (key, value) => { try { if (value) sessionStorage.setItem(key, value); else sessionStorage.removeItem(key); } catch { /* memory only */ } };
   const filterState = {net: kept(NET_KEY), type: kept(TYPE_KEY) || 'all', label: kept(LABEL_KEY), nets: [], labels: [], merged: false};
-  function setSeg(seg) { s.seg = SEGMENTS.some(x => x[0] === seg) ? seg : 'all'; setLowView(s.seg === 'low'); keep(SEG_KEY, s.seg === 'all' ? '' : s.seg); }
+  function setSeg(seg) { s.seg = SEGMENT_LABELS.some(x => x[0] === seg) ? seg : 'all'; setLowView(s.seg === 'low'); keep(SEG_KEY, s.seg === 'all' ? '' : s.seg); }
   function setNarrow(key, value) {
     if (key === 'net') { filterState.net = value; keep(NET_KEY, value); }
     if (key === 'type') { filterState.type = value || 'all'; keep(TYPE_KEY, value === 'all' ? '' : value); }
@@ -813,7 +813,7 @@
   function filterChips() {
     const box = node('div', 'u-chips u-filter-rows'); box.id = 'u-filters'; box.setAttribute('role', 'group'); box.setAttribute('aria-label', 'Filter chats');
     const seg = node('div', 'u-seg'); seg.setAttribute('role', 'radiogroup'); seg.setAttribute('aria-label', 'Show');
-    for (const [value, text] of SEGMENTS) {
+    for (const [value, text] of SEGMENT_LABELS) {
       const b = button('', () => { setSeg(value); drawList(); }, 'u-seg-btn'); b.dataset.seg = value; b.setAttribute('role', 'radio');
       b.append(node('span', 'u-seg-text', text), node('span', 'u-seg-count')); seg.append(b);
     }
@@ -847,7 +847,7 @@
     const labels = [...new Set(all.flatMap(p => p.labels || []))].sort(), merged = all.some(p => networksOf(p).length > 1);
     const f = Object.assign(filterState, {nets, labels, merged});
     if (f.net && !nets.includes(f.net)) setNarrowQuiet('net', '');
-    if (!TYPES.some(t => t[0] === f.type) || (f.type === 'merged' && !merged)) setNarrowQuiet('type', 'all');
+    if (!TYPE_LABELS.some(t => t[0] === f.type) || (f.type === 'merged' && !merged)) setNarrowQuiet('type', 'all');
     if (f.label && !labels.includes(f.label)) setNarrowQuiet('label', '');
     // Row 1: exactly one segment. Counts are quiet text: unread chats that would ping (never muted, Medium or Low).
     const inbox = all.filter(p => !isLow(p) && narrowed(p));
@@ -856,7 +856,7 @@
       const v = b.dataset.seg, n = counts[v] || 0, c = b.querySelector('.u-seg-count');
       b.setAttribute('aria-checked', String(v === s.seg)); b.tabIndex = v === s.seg ? 0 : -1;
       c.textContent = n ? (n > 99 ? '99+' : String(n)) : ''; c.hidden = !n;
-      const name = SEGMENTS.find(x => x[0] === v)[1]; b.setAttribute('aria-label', n ? name + ', ' + n + ' unread' : name); b.title = b.getAttribute('aria-label');
+      const name = SEGMENT_LABELS.find(x => x[0] === v)[1]; b.setAttribute('aria-label', n ? name + ', ' + n + ' unread' : name); b.title = b.getAttribute('aria-label');
     }
     // Row 2: one icon per network.
     const row = box.querySelector('.u-nets'), sig = nets.join('|');
@@ -871,7 +871,7 @@
     }
     for (const c of row.querySelectorAll('.u-chip')) c.setAttribute('aria-pressed', String(c.dataset.filter === 'net:' + f.net));
     const btn = box.querySelector('.u-filter-btn'), on = f.type !== 'all' || !!f.label;
-    btn.classList.toggle('on', on); btn.setAttribute('aria-label', on ? 'Filters, ' + [f.type !== 'all' ? TYPES.find(t => t[0] === f.type)[1] : '', f.label].filter(Boolean).join(', ') + ' on' : 'Filters');
+    btn.classList.toggle('on', on); btn.setAttribute('aria-label', on ? 'Filters, ' + [f.type !== 'all' ? TYPE_LABELS.find(t => t[0] === f.type)[1] : '', f.label].filter(Boolean).join(', ') + ' on' : 'Filters');
     btn.title = btn.getAttribute('aria-label');
     fitNets(box);
     const seg = s.seg || 'all';
@@ -900,7 +900,7 @@
     const radio = (label, checked, run) => ({label, icon: checked ? 'check' : 'none', checked, run});
     const netItems = folded ? [{head: 'Networks'}, radio('All networks', !f.net, pick('net', '')),
       ...f.nets.map(n => radio(n === 'private' ? 'Wizard' : netLabel(n), f.net === n, pick('net', n)))] : [];
-    const typeItems = [{head: 'Type'}, ...TYPES.filter(t => t[0] !== 'merged' || f.merged).map(([v, t]) => radio(t, f.type === v, pick('type', v)))];
+    const typeItems = [{head: 'Type'}, ...TYPE_LABELS.filter(t => t[0] !== 'merged' || f.merged).map(([v, t]) => radio(t, f.type === v, pick('type', v)))];
     const labelItems = f.labels.length ? [{head: 'Labels'}, radio('Any label', !f.label, pick('label', '')), ...f.labels.map(l => radio(l, f.label === l, pick('label', l)))] : [];
     anchor.setAttribute('aria-expanded', 'true');
     actionMenu(anchor, netsFirst ? 'Networks' : 'Filters', netsFirst ? [...netItems, ...typeItems, ...labelItems] : [...typeItems, ...labelItems, ...netItems], {cls: 'u-filter-menu', flip: true, side: 'right', onClose: () => anchor.setAttribute('aria-expanded', 'false')});
@@ -1159,6 +1159,7 @@
     (panel.querySelector('button.checked') || panel.querySelector('button'))?.focus(); hold();
   }
   const muteAction = (muted, run) => ({label: muted ? 'Unmute' : 'Mute', icon: muted ? 'bell' : 'belloff', run});
+  const lowAction = (low, run) => ({label: low ? 'Move to Inbox' : 'Move to Low priority', icon: low ? 'inbox' : 'lowpri', run});
   // Priority (Miguel, 2 Nov 2026): Normal, Medium (listed, never pings) or Low (out of the Inbox). One choice.
   const priorityOf = p => isLow(p) ? 'low' : isMedium(p) ? 'medium' : 'normal';
   const PRIORITIES = [['normal', 'Normal'], ['medium', 'Medium'], ['low', 'Low']];
@@ -1167,6 +1168,7 @@
   function chatMenu(p, card) {
     actionMenu(card, p.display_name, [
       muteAction(p.muted, () => p.native ? p.setMuted() : setMuted(p, !p.muted)),
+      lowAction(isLow(p), () => setPriority(p, isLow(p) ? 'normal' : 'low')),
       priorityAction(p, card),
       ...(p.native || listKey(p) === 'groups' ? [] : [{label: 'Merge with…', icon: 'merge', run: () => mergePicker(p)}]),
       ...(contacts.ok && !p.native && listKey(p) !== 'groups' && !p.contact && p.accounts?.length ? [{label: 'Add to Contacts', icon: 'compose', run: () => action(async () => { const r = await saveToContacts(p); if (r) { toast('Added to Contacts'); drawList(); } })}] : []),
@@ -1184,13 +1186,13 @@
   async function setPriority(p, level) {
     const low = level === 'low', medium = level === 'medium', before = priorityOf(p);
     if (before === level) return;
-    const said = low ? 'Moved to Low priority' : medium ? 'Medium priority: listed, never notifies' : before === 'low' ? 'Moved to Inbox' : 'Normal priority';
+    const toastLabel = low ? 'Moved to Low priority' : medium ? 'Medium priority: listed, never notifies' : before === 'low' ? 'Moved to Inbox' : 'Normal priority';
     if (p.twin) { if (!!p.twin.low_priority !== low) p.twin.setLowPriority(low); if (!!p.twin.medium_priority !== medium) p.twin.setMediumPriority?.(medium); Object.assign(p.twin, {low_priority: low, medium_priority: medium}); }
-    if (p.native) { p.setLowPriority(low); p.setMediumPriority?.(medium); Object.assign(p, {low_priority: low, medium_priority: medium}); syncBadge(); drawList(); toast(said); return; }
+    if (p.native) { p.setLowPriority(low); p.setMediumPriority?.(medium); Object.assign(p, {low_priority: low, medium_priority: medium}); syncBadge(); drawList(); toast(toastLabel); return; }
     const flip = v => { const set = {low_priority: v === 'low', medium_priority: v === 'medium'}; for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if (x.id === p.id) Object.assign(x, set); Object.assign(p, set); drawList(); syncBadge(); };
     flip(level);
-    try { await call('people/' + encodeURIComponent(p.id), {low_priority: low, medium_priority: medium}); toast(said); persist(); }
-    catch (e) { flip(before); toast(e.message || 'Could not change priority', 3000); }
+    try { await call('people/' + encodeURIComponent(p.id), {low_priority: low, medium_priority: medium}); toast(toastLabel); persist(); }
+    catch (e) { flip(before); toast(e.message || 'Could not move this chat', 3000); }
   }
   async function setMuted(p, muted) {
     if (p.twin && !!p.twin.muted !== muted) { p.twin.setMuted(); p.twin.muted = muted; }

@@ -130,7 +130,8 @@ function fixture(){
    }finally{await ctx.close();}
   }
   // Exact delivered assets, not a broad screenshot-count assertion.
-  for(const [n,v] of Object.entries(R.staticHashes)){const p=path.join(process.env.MESSENGER_STATIC_DIR,n);assert.equal(sha(fs.readFileSync(p)),v,n);}
+  for(const [n,v] of Object.entries(R.staticHashes)){const root=process.env.MESSENGER_PUBLIC_PIN_DIR&&['index.html','app.js','app.css'].includes(n)?process.env.MESSENGER_PUBLIC_PIN_DIR:process.env.MESSENGER_STATIC_DIR;const p=path.join(root,n);assert.equal(sha(fs.readFileSync(p)),v,n);}
+  R.publicPinnedClientKept=!!process.env.MESSENGER_PUBLIC_PIN_DIR;
   for(const [n,v] of Object.entries(R.sdkHashes)){assert.equal(sha(fs.readFileSync(path.join(process.env.WIZARD_WEB_DIR,n))),v,n);}
   for(const n of ['index.html','app.js','unified.js','unified.css'])assert(R.staticHashes[n],'missing packaged asset delivery '+n);
   for(const n of ['core/app-client.js','core/app-services.js','core/appearance-host.js','core/share-sheet.js'])assert(R.sdkHashes[n],'missing canonical SDK delivery '+n);

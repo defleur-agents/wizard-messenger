@@ -320,7 +320,7 @@ def focused_reconciliation(src):
 
 def canonical(static):
     shell=WORK/'work'/'shell';assert shell.is_dir();catalogue=ROOT/'capsule/canonical_shell_origin.cjs'
-    env=dict(os.environ,MESSENGER_STATIC_DIR=str(static),WIZARD_WEB_DIR=str(shell/'web'))
+    env=dict(os.environ,MESSENGER_STATIC_DIR=str(static),WIZARD_WEB_DIR=str(shell/'web'),MESSENGER_PUBLIC_PIN_DIR=str(CAP/'public-pin'))
     p=subprocess.Popen([os.environ['NODE'],str(catalogue),'--web',str(shell/'web'),'--static',str(static),'--port','18731'],env=env,stdout=open(OUT/'canonical-origin.log','w'),stderr=subprocess.STDOUT,start_new_session=True);PROCS.append(p)
     wait('http://127.0.0.1:18731/wizard-os-home/index.html',30)
     run([os.environ['NODE'],str(CAP/'canonical_shell_browser.cjs'),str(OUT/'canonical'),'http://127.0.0.1:18731'],env=env,timeout=900)

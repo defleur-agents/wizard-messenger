@@ -2,6 +2,7 @@
 // Actual installed shell tree + actual packaged static bytes. No API forwarding, owner-state writes or streams.
 const http=require('node:http'),fs=require('node:fs'),path=require('node:path');
 const arg=n=>process.argv[process.argv.indexOf('--'+n)+1],WEB=path.resolve(arg('web')),STATIC=path.resolve(arg('static')),PORT=Number(arg('port'));
+const PIN=process.env.MESSENGER_PUBLIC_PIN_DIR&&path.resolve(process.env.MESSENGER_PUBLIC_PIN_DIR);
 const log={unknownReads:[],refusedWrites:[],refusedStreams:[],served:{}};
 const apps={apps:[{id:'messenger',name:'Messenger',type:'service',category:'app',source:'apps.json',url:'/messenger/',view:{mode:'original',url:'/messenger/'},desc:'Synthetic installed Messenger fixture'}],in_development:[]};
 const catalogue={
@@ -21,6 +22,7 @@ http.createServer((req,res)=>{
  if(u.pathname.startsWith('/messenger/')){root=STATIC;rel=u.pathname.slice(11)||'index.html';}
  else if(u.pathname.startsWith('/wizard-os-home/')){root=WEB;rel=u.pathname.slice(16)||'index.html';}
  else {log.unknownReads.push(u.pathname);return j(res,404,{});}
+ if(root===STATIC&&PIN&&['index.html','app.js','app.css'].includes(rel))root=PIN;
  rel=decodeURIComponent(rel);if(rel.includes('..')||rel.split('/').some(s=>s.startsWith('.')))return j(res,404,{});
  const f=path.join(root,rel);
  if(!fs.existsSync(f)||!fs.statSync(f).isFile()){
