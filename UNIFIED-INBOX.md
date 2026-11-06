@@ -91,3 +91,7 @@ Evidence boundaries: real Synapse/bridge health and registration, real bridgev2 
 ## Catch me up (0.2.0-unified.16.28)
 
 Title-bar sparkle beside the chat menu, and "Summarize these" under the "N new messages" line, open an opaque bottom sheet with bullets (who said what, decisions, open questions, things aimed at the owner); each bullet opens its source message. Input is every unread message in the chat with no cap (if none are unread: since the owner last wrote, else the whole loaded history). When the text exceeds one pass (`SUMMARY_PART_CHARS`, 120000) it is split by time into parts, each summarized, then merged; the sheet footer says "Summarized N messages in K parts". The model call goes only through the translation worker (`POST /complete`, `TINFOIL_API_KEY`, `https://inference.tinfoil.sh`). Model choice and the 8-transcript side-by-side test: `docs/catch-me-up.md`. Tables `catchup_grant` and `catchup_summary` are created with `CREATE TABLE IF NOT EXISTS`; existing data is untouched. Permission: AGENT-PERMISSIONS.md.
+
+## 0.2.0-unified.16.29 (single trunk, Standard release)
+
+`main` is the one trunk (renamed from `feature/unified-inbox` on 6 Nov 2026). There is no Alpha channel for Messenger: this is the Standard release (public digest-pinned GHCR images for amd64 and arm64). It carries Catch me up (16.28) and the platform owner proof (#107): with an App Manager that provides the owner proof, Messenger accepts it and the fingerprint prompt stops repeating; without one it fails closed to the existing unlock.
