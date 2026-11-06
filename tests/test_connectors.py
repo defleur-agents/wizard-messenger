@@ -295,6 +295,12 @@ class ConnectorTests(unittest.TestCase):
             if name == 'line':
                 self.assertEqual(len(evidence['source_commit']), 40)
                 self.assertEqual(evidence['license'], 'MIT')
+            elif evidence.get('custom_build'):
+                # Locally built bridge: pinned local image ID plus the upstream registry digest it was built from.
+                self.assertRegex(evidence['image'], r'^sha256:[0-9a-f]{64}$')
+                self.assertIn('@sha256:', evidence['upstream_image'])
+                self.assertEqual({m['platform']['architecture'] for m in evidence['upstream_manifest']['manifests']}, {'amd64', 'arm64'})
+                self.assertEqual(len(evidence['built_from_source_revision']), 40)
             else:
                 self.assertIn('@sha256:', evidence['image'])
                 self.assertEqual({m['platform']['architecture'] for m in evidence['manifest']['manifests']}, {'amd64', 'arm64'})
