@@ -10,7 +10,7 @@ from unified import weak_label, MXC
 
 # Cached room_meta written before this version may have dropped a bridged room
 # (protocol.id aliases): re-read room state once for those.
-META_VERSION = 3  # 3: member and room pictures
+META_VERSION = 4  # 4: exact joined-member IDs for identity-safe mention autocomplete
 # Bridged history (bridgev2 backfill on stock Synapse) arrives through /sync with
 # its original timestamps; only recent lines may notify.
 LIVE_WINDOW_MS = 15 * 60 * 1000

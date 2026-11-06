@@ -1,12 +1,11 @@
 // Forum only. Real hosted client + source view; ALL accounts/messages/identities are SYNTHETIC.
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
-const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
 if(!process.cwd().startsWith('/srv/work/')) throw Error('Forum /srv/work only');
 const out=path.resolve(process.argv[2]),shell=process.env.SHELL_DIR,staticDir=path.resolve(__dirname,'../static');fs.mkdirSync(out,{recursive:true});
 // Reuse LINE's hosted Appearance fixture, not hand-built colour tokens.
-const src=fs.readFileSync(path.join(shell,'core/skins.js'),'utf8');
-const palettes=vm.runInNewContext('const T=o=>o;'+src.slice(src.indexOf('  const SKINS = ['),src.indexOf('  // Each skin'))+';SKINS').filter(s=>['nebula','signal'].includes(s.id)).map(s=>({id:s.id,t:s.t}));assert.equal(palettes.length,2);
-const host=`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><script>window.WizCore={apps:()=>({APPS:[{url:'/app/'}]})};window.setFixtureSkin=id=>{const s=JSON.parse(atob('${Buffer.from(JSON.stringify(palettes)).toString('base64')}')).find(s=>s.id===id);for(const[k,v]of Object.entries(s.t))document.documentElement.style.setProperty('--'+k,v);document.documentElement.dataset.skin=id;window.WizAppearance?.sync()};setFixtureSkin('nebula')</script><script src="/wizard-os-home/core/appearance-host.js" defer></script><style>html,body{margin:0;height:100%;background:var(--bg)}.win,iframe{width:100%;height:100%;border:0}</style></head><body><div class="st-embed win"><iframe src="/app/" title="Synthetic group"></iframe></div></body></html>`;
+assert(fs.existsSync(path.join(shell,'core/skins.js')), 'Pinned real skin source required');
+const host=`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><script src="/wizard-os-home/core/skins.js"></script><script>window.WizCore={apps:()=>({APPS:[{url:'/app/'}]})};window.setFixtureSkin=id=>{window.WosSkin.set(id);window.WizAppearance?.sync()};setFixtureSkin('nebula')</script><script src="/wizard-os-home/core/appearance-host.js" defer></script><style>html,body{margin:0;height:100%;background:var(--bg)}.win,iframe{width:100%;height:100%;border:0}</style></head><body><div class="st-embed win"><iframe src="/app/" title="Synthetic group"></iframe></div></body></html>`;
 const alice={id:'@telegram_101:messenger.internal',name:'Alice Example',label:'Alice Example',identity_id:'synthetic-id'},bob={id:'@telegram_102:messenger.internal',name:'Bob Example',label:'Bob Example',identity_id:'synthetic-id'};
 const types={'.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.html':'text/html'};
 (async()=>{const browser=await chromium.launch({headless:true,args:['--no-sandbox'],executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE});const results=[];
@@ -41,7 +40,7 @@ try { for(const profile of [{name:'desktop',viewport:{width:1280,height:860}},{n
  const docMarker=await f.locator('html').evaluate(el=>el.dataset.qaDocument=String(Math.random()));let previousAccent;
  for(const skin of ['nebula','signal']) {
   await page.evaluate(skin=>setFixtureSkin(skin),skin);
-  await page.waitForFunction(()=>document.querySelector('iframe').contentDocument.documentElement.dataset.wzAppearance==='v1');
+  await page.waitForFunction(()=>getComputedStyle(document.querySelector('iframe').contentDocument.documentElement).getPropertyValue('--wz-accent').trim()!=='');
   if(previousAccent)await page.waitForFunction(old=>getComputedStyle(document.querySelector('iframe').contentDocument.documentElement).getPropertyValue('--wz-accent').trim()!==old,previousAccent);
   previousAccent=await f.locator('html').evaluate(el=>getComputedStyle(el).getPropertyValue('--wz-accent').trim());assert(previousAccent);
   const draft=f.locator('.u-composer textarea');await draft.fill('@');await f.locator('.u-mention-picker:not([hidden])').waitFor();

@@ -39,6 +39,16 @@ class GroupFeatures(unittest.TestCase):
         self.assertNotIn('mxc:', json.dumps(members))
         self.assertTrue(members[0]['avatar'])
 
+    def test_legacy_or_departed_member_metadata_cannot_forge_picker_members(self):
+        self.meta['joined'] = [ALICE]
+        with self.store.db() as db:
+            db.execute('UPDATE room_meta SET json=? WHERE room=?',(json.dumps(self.meta),'!synthetic'))
+        self.assertEqual([m['id'] for m in self.store.members(self.identity)],[ALICE])
+        del self.meta['joined']
+        with self.store.db() as db:
+            db.execute('UPDATE room_meta SET json=? WHERE room=?',(json.dumps(self.meta),'!synthetic'))
+        self.assertEqual(self.store.members(self.identity),[])
+
     def test_send_emits_standard_mentions_and_matrix_links_without_trusting_payload_ids(self):
         result = self.inbox.send(self.pid, {'text':'Hi @Alice Example!', 'client_id':'synthetic-send-123', 'mentions':[{'id':'@unrelated:example.org'}]})
         content = self.inbox.mx.call_args.args[2]
