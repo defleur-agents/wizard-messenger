@@ -1,0 +1,66 @@
+name: Alpha image archive
+# Exports one already-published, multi-arch Messenger image as a downloadable Wizard Alpha archive,
+# on a NATIVE runner for that architecture (no emulation). Pulls the exact digest, checks architecture
+# and OCI source revision, smoke-tests it with fresh data, tags it with the exact recipe tag the installer
+# resolves, then attaches `docker save | gzip -n` to an existing release and prints SHA-256/ID/bytes.
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag: {description: 'Existing GitHub release tag, e.g. v0.2.0-unified.16.25', required: true}
+      image: {description: 'Recipe image tag, e.g. ghcr.io/humanitylabs-org/wizard-messenger:sha-<commit>', required: true}
+      digest: {description: 'Multi-arch index digest sha256:...', required: true}
+      revision: {description: 'Full source commit the image was built from', required: true}
+      arch: {description: 'amd64 or arm64', required: true, type: choice, options: [arm64, amd64]}
+permissions:
+  contents: write
+  packages: read
+jobs:
+  archive:
+    if: github.repository == 'humanitylabs-org/wizard-messenger'
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    env:
+      IMAGE: ${{ inputs.image }}
+      DIGEST: ${{ inputs.digest }}
+      REVISION: ${{ inputs.revision }}
+      ARCH: ${{ inputs.arch }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Validate inputs
+        run: |
+          set -eu
+          [[ "$IMAGE" =~ ^ghcr\.io/humanitylabs-org/wizard-messenger:[A-Za-z0-9._-]+$ ]]
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9A-Za-z._-]+$ ]]
+          test "$(uname -m)" = "$([ "$ARCH" = arm64 ] && echo aarch64 || echo x86_64)"
+      - name: Pull exact digest natively and verify identity
+        run: |
+          set -eu
+          docker pull "${IMAGE%%:*}@$DIGEST"
+          docker tag "${IMAGE%%:*}@$DIGEST" "$IMAGE"
+          test "$(docker image inspect "$IMAGE" --format '{{.Architecture}}')" = "$ARCH"
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$REVISION"
+      - name: Smoke (fresh data, no owner)
+        run: |
+          set -eu
+          docker run -d --name smoke --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+            --tmpfs /tmp:uid=1000,gid=1000 --tmpfs /run/messenger:mode=0700,uid=1000,gid=1000 \
+            -v smoke-data:/data -e MESSENGER_API_TOKEN=$(openssl rand -hex 32) -e UNIFIED_ENABLED=0 -e CONNECTORS_ENABLED=0 \
+            -e MESSENGER_COOKIE_SECURE=0 -e MESSENGER_PUBLIC_PATH=/ -p 127.0.0.1:18765:8765 "$IMAGE"
+          for i in $(seq 60); do curl -fsS http://127.0.0.1:18765/healthz && { docker rm -f smoke; exit 0; }; sleep 2; done
+          docker logs smoke; exit 1
+      - name: Export and attach archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          asset="messenger-${REVISION:0:8}-$ARCH.tar.gz"
+          docker save "$IMAGE" | gzip -n > "$asset"
+          sha=$(sha256sum "$asset" | cut -d' ' -f1)
+          id=$(docker image inspect "$IMAGE" --format '{{.Id}}')
+          bytes=$(stat -c %s "$asset")
+          gunzip -c "$asset" | tar -t | grep -qx "blobs/sha256/${id#sha256:}"
+          gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY"
+          echo "{\"asset\":\"$asset\",\"sha256\":\"$sha\",\"image_id\":\"$id\",\"image\":\"$IMAGE\",\"bytes\":$bytes,\"arch\":\"$ARCH\",\"revision\":\"$REVISION\"}" | tee receipt.json
+          echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"; cat receipt.json >> "$GITHUB_STEP_SUMMARY"; echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"

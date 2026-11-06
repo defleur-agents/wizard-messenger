@@ -28,6 +28,7 @@ function createFixture(scenario='native') {
     '/api/unified/people':{people:[],seq:1},
     '/api/unified/groups':{groups:[person],seq:1},
     '/api/unified/qr-codes':{codes:[]},
+    '/api/unified/connectors':{providers:[]},
     '/api/unified/directory':{people:[],groups:[person]},
     '/api/unified/updates':{seq:1,messages:{},people:[],typing:{},removed:[]},
     '/api/unified/people/synthetic-group':{person,messages:[msg],typing:[],has_more:false,next_cursor:null},
@@ -38,6 +39,7 @@ function createFixture(scenario='native') {
     const u=new URL(url,origin), p=u.pathname.replace(/^\/app\//,'/');
     // Contacts is a separate public app contract: no Messenger envelope.
     if(p==='/contacts/api/contacts') return {contacts:[]};
+    if(p==='/contacts/api/me/connected'&&method==='POST') return {};
     const draftPath=p.match(/^\/api\/drafts(?:\/(synthetic-draft))?$/);
     if(draftPath) {
       if(method==='GET') return {ok:true,result:draftPath[1]?{draft}:{drafts:draft?[draft]:[]}};

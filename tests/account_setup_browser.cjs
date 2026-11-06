@@ -110,10 +110,10 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
       assert.equal(await f.locator('.c-card button').first().innerText(),'Sign in with browser (recommended)');
       await captures('options');
       await f.getByRole('button',{name:'Sign in with browser (recommended) for Instagram DMs',exact:true}).click();
-      await f.locator('.c-paste').waitFor(); await captures('browser');
+      await f.locator('.c-form textarea').waitFor(); await captures('browser');
       const paste="curl 'https://www.instagram.com/direct/inbox/' -H 'cookie: sessionid=synthetic-session; csrftoken=synthetic-csrf; ds_user_id=1234; other=discarded'";
-      await f.locator('.c-paste').fill(paste); await captures('browser-draft');
-      assert.equal(await f.locator('.c-paste').inputValue(),paste,'skin changes preserve unsent cookie draft');
+      await f.locator('.c-form textarea').fill(paste); await captures('browser-draft');
+      assert.equal(await f.locator('.c-form textarea').inputValue(),paste,'skin changes preserve unsent cookie draft');
       await f.getByRole('button',{name:'Connect',exact:true}).click();
       await f.getByText('Instagram connected',{exact:true}).waitFor();
       await f.getByRole('button',{name:'Done',exact:true}).click();
