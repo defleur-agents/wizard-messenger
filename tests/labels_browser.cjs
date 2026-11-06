@@ -103,15 +103,18 @@ const SKINS = {
     await page.goto('https://messenger.test/');
     await page.locator('.u-person', {hasText: 'James Carter'}).waitFor({timeout: 15000});
 
-    // 1. An empty label exists in Filters from the start (WizardOS seeded) and shows the how-to empty state.
-    const chip = page.locator('#u-filters .u-chip[data-filter="label:WizardOS"]');
-    await chip.waitFor({timeout: 5000});
-    await chip.click();
+    // 1. An empty label exists in Filters from the start (WizardOS seeded); choosing it shows the how-to empty state.
+    const openFilters = async () => { await page.locator('.u-filter-btn').click(); await page.locator('.u-menu.u-filter-menu').waitFor(); };
+    const pickLabel = async name => { await openFilters(); await page.locator('.u-filter-menu').getByRole('menuitemradio', {name}).click(); };
+    await openFilters();
+    assert.equal(await page.locator('.u-filter-menu').getByRole('menuitemradio', {name: 'WizardOS'}).count(), 1, 'empty WizardOS is listed in Filters > Labels');
+    await tall(page.locator('.u-filter-menu button'), 'filter menu item');
+    await page.locator('.u-filter-menu').getByRole('menuitemradio', {name: 'WizardOS'}).click();
     assert.equal(await page.locator('.u-person').count(), 0, 'empty label shows no chats');
     const empty = await page.locator('.u-empty').innerText();
     assert.match(empty, /No chats in WizardOS yet/); assert.match(empty, /Labels/);
     await shot('empty-label');
-    await page.locator('[data-filter=all]').click();
+    await pickLabel('Any label');
 
     // 2. Hold/right-click a PERSON (not just groups): Labels in the row menu, tick WizardOS.
     await page.locator('.u-person', {hasText: 'James Carter'}).click({button: 'right'});
@@ -156,13 +159,13 @@ const SKINS = {
     assert.deepEqual(calls.filter(c => c[0] === 'labels').map(c => c[1]).sort(), ['fam', 'james', 'james', 'marco'].sort().filter((x, i, a) => true));
 
     // 5. Filter: all networks that carry it.
-    await page.locator('#u-filters .u-chip[data-filter="label:WizardOS"]').click();
+    await pickLabel('WizardOS');
     assert.deepEqual((await rows()).sort(), ['Family', 'James Carter', 'Marco Bianchi']);
     assert.equal(await page.locator('.u-person').count(), 3);
     await shot('filtered');
 
     // 6. Manage labels: reachable from the filters, rename, delete (two taps), create.
-    await page.locator('#u-filters .u-chip[data-filter="manage-labels"]').click();
+    await openFilters(); await page.locator('.u-filter-menu').getByRole('menuitem', {name: 'Manage labels'}).click();
     const mg = page.locator('.u-sheet.u-manage-labels'); await mg.waitFor();
     await page.waitForTimeout(400); await tall(mg.locator('.u-label-act'), 'manage action');
     await mg.getByLabel('New label name').fill('Ideas'); await mg.getByRole('button', {name: 'Create'}).click();
@@ -180,11 +183,11 @@ const SKINS = {
     assert.equal(await page.locator('.u-sheet').count(), 0);
     assert.deepEqual((await rows()).sort(), ['Family', 'James Carter', 'Marco Bianchi'], 'chats survive label edits');
     // Deleting the label you are looking at falls back to All instead of an empty dead end.
-    await page.locator('#u-filters .u-chip[data-filter="manage-labels"]').click();
+    await openFilters(); await page.locator('.u-filter-menu').getByRole('menuitem', {name: 'Manage labels'}).click();
     await page.locator('.u-sheet .u-label-manage', {hasText: 'WizardOS'}).getByRole('button', {name: 'Delete'}).click();
     await page.getByRole('button', {name: 'Delete label?'}).click(); await page.waitForTimeout(200);
     await outside();
-    assert.equal(await page.locator('#u-filters .u-chip[data-filter="label:WizardOS"]').count(), 0);
+    await openFilters(); assert.equal(await page.locator('.u-filter-menu').getByRole('menuitemradio', {name: 'WizardOS'}).count(), 0, 'deleted label leaves Filters'); await outside();
     assert.equal(await page.locator('.u-person').count(), 5, 'filter fell back to All, every chat is still there');
     assert.deepEqual(errors, [], 'no page errors');
     summary.push(`${scheme}-${label}: ok`);
