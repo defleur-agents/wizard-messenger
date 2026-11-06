@@ -141,6 +141,7 @@
     belloff: ['M6 9a6 6 0 0 1 9.4-4.9', 'M18 9c0 6 2.5 7.5 2.5 7.5H8', 'M10 20a2 2 0 0 0 4 0', 'M3 3l18 18'],
     lowpri: ['M3 4h18v4H3z', 'M5 8v11h14V8', 'M10 12h4'], unread: ['M21 12a9 9 0 1 1-6-8.5', 'M19 7a2 2 0 1 0 0-.01'], inbox: ['M3 13h5l2 3h4l2-3h5', 'M5.5 5h13L21 13v6H3v-6z'],
     smile: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M8.5 14.5s1.3 2 3.5 2 3.5-2 3.5-2', 'M9 9.5v.01', 'M15 9.5v.01'],
+    tag: ['M3 12V4h8l10 10-8 8z', 'M7.5 8.5v.01'],
     qr: ['M4 4h6v6H4z', 'M14 4h6v6h-6z', 'M4 14h6v6H4z', 'M14 14h2v2h-2z', 'M18 14h2', 'M14 18v2', 'M18 18h2v2h-2z'],
   };
   function icon(name) {
@@ -376,6 +377,7 @@
     if (!s.overlay && view.selection?.active) { view.selection.clear(); return true; }
     if (s.overlay && connectorController?.back?.()) return true;
     if (s.overlay === 'Edit QR codes') { myCodes(); return true; }
+    if (s.overlay === 'Manage labels' && view.manageFrom) { const p = view.manageFrom; view.manageFrom = null; labelsSheet(p); return true; } // opened from a chat's Labels: Back returns to it
     if (s.overlay === 'Suggested merges') { accounts(); return true; } // nested: Back returns to the codes, not the list
     if (s.overlay === 'Advanced' || s.overlay === 'Agent drafts') { accounts(); return true; } // pages opened from Settings return to it
     if (!s.overlay && !s.person && detailOpen()) { closePane(); return true; } // New message beside the list
@@ -780,6 +782,7 @@
   function apply(r) {
     if (r.reset) { for (const k in unreadById) delete unreadById[k]; store.seq = r.seq; store.lists = {people: null, groups: null}; store.threads = Object.create(null); if (s.person) { openPerson(s.person); if (split.on) renderList(); } else renderList(); return; } // desktop: the list beside the chat reloads too
     store.seq = Math.max(store.seq, r.seq);
+    if (typeof r.labels_rev === 'number' && labelCat.ok && r.labels_rev !== labelCat.rev) loadLabelCatalog(true);
     for (const id of r.removed || []) {
       for (const k of ['people', 'groups']) if (store.lists[k]) store.lists[k] = store.lists[k].filter(p => p.id !== id);
       delete unreadById[id]; delete mutedById[id]; delete lowById[id]; delete mediumById[id]; delete kindById[id];
@@ -937,11 +940,11 @@
     const box = $('u-filters'); if (!box) return all;
     const connected = (accountsSeen || []).filter(p => p.state === 'connected' || p.state === 'degraded').map(p => p.network);
     const nets = [...new Set([...all.flatMap(networksOf), ...connected])].filter(n => n !== 'private' && n !== 'messenger').sort((a, b) => netLabel(a).localeCompare(netLabel(b))).concat('private');
-    const labels = [...new Set(all.flatMap(p => p.labels || []))].sort(), merged = all.some(p => networksOf(p).length > 1);
+    const labels = labelNames(all), merged = all.some(p => networksOf(p).length > 1);
     const f = Object.assign(filterState, {nets, labels, merged});
     if (f.net && !nets.includes(f.net)) setNarrowQuiet('net', '');
     if (!TYPES.some(t => t[0] === f.type) || (f.type === 'merged' && !merged)) setNarrowQuiet('type', 'all');
-    if (f.label && !labels.includes(f.label)) setNarrowQuiet('label', '');
+    if (f.label && labelCat.ok && !labels.includes(f.label)) setNarrowQuiet('label', '');
     // Row 1: exactly one segment. Counts are quiet text: unread chats that would ping (never muted, Medium or Low).
     const inbox = all.filter(p => !isLow(p) && narrowed(p));
     const counts = {unread: inbox.filter(p => p.unread > 0 && !p.muted && !isMedium(p)).length, medium: inbox.filter(p => isMedium(p) && p.unread > 0 && !p.muted).length};
@@ -994,7 +997,7 @@
     const netItems = folded ? [{head: 'Networks'}, radio('All networks', !f.net, pick('net', '')),
       ...f.nets.map(n => radio(n === 'private' ? 'Wizard' : netLabel(n), f.net === n, pick('net', n)))] : [];
     const typeItems = [{head: 'Type'}, ...TYPES.filter(t => t[0] !== 'merged' || f.merged).map(([v, t]) => radio(t, f.type === v, pick('type', v)))];
-    const labelItems = f.labels.length ? [{head: 'Labels'}, radio('Any label', !f.label, pick('label', '')), ...f.labels.map(l => radio(l, f.label === l, pick('label', l)))] : [];
+    const labelItems = [{head: 'Labels'}, ...(f.labels.length ? [radio('Any label', !f.label, pick('label', '')), ...f.labels.map(l => radio(l, f.label === l, pick('label', l)))] : []), {label: f.labels.length ? 'Manage labels' : 'Make a label', icon: 'tag', run: () => manageLabels()}];
     anchor.setAttribute('aria-expanded', 'true');
     actionMenu(anchor, netsFirst ? 'Networks' : 'Filters', netsFirst ? [...netItems, ...typeItems, ...labelItems] : [...typeItems, ...labelItems, ...netItems], {cls: 'u-filter-menu', flip: true, side: 'right', onClose: () => anchor.setAttribute('aria-expanded', 'false')});
   }
@@ -1154,6 +1157,11 @@
       if (s.seg === 'low' && !narrow) empty.append(node('p', '', 'No low priority chats here'), hint('Low chats stay out of All and never notify you. ' + how + ', then Priority → Low.'));
       else if (s.seg === 'medium' && !narrow) empty.append(node('p', '', 'No medium priority chats here'), hint('Medium chats stay in All but never notify you. ' + how + ', then Priority → Medium.'));
       else if (s.seg === 'unread' && !narrow && !q) empty.append(node('p', '', 'No unread chats'), hint('You are all caught up.'));
+      else if (!q && filterState.label) {
+        const name = filterState.label;
+        empty.append(node('p', '', 'No chats in ' + name + ' yet.'), hint('To add one: ' + how.toLowerCase() + ' and choose Labels, or open a chat, tap its name, and tick ' + name + ' under Labels. Chats from every network can go in.'));
+        empty.append(button('Manage labels', () => manageLabels(), 'secondary u-empty-clear'));
+      }
       else if (q || narrow || s.seg !== 'all') {
         empty.append(node('p', '', q ? 'No matches' : 'Nothing here with this filter'));
         if (narrow) empty.append(button('Clear filters', () => { setNarrowQuiet('net', ''); setNarrowQuiet('type', 'all'); setNarrowQuiet('label', ''); drawList(); }, 'u-chip u-empty-clear'));
@@ -1273,6 +1281,7 @@
     actionMenu(card, p.display_name, [
       muteAction(p.muted, () => p.native ? p.setMuted() : setMuted(p, !p.muted)),
       priorityAction(p, card),
+      ...(p.native ? [] : [{label: 'Labels', icon: 'tag', run: () => labelsSheet(p)}]),
       ...(p.native || listKey(p) === 'groups' ? [] : [{label: 'Merge with…', icon: 'merge', run: () => mergePicker(p)}]),
       ...(contacts.ok && !p.native && listKey(p) !== 'groups' && !p.contact && p.accounts?.length ? [{label: 'Add to Contacts', icon: 'compose', run: () => action(async () => { const r = await saveToContacts(p); if (r) { toast('Added to Contacts'); drawList(); } })}] : []),
       ...(p.native || !p.last ? [] : [p.unread ? {label: 'Mark as read', icon: 'check', run: () => setUnread(p, false)} : {label: 'Mark as unread', icon: 'unread', run: () => setUnread(p, true)}]),
@@ -1544,6 +1553,7 @@
       {label: 'Merge with…', icon: 'merge', run: () => mergePicker(cur)},
       muteAction(cur.muted, () => setMuted(cur, !cur.muted)),
       priorityAction(cur, anchor, 'right'),
+      ...(cur.native ? [] : [{label: 'Labels', icon: 'tag', run: () => labelsSheet(cur)}]),
     ], {side: 'right'}); };
     view.sub = root.querySelector('.u-who-text span') || node('span'); if (!view.sub.parentNode) root.querySelector('.u-who-text').append(view.sub);
     const t = store.threads[id];
@@ -3409,6 +3419,121 @@
     }
     return box;
   }
+
+  // ---------- Labels: your own groups of chats ----------
+  // A label is a name you make once ("WizardOS") and tick on any chat, from any network, person or group.
+  // Choosing it in the Inbox filters then shows those chats together. The catalogue lives on the box, so an empty label exists.
+  const labelCat = {names: [], counts: {}, rev: -1, ok: false, loading: null};
+  const sameLabel = (a, b) => a.toLowerCase() === b.toLowerCase();
+  const canonLabel = n => labelCat.names.find(x => sameLabel(x, n)) || null;
+  function takeCatalog(r) {
+    if (!r || !Array.isArray(r.labels)) return;
+    labelCat.names = r.labels.filter(x => x && typeof x === 'object').map(x => x.name); labelCat.counts = Object.fromEntries(r.labels.filter(x => x && typeof x === 'object').map(x => [x.name, x.chats | 0]));
+    if (typeof r.rev === 'number') labelCat.rev = r.rev; labelCat.ok = true;
+  }
+  function loadLabelCatalog(force = false) {
+    if (labelCat.loading) return labelCat.loading;
+    if (labelCat.ok && !force) return Promise.resolve();
+    labelCat.loading = call('labels').then(takeCatalog).catch(() => {}).then(() => { labelCat.loading = null; if (s.ready && s.tab === 'people' && (!s.person || split.on)) drawList(); });
+    return labelCat.loading;
+  }
+  const labelNames = all => { const seen = new Map(); for (const n of [...labelCat.names, ...all.flatMap(p => p.labels || [])]) if (!seen.has(n.toLowerCase())) seen.set(n.toLowerCase(), n); return [...seen.values()].sort((a, b) => a.localeCompare(b)); };
+  const labelProblem = e => { if (errorBox()) error(e); else toast(e.message || 'Could not save labels', 3000); };
+  let labelQueue = Promise.resolve();
+  // Tap registers at once (the tick and the list repaint), the box catches up after.
+  function saveChatLabels(p, names) {
+    const put = list => { for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if (x.id === p.id) x.labels = list; p.labels = list; if (store.threads[p.id]) store.threads[p.id].person.labels = list; drawList(); };
+    const before = p.labels || []; put(names);
+    labelQueue = labelQueue.then(async () => {
+      try { const r = await call('people/' + encodeURIComponent(p.id) + '/labels', {labels: names}); takeCatalog({labels: r.catalog, rev: r.rev}); put(r.labels); persist(); }
+      catch (e) { put(before); labelProblem(e); }
+    });
+    return labelQueue;
+  }
+  // Checkbox list of every label plus a "New label" box. Used in the chat info sheet and the chat menu's Labels sheet.
+  function labelPicker(p) {
+    const box = node('div', 'u-labels');
+    box.append(node('p', 'helper u-labels-help', 'A label is your own group of chats. Tick one to put this chat in it; then choose that label in the Inbox filters to see all its chats from every network.'));
+    const list = node('div', 'u-label-list'); list.setAttribute('role', 'group'); list.setAttribute('aria-label', 'Labels for this chat');
+    const form = node('form', 'u-label-new'); const input = node('input'); input.placeholder = 'New label, e.g. WizardOS'; input.maxLength = 64; input.setAttribute('aria-label', 'New label');
+    const add = node('button', 'secondary', 'Add'); add.type = 'submit'; form.append(input, add);
+    const has = n => (p.labels || []).some(x => sameLabel(x, n));
+    const paint = () => {
+      list.replaceChildren();
+      const names = labelNames([p]);
+      if (!names.length) list.append(node('p', 'helper u-label-none', 'No labels yet. Make one below.'));
+      for (const n of names) {
+        const on = has(n), row = button('', () => {
+          const next = has(n) ? (p.labels || []).filter(x => !sameLabel(x, n)) : [...(p.labels || []), n];
+          saveChatLabels(p, next); paint();
+        }, 'u-label-row' + (on ? ' on' : ''));
+        row.setAttribute('role', 'checkbox'); row.setAttribute('aria-checked', String(on));
+        const mark = node('span', 'u-check'); if (on) mark.append(icon('check'));
+        row.append(mark, node('span', 'u-label-name', n)); list.append(row);
+      }
+    };
+    form.onsubmit = e => {
+      e.preventDefault(); const raw = input.value.replace(/\s+/g, ' ').trim(); if (!raw) return;
+      if (raw.length > 64) return labelProblem(new Error('Label names are up to 64 characters'));
+      const name = canonLabel(raw) || raw; if (!canonLabel(raw)) labelCat.names = [...labelCat.names, name].sort((a, b) => a.localeCompare(b));
+      input.value = ''; if (!has(name)) saveChatLabels(p, [...(p.labels || []), name]); paint();
+    };
+    paint(); box.append(list, form);
+    loadLabelCatalog(true).then(() => { if (box.isConnected) paint(); });
+    return box;
+  }
+  // The row and thread menus' Labels: the same picker on its own small sheet.
+  function labelsSheet(p) {
+    const sheet = overlay('Labels'); sheet.append(node('p', 'u-labels-chat', p.display_name), labelPicker(p));
+    sheet.append(button('Manage labels', () => manageLabels(p), 'secondary wide'));
+  }
+  // Create, rename and delete labels. Deleting a label never touches the chats in it.
+  function manageLabels(from = null) {
+    const sheet = overlay('Manage labels'); view.manageFrom = from; sheet.classList.add('u-manage-labels');
+    sheet.append(node('p', 'helper', 'Labels are your own groups of chats, such as WizardOS. Add a chat to one from its info sheet or by holding it in the list. Deleting a label never deletes the chats.'));
+    const list = node('div', 'u-label-list');
+    const form = node('form', 'u-label-new'); const input = node('input'); input.placeholder = 'New label, e.g. WizardOS'; input.maxLength = 64; input.setAttribute('aria-label', 'New label name');
+    const add = node('button', 'primary', 'Create'); add.type = 'submit'; form.append(input, add);
+    let editing = null, confirming = null;
+    const refreshList = () => { if (s.ready && s.tab === 'people' && (!s.person || split.on)) drawList(); };
+    const mutate = async (optimistic, path, body) => {
+      optimistic(); paint(); refreshList();
+      try { takeCatalog(await call(path, body)); } catch (e) { error(e); await loadLabelCatalog(true); }
+      if (s.overlay === 'Manage labels') paint(); refreshList();
+    };
+    function paint() {
+      list.replaceChildren();
+      const all = labelNames([...(store.lists.people || []), ...(store.lists.groups || [])]);
+      if (!all.length) list.append(node('p', 'helper u-label-none', 'No labels yet. Make your first one below.'));
+      for (const n of all) {
+        const row = node('div', 'u-label-manage'), count = labelCat.counts[n] ?? [...(store.lists.people || []), ...(store.lists.groups || [])].filter(x => (x.labels || []).includes(n)).length;
+        if (editing === n) {
+          const f = node('form', 'u-label-new'); const i = node('input'); i.value = n; i.maxLength = 64; i.setAttribute('aria-label', 'Rename ' + n);
+          const ok = node('button', 'primary', 'Save'); ok.type = 'submit';
+          f.append(i, ok, button('Cancel', () => { editing = null; paint(); }, 'secondary'));
+          f.onsubmit = e => { e.preventDefault(); const to = i.value.replace(/\s+/g, ' ').trim(); editing = null; if (!to || to === n) return paint();
+            if (filterState.label === n) setNarrowQuiet('label', canonLabel(to) || to);
+            mutate(() => { labelCat.names = labelCat.names.filter(x => x !== n); if (!canonLabel(to)) labelCat.names.push(to); for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if ((x.labels || []).includes(n)) x.labels = [...new Set(x.labels.map(l => l === n ? (canonLabel(to) || to) : l))].sort(); }, 'labels/rename', {from: n, to}); };
+          row.append(f); setTimeout(() => i.focus(), 0);
+        } else {
+          const name = node('span', 'u-label-name'); name.append(node('strong', '', n), node('small', '', count === 1 ? '1 chat' : count + ' chats'));
+          row.append(name, button('Rename', () => { editing = n; confirming = null; paint(); }, 'secondary u-label-act'));
+          row.append(confirming === n
+            ? button('Delete label?', () => { confirming = null; mutate(() => { labelCat.names = labelCat.names.filter(x => x !== n); for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if ((x.labels || []).includes(n)) x.labels = x.labels.filter(l => l !== n); }, 'labels/delete', {name: n}); }, 'secondary danger u-label-act')
+            : button('Delete', () => { confirming = n; paint(); }, 'secondary u-label-act'));
+        }
+        list.append(row);
+      }
+    }
+    form.onsubmit = e => {
+      e.preventDefault(); const name = input.value.replace(/\s+/g, ' ').trim(); if (!name) return;
+      if (name.length > 64) return error(new Error('Label names are up to 64 characters'));
+      input.value = ''; if (canonLabel(name)) return toast('That label already exists');
+      mutate(() => { labelCat.names = [...labelCat.names, name].sort((a, b) => a.localeCompare(b)); }, 'labels', {name});
+    };
+    sheet.append(list, form); paint();
+    loadLabelCatalog(true).then(() => { if (s.overlay === 'Manage labels') paint(); });
+  }
   function editPerson(p) {
     const sheet = overlay(p.identities.every(i => i.kind === 'person') ? 'Contact' : 'Group'); const form = node('form');
     const hero = node('div', 'u-hero'); hero.append(avatar(p.display_name, 'large'), node('strong', '', p.display_name), node('span', '', networksOf(p).map(netLabel).join(' · '))); sheet.append(hero);
@@ -3424,6 +3549,7 @@
     form.append(button('Save', save, 'primary wide'));
     const linkBox = contactsRow(p); if (linkBox) sheet.append(linkBox);
     form.onsubmit = e => { e.preventDefault(); save(); }; sheet.append(form);
+    if (!p.native) sheet.append(node('h3', '', 'Labels'), labelPicker(p));
     if (p.identities.every(i => i.kind === 'person')) {
       const others = s.people.filter(x => x.id !== p.id);
       if (others.length) {
@@ -3432,10 +3558,6 @@
         sheet.append(node('h3', '', 'Merge'), mergeLabel, button('Merge', () => action(async () => { await call('people/' + p.id + '/merge', {source_id: select.value}); closeOverlay(); delete store.threads[p.id]; store.lists = {people: null, groups: null}; await openPerson(p.id); }), 'secondary wide'));
       }
       if (p.identities.length > 1) for (const i of p.identities) sheet.append(button('Separate ' + netLabel(i.network) + ' · ' + i.label, () => action(async () => { await call('people/' + p.id + '/unmerge', {identity_id: i.id}); closeOverlay(); delete store.threads[p.id]; store.lists = {people: null, groups: null}; await openPerson(p.id); }), 'secondary wide'));
-    } else {
-      const labels = node('input'); labels.placeholder = 'Family, Friends'; labels.value = (p.labels || []).join(', ');
-      const labelsLabel = node('label', '', 'Labels'); labelsLabel.append(labels);
-      sheet.append(labelsLabel, button('Save labels', () => action(async () => { await call('groups/' + p.identities[0].id + '/labels', {labels: labels.value.split(',').map(x => x.trim()).filter(Boolean)}); closeOverlay(); }), 'secondary wide'));
     }
   }
   // My QR codes: the owner's own Telegram, WhatsApp, Signal… as big scannable codes, one tap from Chats.
@@ -4077,7 +4199,7 @@
       resume(); return true;
     },
     authenticated() {
-      if (s.ready) return; s.ready = true; restore(); loadContacts();
+      if (s.ready) return; s.ready = true; restore(); loadContacts(); loadLabelCatalog();
       const painted = document.documentElement.dataset.inboxTab;
       if (!painted) resume();
       else if (openLinkedChat()) { /* Wizard inbox deep link */ }

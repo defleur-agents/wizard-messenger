@@ -191,7 +191,80 @@ class PeopleTests(unittest.TestCase):
         self.store.labels(group['id'], ['Family', 'Family', 'Friends'])
         self.assertEqual(self.store.people('group', chats=False)[0]['labels'], ['Family', 'Friends'])
         with self.assertRaises(EngineError): self.store.merge(person['person_id'], group['person_id'])
-        with self.assertRaises(EngineError): self.store.labels(person['id'], ['Family'])
+        self.assertEqual(self.store.labels(person['id'], ['Family'])['labels'], ['Family'])  # people carry labels too
+        with self.assertRaises(EngineError): self.store.labels('missing', ['Family'])
+
+    def test_label_catalogue_seeds_once_and_lists_empty_labels(self):
+        names = lambda: [x['name'] for x in self.store.label_catalog()['labels']]
+        self.assertEqual(names(), ['WizardOS'])  # one-time seed, empty and catalogued
+        self.assertEqual(self.store.label_catalog()['labels'][0]['chats'], 0)
+        self.store.delete_label('wizardos')  # case-insensitive
+        self.assertEqual(names(), [])
+        self.assertEqual(PeopleStore(self.store.path).label_catalog()['labels'], [])  # a deleted seed never returns on restart
+
+    def test_label_create_rename_delete_and_validation(self):
+        made = self.store.create_label('  Family   trip ')
+        self.assertEqual(made['label'], 'Family trip')
+        self.assertEqual(self.store.create_label('family TRIP')['label'], 'Family trip')  # no duplicates
+        self.assertEqual(sorted(x['name'] for x in made['labels']), ['Family trip', 'WizardOS'])
+        for bad in ('', '   ', 'x' * 65, 5, None, 'a\x01b'):
+            with self.assertRaises(EngineError): self.store.create_label(bad)
+        with self.assertRaises(EngineError): self.store.rename_label('Nope', 'X')
+        with self.assertRaises(EngineError): self.store.delete_label('Nope')
+        renamed = self.store.rename_label('Family trip', 'Trip')
+        self.assertEqual(sorted(x['name'] for x in renamed['labels']), ['Trip', 'WizardOS'])
+
+    def test_any_chat_incl_people_carries_labels_and_merged_person_applies_to_every_identity(self):
+        group = self.store.identity('telegram', '!g', 'Team', 'group')
+        a = self.store.identity('telegram', '!one', 'Alice')
+        b = self.store.identity('messenger', 'abc', 'Alice 2')
+        solo = self.store.identity('signal', '+1', 'Bob')
+        for i, ident in enumerate((group, a, b, solo)): self.store.add_message('$%d' % i, ident, 'x', False, 'hi', 100 + i)
+        merged = self.store.merge(a['person_id'], b['person_id'])
+        before = self.store.seq
+        out = self.store.person_labels(merged['id'], ['WizardOS', 'wizardos', 'Ideas'])
+        self.assertEqual(out['labels'], ['Ideas', 'WizardOS'])
+        self.assertGreater(self.store.seq, before)  # open views are told
+        self.assertEqual([x['name'] for x in out['catalog']], ['Ideas', 'WizardOS'])  # the catalogue rides along
+        self.store.person_labels(group['person_id'], ['WizardOS'])
+        self.store.person_labels(solo['person_id'], ['WizardOS'])
+        by_name = {p['display_name']: p for p in self.store.people() + self.store.people('group')}
+        self.assertEqual(by_name['Alice 2']['labels'] if 'Alice 2' in by_name else by_name['Alice']['labels'], ['Ideas', 'WizardOS'])
+        self.assertEqual(by_name['Team']['labels'], ['WizardOS'])
+        self.assertEqual(by_name['Bob']['labels'], ['WizardOS'])
+        with self.store.db() as db:  # every identity of the merged person
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM room_label WHERE label=?', ('Ideas',)).fetchone()[0], 2)
+        counts = {x['name']: x['chats'] for x in self.store.label_catalog()['labels']}
+        self.assertEqual(counts, {'Ideas': 1, 'WizardOS': 3})  # merged person counts once
+        with self.assertRaises(EngineError): self.store.person_labels('nobody', ['A'])
+        with self.assertRaises(EngineError): self.store.person_labels(solo['person_id'], ['L%d' % n for n in range(21)])
+        self.assertEqual(self.store.person_labels(solo['person_id'], [])['labels'], [])  # clearing keeps the label itself
+        self.assertIn('WizardOS', [x['name'] for x in self.store.label_catalog()['labels']])
+
+    def test_rename_moves_chats_merge_on_collision_and_delete_keeps_chats(self):
+        a = self.store.identity('telegram', '!a', 'A'); b = self.store.identity('telegram', '!b', 'B')
+        for i, ident in enumerate((a, b)): self.store.add_message('$%d' % i, ident, 'x', False, 'hi', 100 + i)
+        self.store.person_labels(a['person_id'], ['Old']); self.store.person_labels(b['person_id'], ['Other'])
+        self.store.rename_label('Old', 'New')
+        labels = lambda pid: next(p for p in self.store.people() if p['id'] == pid)['labels']
+        self.assertEqual(labels(a['person_id']), ['New'])
+        out = self.store.rename_label('New', 'other')  # onto an existing label: merged into it
+        self.assertEqual(out['label'], 'Other')
+        self.assertEqual((labels(a['person_id']), labels(b['person_id'])), (['Other'], ['Other']))
+        self.assertEqual({x['name']: x['chats'] for x in out['labels']}['Other'], 2)
+        self.store.delete_label('Other')
+        self.assertEqual((labels(a['person_id']), labels(b['person_id'])), ([], []))
+        self.assertEqual(len(self.store.people()), 2)  # chats and messages untouched
+        self.assertEqual(len(self.store.messages(a['person_id'])), 1)
+
+    def test_migration_keeps_existing_labels_and_data(self):
+        group = self.store.identity('telegram', '!old', 'Old group', 'group')
+        with self.store.db() as db:  # an install from before the catalogue: legacy room_label rows, no catalogue
+            db.execute('DROP TABLE label_catalog'); db.execute("DELETE FROM kv WHERE key='label_seed_v1'")
+            db.execute('INSERT INTO room_label VALUES (?,?)', (group['id'], 'Legacy'))
+        again = PeopleStore(self.store.path)
+        self.assertEqual(sorted(x['name'] for x in again.label_catalog()['labels']), ['Legacy', 'WizardOS'])
+        self.assertEqual(again.people('group', chats=False)[0]['labels'], ['Legacy'])
 
     def test_identity_cannot_be_assigned_to_unrelated_person(self):
         a = self.store.identity('telegram', '!a', 'A')
