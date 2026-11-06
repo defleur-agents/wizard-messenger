@@ -5,38 +5,35 @@ if(!process.cwd().startsWith('/srv/work/')) throw Error('Forum /srv/work only');
 const out=path.resolve(process.argv[2]),shell=process.env.SHELL_DIR,staticDir=path.resolve(__dirname,'../static');fs.mkdirSync(out,{recursive:true});
 // Reuse LINE's hosted Appearance fixture, not hand-built colour tokens.
 assert(fs.existsSync(path.join(shell,'core/skins.js')), 'Pinned real skin source required');
-const host=`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><script src="/wizard-os-home/core/skins.js"></script><script>window.WizCore={apps:()=>({APPS:[{url:'/app/'}]})};window.setFixtureSkin=id=>{window.WosSkin.set(id);window.WizAppearance?.sync()};setFixtureSkin('nebula')</script><script src="/wizard-os-home/core/appearance-host.js" defer></script><style>html,body{margin:0;height:100%;background:var(--bg)}.win,iframe{width:100%;height:100%;border:0}</style></head><body><div class="st-embed win"><iframe src="/app/" title="Synthetic group"></iframe></div></body></html>`;
-const alice={id:'@telegram_101:messenger.internal',name:'Alice Example',label:'Alice Example',identity_id:'synthetic-id'},bob={id:'@telegram_102:messenger.internal',name:'Bob Example',label:'Bob Example',identity_id:'synthetic-id'};
+// Same palette extraction/real appearance host as the passing LINE fixture.
+const vm=require('node:vm'),src=fs.readFileSync(path.join(shell,'core/skins.js'),'utf8');
+const table=src.slice(src.indexOf('  const SKINS = ['),src.indexOf('  // Each skin'));
+const palettes=vm.runInNewContext('const T=o=>o;'+table+';SKINS').filter(s=>['nebula','signal'].includes(s.id)).map(s=>({id:s.id,t:s.t}));
+assert.equal(palettes.length,2);
+const host=`<!doctype html><html data-skin="nebula"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><script>window.WizCore={apps:()=>({APPS:[{url:'/app/'}]})};window.setFixtureSkin=id=>{const s=JSON.parse(atob('${Buffer.from(JSON.stringify(palettes)).toString('base64')}')).find(s=>s.id===id);for(const[k,v]of Object.entries(s.t))document.documentElement.style.setProperty('--'+k,v);document.documentElement.dataset.skin=id;window.WizAppearance?.sync()};setFixtureSkin('nebula')</script><script src="/wizard-os-home/core/appearance-host.js" defer></script><style>html,body{margin:0;height:100%;background:var(--bg)}.win,iframe{width:100%;height:100%;border:0}</style></head><body><div class="st-embed win"><iframe src="/app/" title="Synthetic group"></iframe></div></body></html>`;
+const {origin,createFixture}=require('./helpers/group_features_fixture.cjs');
 const types={'.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.html':'text/html'};
 (async()=>{const browser=await chromium.launch({headless:true,args:['--no-sandbox'],executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE});const results=[];
 try { for(const profile of [{name:'desktop',viewport:{width:1280,height:860}},{name:'phone',viewport:{width:390,height:844},isMobile:true,hasTouch:true}]) {
- const ctx=await browser.newContext({...profile,deviceScaleFactor:1,reducedMotion:'reduce'}),page=await ctx.newPage(),errors=[],forbidden=[];page.on('pageerror',e=>errors.push(e.message));
- let sent=[]; const now=Date.now(),reactions=[{key:'👍',count:2,mine:false,identities_complete:true,reactors:[alice,bob]},{key:'❤️',count:1,mine:false,identities_complete:true,reactors:[bob]}];
- const msg={id:'matrix:$synthetic',person_id:'synthetic-group',network:'telegram',identity_id:'synthetic-id',direction:'in',outgoing:false,timestamp:now-10000,kind:'text',original:'Welcome @Owner Example',mentions:[{id:'@owner:messenger.internal',name:'Owner Example',start:8,end:22}],mentioned:true,sender:'Alice Example',reactions,deleted:false,media:[]};
- const person={id:'synthetic-group',kind:'group',display_name:'Synthetic test group',unread:1,unread_mentions:1,language:'en',translation_enabled:false,identities:[{id:'synthetic-id',network:'telegram',address:'!synthetic',label:'Synthetic test group',kind:'group'}],preferred_identity:'synthetic-id',members:[alice,bob],last:msg};
+ const ctx=await browser.newContext({...profile,deviceScaleFactor:1,reducedMotion:'reduce'}),page=await ctx.newPage(),errors=[],consoleErrors=[],forbidden=[],unmatched=[],requests=[];
+ page.on('pageerror',e=>errors.push(e.stack||e.message));page.on('console',m=>{if(m.type()==='error')consoleErrors.push(m.text());});
+ const fixture=createFixture();
+ try {
  await page.route('**/*',async route=>{const req=route.request(),u=new URL(req.url()),p=u.pathname;
-  if(u.origin!=='http://fixture.test'){forbidden.push(u.origin);return route.abort();}
+  requests.push({method:req.method(),path:p+u.search});
+  if(u.origin!==origin){forbidden.push(u.origin);return route.abort();}
   const json=data=>route.fulfill({json:data});
   if(p==='/')return route.fulfill({body:host,contentType:'text/html'});
-  if(p.startsWith('/wizard-os-home/')){const file=path.join(shell,p.slice('/wizard-os-home/'.length));return fs.existsSync(file)?route.fulfill({path:file,contentType:types[path.extname(file)]||'text/plain'}):route.fulfill({status:404,body:''});}
+  if(p.startsWith('/wizard-os-home/')){const file=path.join(shell,p.slice('/wizard-os-home/'.length));if(fs.existsSync(file))return route.fulfill({path:file,contentType:types[path.extname(file)]||'text/plain'});unmatched.push(p);return route.fulfill({status:404,body:''});}
   if(p==='/app/')return route.fulfill({path:path.join(staticDir,'index.html'),contentType:'text/html'});
-  if(!p.includes('/api/')){const file=path.join(staticDir,p.replace(/^\/app\//,''));return fs.existsSync(file)?route.fulfill({path:file,contentType:types[path.extname(file)]||'application/octet-stream'}):route.fulfill({status:404,body:''});}
-  if(p.endsWith('/api/view/session'))return json({view:true,csrf:'synthetic',capabilities:{view_session:true,passkeys:false}});
-  if(p.endsWith('/api/status'))return json({state:'ready',account_id:'c'.repeat(64),display_name:'Synthetic Owner',groups:[],configured:true});
-  if(p.endsWith('/api/unified/status'))return json({ok:true,seq:1,networks:[{network:'telegram',label:'Telegram',state:'connected',logins:[]}],telegram:{state:'connected'},agent:{access:false},translation:{ready:false},push:{enabled:false}});
-  if(p.endsWith('/api/drafts'))return json(req.method()==='GET'?{drafts:[]}:{draft:null,cleared:true});
-  if(p.endsWith('/api/unified/updates'))return new Promise(resolve=>setTimeout(()=>resolve(json({seq:1,messages:[],people:[],typing:[],removed:[]})),20000));
-  if(p.endsWith('/api/unified/people'))return json({people:[person],seq:1});
-  if(p.endsWith('/api/unified/groups'))return json({groups:[person],seq:1});
-  if(p.endsWith('/api/unified/people/synthetic-group')&&req.method()==='GET'){assert(!u.searchParams.has('cursor'));assert(['60',null].includes(u.searchParams.get('limit')));return json({person,messages:[msg,...sent],typing:[],has_more:false,next_cursor:null});}
-  if(p.endsWith('/api/unified/people/synthetic-group/send')){const b=req.postDataJSON();const m={...msg,id:'matrix:$sent'+sent.length,direction:'out',outgoing:true,timestamp:Date.now(),original:b.text,mentioned:false,mentions:require('../static/unified.js').parseMentions(b.text,[alice,bob]),reactions:[],client_id:b.client_id};sent.push(m);return json({message:m,seq:2});}
-  if(p.endsWith('/api/unified/people/synthetic-group/read')||p.endsWith('/api/unified/people/synthetic-group/typing'))return json({ok:true});
-  if(p.endsWith('/api/unified/directory'))return json({people:[],groups:[person]});
+  if(!p.includes('/api/')){const name=p.replace(/^\/app\//,'');const file=path.join(staticDir,!fs.existsSync(path.join(staticDir,name))&&['favicon.svg','icon-192.png'].includes(name)?'../'+name:name);if(fs.existsSync(file)&&fs.statSync(file).isFile())return route.fulfill({path:file,contentType:types[path.extname(file)]||'application/octet-stream'});unmatched.push(p);return route.fulfill({status:404,body:''});}
   if(p.includes('/login')||p.includes('/enable')||p.includes('/unlock')){forbidden.push(p);return route.abort();}
-  if(p.endsWith('/api/unified/listen'))return json({events:[]});
-  return json({});
+  const answer=fixture.reply(req.url(),req.method(),req.postData()?req.postDataJSON():undefined);
+  if(answer===null){unmatched.push(req.method()+' '+p);return route.fulfill({status:501,json:{ok:false,error:{code:'fixture_route_missing'}}});}
+  if(p.endsWith('/api/unified/updates'))await new Promise(resolve=>setTimeout(resolve,1500));
+  return json(answer);
  });
- await page.goto('http://fixture.test/');const f=page.frameLocator('iframe');await f.locator('.u-person').first().waitFor();await f.locator('.u-person').first().click();await f.locator('.u-composer textarea').waitFor();
+ await page.goto(origin+'/');const f=page.frameLocator('iframe');await f.locator('.u-person').first().waitFor();await f.locator('.u-person').first().click();await f.locator('.u-composer textarea').waitFor();
  const docMarker=await f.locator('html').evaluate(el=>el.dataset.qaDocument=String(Math.random()));let previousAccent;
  for(const skin of ['nebula','signal']) {
   await page.evaluate(skin=>setFixtureSkin(skin),skin);
@@ -64,7 +61,12 @@ try { for(const profile of [{name:'desktop',viewport:{width:1280,height:860}},{n
   await chip.click(profile.hasTouch?{}:{button:'right'});await f.locator('.u-reactor-list').waitFor();await page.goBack();await f.locator('.u-overlay').waitFor({state:'detached'});assert(await f.locator('.u-timeline').isVisible(),'Back closes sheet, not app');
   results.push({profile:profile.name,skin,picker:true,sentMention:true,ownerHighlight:true,tooltip:profile.hasTouch?'keyboard focus (phone has no hover)':'hover',reactorSheet:true,liveSkin:true,opaquePanel:panel});
  }
- assert.deepEqual(errors,[]);assert.deepEqual(forbidden,[]);assert(await f.locator('html').evaluate(el=>el.scrollWidth<=innerWidth));await ctx.close();
+ assert.deepEqual(errors,[]);assert.deepEqual(forbidden,[]);assert.deepEqual(unmatched,[]);assert.deepEqual(consoleErrors,[]);assert(await f.locator('html').evaluate(el=>el.scrollWidth<=innerWidth));
+ } catch(e) {
+  const diagnostic={profile:profile.name,error:e.stack||String(e),pageErrors:errors,consoleErrors,unmatched,forbidden,requests};
+  fs.writeFileSync(path.join(out,`${profile.name}-failure.json`),JSON.stringify(diagnostic,null,2));console.error(JSON.stringify(diagnostic,null,2));
+  await page.screenshot({path:path.join(out,`${profile.name}-failure.png`)}).catch(error=>console.error('failure screenshot:',error.message));throw e;
+ } finally {await ctx.close();}
  }
  fs.writeFileSync(path.join(out,'result.json'),JSON.stringify({pass:true,syntheticOnly:true,realSharedAppearance:true,providerMessagingProven:false,results},null,2));
 } finally {await browser.close();}})().catch(e=>{console.error(e);process.exit(1)});
