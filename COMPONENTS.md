@@ -70,3 +70,10 @@ Reuse:
 
 Reuse:
 - inbox-rows: EXTEND unified.js drawList + previewsOn()/setInboxView()
+
+Catch me up (0.2.0-unified.16.28):
+- catch-me-up-sheet: REUSE unified.js overlay/closeOverlay/back (opaque .u-sheet, outside tap, Back one layer); NEW catchUp() content only
+- catch-me-up-entry: EXTEND threadBase title bar (iconButton) + unreadDivider row (Summarize these); no new menu
+- catch-me-up-permission: NEW catchup.py grant/cache (catchup_grant, catchup_summary); owner-session routes only, REUSE permissions.capability_for (no agent capability)
+- catch-me-up-model: REUSE translation.py Tinfoil call pattern and TINFOIL_API_KEY via a new /complete route; NEW catchup.py prompt/map-reduce (pure, injected completion)
+- catch-me-up-settings: EXTEND moreSettings (model + standing grants) and editPerson sheet (turn off); REUSE jumpTo for bullet taps
