@@ -20,6 +20,7 @@ MUTATIONS = [
  ('PUT', '/api/unified/people/p/upload'),
  *[('POST', '/api/unified/messages/m/' + a) for a in ('translate','react','edit','delete')],
  ('POST', '/api/unified/groups/g/labels'), ('POST', '/api/unified/sync'),
+ *[('POST', '/api/unified/labels' + a) for a in ('', '/rename', '/delete')], ('POST', '/api/unified/people/p/labels'),
  *[('POST', '/api/unified/telegram/' + a) for a in ('start','step','disconnect','cancel')],
  ('POST', '/api/drafts/d/preview'), ('POST', '/api/drafts/d/send'), ('DELETE', '/api/drafts/d'),
  ('POST', '/api/resolve-contact'), ('POST', '/api/future-send'),
@@ -29,7 +30,7 @@ MUTATIONS = [
 DRAFT_DISCARD = ('DELETE', '/api/drafts/d')
 READS = ['/api/contacts', '/api/invites', '/api/dms', '/api/dms/d/messages',
  '/api/unified/people', '/api/unified/groups', '/api/unified/directory',
- '/api/unified/updates', '/api/unified/people/p', '/api/unified/media/m', '/api/drafts']
+ '/api/unified/updates', '/api/unified/people/p', '/api/unified/media/m', '/api/drafts', '/api/unified/labels']
 OWNER_ONLY = [('GET','/api/view/agent-access'), ('POST','/api/view/agent-access'),
  ('GET','/api/view/session'), ('POST','/api/view/session'), ('POST','/api/view/unlock'),
  ('GET','/api/view/passkey'), *[('POST','/api/view/passkey/' + a) for a in
@@ -63,6 +64,25 @@ class PermissionsHTTP(HTTPFixture):
             if mode != 'draft_only':
                 self.assertEqual(self.request('POST','/api/drafts',{},self.bearer)[0],403)
                 self.assertEqual(self.request('POST','/api/drafts/d',{},self.bearer)[0],403)
+    def test_label_routes_are_owner_only_machine_key_gets_403_in_every_mode(self):
+        unified = Mock(); unified.dispatch.return_value = {'labels': []}; self.server.unified = unified
+        routes = [('GET', '/api/unified/labels'), *[('POST', '/api/unified/labels' + a) for a in ('', '/rename', '/delete')],
+                  ('POST', '/api/unified/people/p/labels'), ('POST', '/api/unified/groups/g/labels')]
+        for mode in MODES:
+            self.policy(mode)
+            for method, path in routes:
+                with self.subTest(mode=mode, method=method, path=path):
+                    status, _, data = self.request(method, path, {} if method != 'GET' else None, self.bearer)
+                    self.assertEqual(status, 403, data)
+                    self.assertEqual(data['error']['code'], 'agent_access_off' if mode == 'no_access' else 'agent_permission_denied')
+        unified.dispatch.assert_not_called()
+        # The signed-in owner reaches the real dispatch.
+        owner = self.owner_headers()
+        for method, path in routes:
+            status, _, data = self.request(method, path, {} if method != 'GET' else None, owner)
+            self.assertEqual(status, 200, (path, data))
+        self.assertEqual(unified.dispatch.call_count, len(routes))
+
     def test_owner_surfaces_denied_for_all_modes_even_with_cookie(self):
         cookie, csrf = self.session()
         for mode in MODES:
