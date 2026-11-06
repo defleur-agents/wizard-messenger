@@ -147,7 +147,7 @@
   }
   if (toGateway()) return;
   if (!window.WizardApp) throw new Error('Messenger requires the shared WizardApp client');
-  window.WizardApp.ready({name: 'messenger', version: '0.2.0-unified.16.26'});
+  window.WizardApp.ready({name: 'messenger', version: '0.2.0-unified.16.27'});
 
   const $ = id => document.getElementById(id);
   const state = {
