@@ -46,7 +46,7 @@ const CASES = [
       group('promo', 'Deals Channel', 'telegram', 'Flash sale!', 5, {unread: 7, low_priority: true}),
       group('fam', 'Family', 'whatsapp', 'Dinner Sunday?', 12, {unread: 2, labels: ['Family']}),
     ];
-    const posted = [], badges = [];
+    const posted = [], badges = []; let failNextPriority = false;
     const ctx = await browser.newContext({viewport, deviceScaleFactor: 2, colorScheme: scheme, hasTouch: viewport.width < 600});
     await ctx.exposeBinding('__badge', (_, n) => badges.push(n));
     await ctx.addInitScript(([s, tokens, bar]) => {
@@ -83,6 +83,7 @@ const CASES = [
       const thread = /^api\/unified\/people\/([^/]+)$/.exec(p);
       if (thread) {
         const id = decodeURIComponent(thread[1]), pr = [...PEOPLE, ...GROUPS].find(x => x.id === id);
+        if (req.method() === 'POST' && failNextPriority) { failNextPriority = false; return route.fulfill({status: 500, contentType: 'application/json', body: JSON.stringify({ok: false, error: {code: 'fixture_failure', message: ''}})}); }
         if (req.method() === 'POST') { const body = JSON.parse(req.postData() || '{}'); posted.push([id, body]); Object.assign(pr, body); return ok(pr); }
         return ok({person: pr, messages: [], has_more: false, next_cursor: null, seq: 5, typing: []});
       }
@@ -192,12 +193,20 @@ const CASES = [
     assert.deepEqual((await rows()).sort(), ['James Carter', 'News Bot']);
     await setPriority('James Carter', 'Low');
     assert.deepEqual(posted.at(-1), ['james', {low_priority: true, medium_priority: false}], 'Low clears Medium');
+    // Retained 15.x wording (app-parity-gate renames): the Priority menu still says where the chat went.
+    await page.locator('.u-toast', {hasText: 'Moved to Low priority'}).first().waitFor();
     assert.deepEqual(await rows(), ['News Bot'], 'no longer Medium');
     await seg('low').click();
     assert.deepEqual((await rows()).sort(), ['Deals Channel', 'James Carter']);
     await setPriority('James Carter', 'Normal');
     assert.deepEqual(posted.at(-1), ['james', {low_priority: false, medium_priority: false}]);
+    await page.locator('.u-toast', {hasText: 'Moved to Inbox'}).first().waitFor();
     await seg('all').click();
+    // A failed move puts the row back and says so in a toast (15.x: "Could not move this chat"; the toast carries the
+    // server's reason when it has one, else "Could not change priority").
+    failNextPriority = true; await setPriority('James Carter', 'Low');
+    await page.locator('.u-toast', {hasText: 'fixture_failure'}).first().waitFor();
+    assert.ok((await rows()).includes('James Carter'), 'failed move keeps the chat in All');
     // The Wizard chat (device record) takes Medium too.
     await setPriority('Private Alice', 'Medium');
     await page.waitForTimeout(250);
