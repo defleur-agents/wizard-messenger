@@ -635,6 +635,51 @@
       }
     },
     {
+      "method": "GET",
+      "path": "/api/unified/labels",
+      "auth": true,
+      "result": "owner session only (machine/agent keys get 403): {labels:[{name,chats}], rev}; includes empty labels"
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/labels",
+      "auth": true,
+      "result": "owner session only: creates a label (no duplicates, case-insensitive); returns the catalogue plus label",
+      "body": {
+        "name": "WizardOS"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/labels/rename",
+      "auth": true,
+      "result": "owner session only: renames a label everywhere; onto an existing name it merges",
+      "body": {
+        "from": "WizardOS",
+        "to": "Wizard OS"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/labels/delete",
+      "auth": true,
+      "result": "owner session only: deletes the label; chats are never deleted",
+      "body": {
+        "name": "WizardOS"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/people/{person_id}/labels",
+      "auth": true,
+      "result": "owner session only: sets the labels of any chat (person, group or merged person: every identity); returns labels, catalog, rev",
+      "body": {
+        "labels": [
+          "WizardOS"
+        ]
+      }
+    },
+    {
       "method": "POST",
       "path": "/api/unified/groups/{identity_id}/labels",
       "auth": true,

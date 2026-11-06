@@ -699,6 +699,9 @@ class PeopleStore:
                 db.execute("INSERT OR REPLACE INTO kv VALUES ('label_seed_v1','1')")
             row = db.execute("SELECT value FROM kv WHERE key='labels_rev'").fetchone()
         self.labels_rev = int(row[0]) if row and row[0].isdigit() else 0
+        with self.db() as db:
+            n = db.execute('SELECT COUNT(*) FROM label_catalog').fetchone()[0]
+        print('messenger: label catalogue ready, %d label(s)' % n, flush=True)
 
     def label_catalog(self):
         with self.db() as db:

@@ -36,3 +36,20 @@ See docs/group-mentions-reactions.md for channel limitations, copied Telegram pa
 EXTEND existing drawList scheduling: keep a pressed chat row attached until its click dispatches; defer only the list repaint, never the chat open or backend ingestion.
 
 NEW: none.
+
+## Labels: your own groups of chats (15.15.2)
+
+James calls them groups; the code and the UI call them Labels (a label = a group of chats you filter the Inbox by; not the Groups group-chat filter).
+
+| Capability | Existing implementation | Decision |
+|---|---|---|
+| Per-chat labels and the Inbox Filters > Labels chips | unified.py room_label + people() aggregation; unified.js paintFilters/matchesFilter | EXTEND: any chat (people, groups, merged people on every identity), chips also list empty catalogue labels |
+| Label that exists while empty; create/rename/delete | NEW table label_catalog in unified.py PeopleStore (migration-safe, seeded once with WizardOS); owner-only routes /api/unified/labels* | NEW (nothing existed; one catalogue, no second label store) |
+| Labels editor | unified.js editPerson sheet (Save labels text box for groups only) | EXTEND: checkbox picker + New label box in every chat's info sheet; same picker in the row/thread menus (actionMenu) |
+| Manage labels | unified.js overlay()/closeOverlay() sheet, filter chip | REUSE overlay sheet and Back/outside-close; NEW sheet content |
+| Appearance / tap targets | unified.css var(--wz-*) fallbacks, opaque sheets | REUSE |
+
+Reuse:
+- labels: EXTEND unified.py room_label + unified.js paintFilters
+- label-catalogue: NEW unified.py label_catalog (only addition)
+- sheet-overlay: REUSE unified.js overlay/closeOverlay/actionMenu
