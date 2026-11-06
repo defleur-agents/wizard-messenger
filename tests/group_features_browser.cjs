@@ -58,7 +58,7 @@ try { for(const profile of [{name:'desktop',viewport:{width:1280,height:860}},{n
   await f.getByRole('tab',{name:'❤️ 1',exact:true}).click();assert.equal(await f.locator('.u-reactor-list .u-reactor-row').count(),1);await f.getByRole('tab',{name:'All',exact:true}).click();
   await page.screenshot({path:path.join(out,`${profile.name}-${skin}-reactor-sheet.png`)});
   await f.locator('.u-overlay').click({position:{x:8,y:8}});await f.locator('.u-overlay').waitFor({state:'detached'});assert(await f.locator('.u-timeline').isVisible());
-  await chip.click(profile.hasTouch?{}:{button:'right'});await f.locator('.u-reactor-list').waitFor();await page.goBack();await f.locator('.u-overlay').waitFor({state:'detached'});assert(await f.locator('.u-timeline').isVisible(),'Back closes sheet, not app');
+  await chip.click(profile.hasTouch?{}:{button:'right'});await f.locator('.u-reactor-list').waitFor();assert.equal(await f.evaluate(()=>window.MessengerUnified.back()),true,'Back handled by Messenger');await f.locator('.u-overlay').waitFor({state:'detached'});assert(await f.locator('.u-timeline').isVisible(),'Back closes sheet, not app');
   results.push({profile:profile.name,skin,picker:true,sentMention:true,ownerHighlight:true,tooltip:profile.hasTouch?'keyboard focus (phone has no hover)':'hover',reactorSheet:true,liveSkin:true,opaquePanel:panel});
  }
  assert.deepEqual(errors,[]);assert.deepEqual(forbidden,[]);assert.deepEqual(unmatched,[]);assert.deepEqual(consoleErrors,[]);assert(await f.locator('html').evaluate(el=>el.scrollWidth<=innerWidth));
