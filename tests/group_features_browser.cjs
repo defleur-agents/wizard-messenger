@@ -57,7 +57,8 @@ try { for(const scenario of ['native','line','v3-with-avatars']) for(const devic
    assert.match(await f.locator('.u-mention-picker').textContent(),/plain text/);
    await f.locator('.u-mention-option').first().click();assert.equal(await draft.inputValue(),'@Alice Example ');
    await f.locator('.u-send').click();await f.locator('.u-message.outgoing .u-text').filter({hasText:'@Alice Example'}).last().waitFor();
-   assert.equal(await f.locator('.u-message.outgoing .u-mention').count(),0,'plain name never claims native mention');
+   // A native mention is a linked identity (<a>); Telegram's own @username highlight is an unlinked span.
+   assert.equal(await f.locator('.u-message.outgoing a.u-mention, .u-message.outgoing .u-mention.me').count(),0,'plain name never claims native mention');
    results.push({profile:profile.name,skin,plainPicker:true,timelineFallback:scenario==='v3-with-avatars'});continue;
   }
   const panel=await f.locator('.u-mention-picker').evaluate(el=>getComputedStyle(el).backgroundColor);// Opaque = no alpha channel: Chromium serialises color-mix() results as color(srgb r g b) (no "/ a").
@@ -72,15 +73,17 @@ assert.match(panel,/^(rgb\(\d+, \d+, \d+\)|color\(srgb [\d.e-]+ [\d.e-]+ [\d.e-]
   await inside(f,'.u-reactor-tooltip:not([hidden])','.u-pane-thread');
   const tipColour=await f.locator('.u-reactor-tooltip:not([hidden])').evaluate(el=>getComputedStyle(el).backgroundColor);assert.match(tipColour,/^(rgb\(\d+, \d+, \d+\)|color\(srgb [\d.e-]+ [\d.e-]+ [\d.e-]+\))$/,'opaque tooltip floor');
   await page.screenshot({path:path.join(out,`${profile.name}-${skin}-reactor-tooltip${profile.hasTouch?'-keyboard-focus':''}.png`)});
-  if(profile.hasTouch){const box=await chip.boundingBox(),cdp=await ctx.newCDPSession(page),points=[{x:box.x+box.width/2,y:box.y+box.height/2}];await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:points});await page.waitForTimeout(520);await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await cdp.detach();}
-  else await chip.click({button:'right'});
+  // Phone opens the reactor sheet with a long press (as a finger would); desktop with a right-click.
+  const openReactors=async()=>{if(profile.hasTouch){const box=await chip.boundingBox(),cdp=await ctx.newCDPSession(page),points=[{x:box.x+box.width/2,y:box.y+box.height/2}];await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:points});await page.waitForTimeout(520);await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await cdp.detach();}
+  else await chip.click({button:'right'});};
+  await openReactors();
   await f.locator('.u-reactor-list').waitFor();await page.waitForTimeout(100);assert(await f.locator('.u-reactor-list').isVisible(),'long-press release keeps sheet open');
   await f.getByRole('tab',{name:'All',exact:true}).click();assert.equal(await f.locator('.u-reactor-list .u-reactor-row').filter({hasText:'Alice Example'}).count(),1);
   await f.getByRole('tab',{name:'❤️ 1',exact:true}).click();assert.equal(await f.locator('.u-reactor-list .u-reactor-row').count(),1);await f.getByRole('tab',{name:'All',exact:true}).click();
   await inside(f,'.u-sheet');
   await page.screenshot({path:path.join(out,`${profile.name}-${skin}-reactor-sheet.png`)});
   await f.locator('.u-overlay').click({position:{x:8,y:8}});await f.locator('.u-overlay').waitFor({state:'detached'});assert(await f.locator('.u-timeline').isVisible());
-  await chip.click(profile.hasTouch?{}:{button:'right'});await f.locator('.u-reactor-list').waitFor();assert.equal(await f.locator('html').evaluate(()=>window.MessengerUnified.back()),true,'Back handled by Messenger');await f.locator('.u-overlay').waitFor({state:'detached'});assert(await f.locator('.u-timeline').isVisible(),'Back closes sheet, not app');
+  await openReactors();await f.locator('.u-reactor-list').waitFor();assert.equal(await f.locator('html').evaluate(()=>window.MessengerUnified.back()),true,'Back handled by Messenger');await f.locator('.u-overlay').waitFor({state:'detached'});assert(await f.locator('.u-timeline').isVisible(),'Back closes sheet, not app');
   results.push({profile:profile.name,skin,picker:true,sentMention:true,ownerHighlight:true,tooltip:profile.hasTouch?'keyboard focus (phone has no hover)':'hover',reactorSheet:true,liveSkin:true,opaquePanel:panel});
  }
  assert.deepEqual(errors,[]);assert.deepEqual(forbidden,[]);assert.deepEqual(unmatched,[]);assert.deepEqual(consoleErrors,[]);assert(await f.locator('html').evaluate(el=>el.scrollWidth<=innerWidth));
