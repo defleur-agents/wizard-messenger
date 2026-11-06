@@ -940,7 +940,7 @@ class PeopleStore:
             media = json.loads(r['media']) if r.get('media') else None
             if media and media.get('mentions'):
                 if not r['mentions']:
-                    r['mentions'] = [{k: v for k, v in x.items() if k in ('text', 'me', 'net', 'acc')} for x in media['mentions'] if isinstance(x, dict)]
+                    r['mentions'] = [{k: v for k, v in x.items() if k in ('text', 'me', 'net', 'acc', 'id', 'name', 'start', 'end')} for x in media['mentions'] if isinstance(x, dict)]
             if media and media.get('links'):
                 r['links'] = [{k: v for k, v in l.items() if k in ('url', 'title', 'desc', 'site', 'w', 'h')} | {'image': bool(l.get('mxc'))} for l in media['links']]
             if media and media.get('links') and not media.get('mxc'):
@@ -1551,8 +1551,9 @@ class UnifiedInbox:
         if etype == 'm.room.message' and relates.get('rel_type') == 'm.replace':
             if self.apply_edit(identity, meta, sender, outgoing, relates.get('event_id'), content.get('m.new_content')):
                 with self.store.db() as db:
-                    row = db.execute('SELECT original FROM message WHERE id=?', (relates.get('event_id'),)).fetchone()
+                    row = db.execute('SELECT original,media FROM message WHERE id=?', (relates.get('event_id'),)).fetchone()
                 spans, owner_mentioned = incoming_mentions(content.get('m.new_content') or {}, row['original'], self.is_me)
+                spans = (json.loads(row['media']) if row['media'] else {}).get('mentions') or spans
                 self.store.bump(relates.get('event_id'), ',mentions=?,mentioned=?', (json.dumps(spans), int(owner_mentioned)))
             return
         if sender == '@' + identity['network'] + 'bot:messenger.internal':
@@ -1572,6 +1573,8 @@ class UnifiedInbox:
         if msgtype != 'm.location':
             body, media = self.with_mentions(identity, meta, content, body, media)
         mentions, mentioned = incoming_mentions(content, body, self.is_me)
+        if media and media.get('mentions'):
+            mentions = media['mentions']
         if content.get('org.wizard.gallery') is not None and msgtype == 'm.image':
             try:
                 self.store_gallery(event['event_id'], identity, meta.get('names', {}).get(sender) or sender, outgoing, content, event.get('origin_server_ts', 0), reply_to=reply_to)
@@ -1674,7 +1677,16 @@ class UnifiedInbox:
             if not pills:
                 return body, media
             pills.sort(key=lambda p: body.find(p[1]) if body.find(p[1]) >= 0 else len(body))
-            new_body, mentions = substitute_mentions(body, pills, lambda user, text: self.mention_name(identity, meta, user, text))
+            def resolve(user, text):
+                name, extra = self.mention_name(identity, meta, user, text)
+                return name, dict(extra, id=user)
+            new_body, mentions = substitute_mentions(body, pills, resolve)
+            at = 0
+            for mention in mentions:
+                start = new_body.index(mention['text'], at)
+                at = start + len(mention['text'])
+                mention.update(name=mention['text'].lstrip('@'), start=len(new_body[:start].encode('utf-16-le')) // 2,
+                               end=len(new_body[:at].encode('utf-16-le')) // 2)
         except Exception:
             return body, media  # a malformed optional extension never stalls a room's sync
         if not mentions:

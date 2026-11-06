@@ -45,33 +45,41 @@ async function fixture({deferPreview = false, connectors = false, connectorsUnav
   const {context} = browserContext({document, overrides:{confirm:()=>true,
     requestAnimationFrame:fn=>fn(),WizardApp:{update:{hold:()=>({release(){}})}}}});
   if (connectors) vm.runInNewContext(fs.readFileSync('static/connectors.js','utf8'), context);
-  vm.runInNewContext(fs.readFileSync('static/unified.js','utf8'), context);
+  // Controller hooks only for the relocated draft editor; Settings navigation is
+  // separately exercised through public routes in current_permissions.test.cjs.
+  const source = fs.readFileSync('static/unified.js','utf8').replace('  window.MessengerUnified = {', '  window.__agentQA = {reviewAgentDraft,advancedSettings};\n  window.MessengerUnified = {');
+  vm.runInNewContext(source, context);
   context.MessengerUnified.mount({api});
   const flush = async () => {for(let n=0;n<6;n++) await new Promise(r=>setImmediate(r));};
   const find = (tag, label) => all().find(e => e.tagName === tag && (e.attrs['aria-label'] === label || e.textContent === label));
   const click = async label => {const el = find('button',label); assert.ok(el,'button '+label); await el.onclick(); await flush();};
   await context.MessengerUnified.settings(); await flush();
-  return {calls,find,click,flush,release:()=>releasePreview(),agents,context,all};
+  const review = async () => { await context.__agentQA.reviewAgentDraft({...draft}); await flush(); };
+  const advanced = async () => { await context.__agentQA.advancedSettings(); await flush(); };
+  return {calls,find,click,flush,release:()=>releasePreview(),agents,context,all,review,advanced};
 }
-test('connector settings retain agent controls; disabled connectors preserve Telegram', async () => {
+test('connector settings retire legacy keys; Advanced retains existing agents and disabled connectors preserve Telegram', async () => {
   for (const connectorsUnavailable of [false, true]) {
     const f = await fixture({connectors:true, connectorsUnavailable});
-    assert.ok(f.find('select','Level for Oscar')); assert.ok(f.find('select','Level for Wizard app key'));
-    assert.ok(f.find('button','Review agent drafts'));
+    assert.equal(f.find('select','What Oscar may do'),undefined);
+    assert.equal(f.find('button','Review agent drafts'),undefined);
+    await f.advanced();assert.ok(f.find('select','What Oscar may do'));
+    assert.equal(f.find('select','What Wizard app key may do'),undefined);
     assert.equal(f.calls.some(c => c.path === 'api/unified/telegram/status'), connectorsUnavailable);
     assert.equal(f.calls.some(c => c.path.endsWith('/send')), false);
   }
 });
-test('owner chooses four policies; required remote review has no local Send fallback',async()=>{
+test('legacy key policy remains editable in Advanced; required remote review has no local Send fallback',async()=>{
   const f = await fixture({remoteRequired:true});
-  const policy = f.find('select','Level for Oscar');
-  assert.deepEqual(policy.children.map(e=>e.textContent),['No access','Read-only','Draft-only (Recommended)','Draft-and-send']);
+  await f.advanced();
+  const policy = f.find('select','What Oscar may do');
+  assert.deepEqual(policy.children.map(e=>e.textContent),['No access','Read-only','Draft-only']);
   assert.equal(policy.value,'no_access');
   policy.value = 'draft_only'; await policy.onchange(); await f.flush();
   assert.equal(f.calls.find(c=>c.path==='api/view/agents/a0'&&c.method==='POST').body.level,'draft_only');
   assert.equal(f.agents[0].level,'draft_only');
   assert.equal(f.calls.some(c=>c.path==='api/view/agent-access'),false);
-  await f.click('Review agent drafts'); await f.click('Review draft');
+  await f.review();
   assert.ok(f.find('button','Review securely').disabled);
   assert.equal(f.find('button','Send'),undefined);
   const body = f.find('textarea','Draft message'); body.value = 'Owner edits'; body.oninput();
@@ -80,7 +88,7 @@ test('owner chooses four policies; required remote review has no local Send fall
 });
 test('normal mode edits, reviews and requires a separate explicit Send click', async () => {
   const f = await fixture();
-  await f.click('Review agent drafts'); await f.click('Review draft');
+  await f.review();
   assert.equal(f.find('button','Send'), undefined);
   const body = f.find('textarea','Draft message');
   body.value = 'Exact owner edit'; body.oninput();
@@ -101,7 +109,7 @@ test('normal mode edits, reviews and requires a separate explicit Send click', a
 });
 test('normal preview pending cannot expose Send or editable controls', async () => {
   const f = await fixture({deferPreview:true});
-  await f.click('Review agent drafts'); await f.click('Review draft');
+  await f.review();
   const pending = f.click('Review message'); await f.flush();
   assert.ok(f.find('textarea','Draft message').disabled);
   assert.ok(f.find('select','Draft recipient and channel').disabled);
@@ -115,16 +123,10 @@ test('secure-review export and edit races execute the shipping UI contract',()=>
   assert.equal(result.status,0,result.stdout+result.stderr);
 });
 
-test('owner adds an agent: new key shown once, starts at No access, Draft-and-send needs a confirmation', async () => {
-  const f = await f_fixture();
-  const name = f.find('input','New agent name'); name.value = 'Helper';
-  await f.click('Add agent');
-  assert.equal(f.calls.find(c=>c.path==='api/view/agents'&&c.method==='POST').body.name,'Helper');
-  assert.equal(f.find('input','New agent key').value,'wzak_000000000000_secret');
-  const helper = f.find('select','Level for Helper'); assert.equal(helper.value,'no_access');
-  f.context.confirm = () => false; helper.value = 'draft_and_send'; await helper.onchange(); await f.flush();
-  assert.equal(f.agents[1].level,'no_access'); assert.equal(helper.value,'no_access');
-  f.context.confirm = () => true; helper.value = 'draft_and_send'; await helper.onchange(); await f.flush();
-  assert.equal(f.agents[1].level,'draft_and_send');
+test('Advanced never creates new legacy keys or grants an unused shared app key', async () => {
+  const f = await fixture(); await f.advanced();
+  assert.equal(f.find('input','New agent name'),undefined);
+  assert.equal(f.find('button','Add agent'),undefined);
+  assert.equal(f.find('select','What Wizard app key may do'),undefined);
+  assert.equal(f.calls.filter(c=>c.method==='POST').length,0);
 });
-async function f_fixture() { return fixture(); }

@@ -1617,7 +1617,7 @@
   function contactName(net, acc) { try { return contacts.map.get(accKey(net, acc))?.name || ''; } catch { return ''; } }
   function mentionMarks(text, m) {
     const marks = []; let at = 0;
-    for (const x of m?.mentions || []) {
+    for (const x of (Array.isArray(m) ? m : m?.mentions) || []) {
       if (Number.isInteger(x?.start) && Number.isInteger(x?.end) && x.start >= 0 && x.end > x.start && x.end <= text.length) {
         marks.push({start:x.start, end:x.end, label:text.slice(x.start,x.end), id:x.id, me:!!x.me});
         continue;

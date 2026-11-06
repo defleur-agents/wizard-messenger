@@ -8,7 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import signal_only_lifecycle as L  # noqa: E402
 
-RECIPE = ROOT / 'runtipi/docker-compose.yml'
+# Frozen source recipe from 4566306; lifecycle packet is intentionally version-specific.
+RECIPE = ROOT / 'tests/fixtures/legacy_recipe_unified_15_14.yml'
 
 
 class SignalOnlyPacket(unittest.TestCase):

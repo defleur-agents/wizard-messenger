@@ -20,7 +20,7 @@ worker = load('run_account_attachment_forum')
 class PacketGuards(unittest.TestCase):
     def test_recipe_changes_only_messenger_image_and_release_metadata(self):
         before = {'config.json': (ROOT / 'runtipi/config.json').read_text(),
-                  'docker-compose.yml': (ROOT / 'runtipi/docker-compose.yml').read_text(),
+                  'docker-compose.yml': (ROOT / 'tests/fixtures/legacy_recipe_unified_15_14.yml').read_text(),
                   'wizard.md': (ROOT / 'wizard.md').read_text(), '.wizard-commit': lifecycle.BASE + '\n',
                   '.wizard-selection': json.dumps({'repo': 'humanitylabs-org/wizard-messenger', 'commit': lifecycle.BASE}) + '\n'}
         after = lifecycle.target(before, 'a' * 40, 'sha256:' + 'b' * 64, 56)

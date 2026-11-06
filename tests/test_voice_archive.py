@@ -129,7 +129,12 @@ class VoiceArchiveUnixBoundary(VoiceArchiveBoundary):
         h = {'Host': 'wizard.example.com', 'Connection': 'close', **(headers or {})}
         if body is not None and not isinstance(body, bytes):
             h['Content-Type'] = 'application/json'; body = json.dumps(body)
-        conn.request(method, path, body, headers=h)
+        try:
+            conn.request(method, path, body, headers=h)
+        except BrokenPipeError:
+            # A rejecting Unix-hop server may answer before the full request body
+            # is sent. Inspect that HTTP denial rather than mistaking it for a test transport failure.
+            pass
         response = conn.getresponse(); raw = response.read(); status = response.status
         result_headers = dict(response.getheaders()); conn.close()
         return status, result_headers, json.loads(raw) if result_headers.get('Content-Type', '').startswith('application/json') else raw

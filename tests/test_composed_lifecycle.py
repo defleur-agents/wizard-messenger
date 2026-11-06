@@ -10,7 +10,7 @@ import composed_lifecycle as L
 
 class ComposedLifecycle(unittest.TestCase):
     def before(self):
-        return {'config.json':json.dumps({'tipi_version':55}),'docker-compose.yml':(ROOT/'runtipi/docker-compose.yml').read_text(),'wizard.md':'unchanged','.wizard-commit':L.BASE+'\n','.wizard-selection':'{}'}
+        return {'config.json':json.dumps({'tipi_version':55}),'docker-compose.yml':(ROOT/'tests/fixtures/legacy_recipe_unified_15_14.yml').read_text(),'wizard.md':'unchanged','.wizard-commit':L.BASE+'\n','.wizard-selection':'{}'}
     def test_only_two_service_images_and_two_pins_change(self):
         import difflib
         before=self.before();after=L.target(before,'a'*40,'sha256:'+'b'*64,56)

@@ -1,28 +1,127 @@
 {
   "scope": "Complete unified.js IIFE/bootstrap, mount, authentication, settings/search, signout. Domain fixture only; no browser layout, shell, media or provider proof.",
   "globals": {
-    "provided": ["crypto", "location", "history", "URL", "URLSearchParams", "AbortController", "TextEncoder", "TextDecoder", "performance", "console", "Blob", "atob", "btoa", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "requestAnimationFrame", "cancelAnimationFrame", "innerWidth", "innerHeight", "navigator", "localStorage", "sessionStorage", "addEventListener", "removeEventListener", "dispatchEvent", "Audio", "fetch"],
-    "absentOptional": ["IntersectionObserver", "MutationObserver", "ResizeObserver", "visualViewport", "AudioContext", "webkitAudioContext", "OfflineAudioContext", "webkitOfflineAudioContext", "AudioEncoder", "WizardApp"],
-    "unreached": ["CSS.escape: jumpTo message selection", "createImageBitmap: photo encoding", "MediaRecorder: voice capture", "File: file upload"]
+    "provided": [
+      "crypto",
+      "location",
+      "history",
+      "URL",
+      "URLSearchParams",
+      "AbortController",
+      "TextEncoder",
+      "TextDecoder",
+      "performance",
+      "console",
+      "Blob",
+      "atob",
+      "btoa",
+      "setTimeout",
+      "clearTimeout",
+      "setInterval",
+      "clearInterval",
+      "requestAnimationFrame",
+      "cancelAnimationFrame",
+      "innerWidth",
+      "innerHeight",
+      "navigator",
+      "localStorage",
+      "sessionStorage",
+      "addEventListener",
+      "removeEventListener",
+      "dispatchEvent",
+      "Audio",
+      "fetch",
+      "matchMedia",
+      "MutationObserver"
+    ],
+    "absentOptional": [
+      "IntersectionObserver",
+      "ResizeObserver",
+      "visualViewport",
+      "AudioContext",
+      "webkitAudioContext",
+      "OfflineAudioContext",
+      "webkitOfflineAudioContext",
+      "AudioEncoder",
+      "WizardApp"
+    ],
+    "unreached": [
+      "CSS.escape: jumpTo message selection",
+      "createImageBitmap: photo encoding",
+      "MediaRecorder: voice capture",
+      "File: file upload"
+    ]
   },
   "members": {
     "window": {
-      "provided": ["addEventListener", "removeEventListener"],
-      "productOwned": ["MessengerConnectors", "MessengerUnified", "MessengerUnified_toOggOpus", "MessengerUnified_webmToOgg"],
-      "absentOptional": ["AudioContext", "AudioEncoder", "MutationObserver", "OfflineAudioContext", "ResizeObserver", "WizardApp", "visualViewport", "webkitAudioContext", "webkitOfflineAudioContext"],
-      "unreached": ["getSelection", "open"]
+      "provided": [
+        "addEventListener",
+        "removeEventListener",
+        "MutationObserver"
+      ],
+      "productOwned": [
+        "MessengerConnectors",
+        "MessengerUnified",
+        "MessengerUnified_toOggOpus",
+        "MessengerUnified_webmToOgg"
+      ],
+      "absentOptional": [
+        "AudioContext",
+        "AudioEncoder",
+        "OfflineAudioContext",
+        "ResizeObserver",
+        "WizardApp",
+        "visualViewport",
+        "webkitAudioContext",
+        "webkitOfflineAudioContext"
+      ],
+      "unreached": [
+        "getSelection",
+        "open",
+        "MediaRecorder",
+        "WosTopicEmoji",
+        "WosTopicEmojiData",
+        "__messengerKeys",
+        "confirm",
+        "parent"
+      ]
     },
     "document": {
-      "provided": ["activeElement", "addEventListener", "createDocumentFragment", "createElement", "createElementNS", "documentElement", "getElementById", "hidden", "querySelector", "querySelectorAll", "removeEventListener"],
-      "unreached": ["createRange"]
+      "provided": [
+        "activeElement",
+        "addEventListener",
+        "createDocumentFragment",
+        "createElement",
+        "createElementNS",
+        "documentElement",
+        "getElementById",
+        "hidden",
+        "querySelector",
+        "querySelectorAll",
+        "removeEventListener"
+      ],
+      "unreached": [
+        "createRange",
+        "hasFocus",
+        "head",
+        "visibilityState"
+      ]
     },
-    "document.documentElement": {"provided": ["classList", "dataset", "toggleAttribute"]}
+    "document.documentElement": {
+      "provided": [
+        "classList",
+        "dataset",
+        "toggleAttribute"
+      ],
+      "unreached": []
+    }
   },
   "bootstrapTrace": [
     "sessionStorage low flag; optional IntersectionObserver; crypto uid for voiceTapSession; player reads localStorage voice rate (Audio is only constructed on playback, NOT during bootstrap)",
     "document contextmenu listener; hashchange advanced listener; visibility/online/focus/pageshow/resize; optional observers and visualViewport; pagehide session storage; takeChatLink immediate location.hash/history.replaceState; share exports",
     "mount: load/save drafts, 1500ms timeout plus 20000ms interval, tabs listeners, optional share.receive",
-    "authenticated: restore, contacts, resume removal, switchTab, list and account status, document selectors/toggleAttribute/style/fragment, URLSearchParams on search; signout clears DOM and badges"
+    "authenticated: restore, contacts, resume removal, switchTab, list and account status, document selectors/toggleAttribute/style/fragment, URLSearchParams on search; signout clears DOM and badges",
+    "16.x keyboard bootstrap: matchMedia at load; inChat registers MutationObserver for keyboard repaint; records require explicit fixture trigger, real delivery/layout remains forum browser proof."
   ],
   "semantics": "URL-backed location; structured-clone same-origin replaceState with no navigation events; string storage; explicit listener registration/removal; deterministic tracked timers, never automatically firing an interval; callback errors propagate; real WebCrypto and URL classes; unsupported selector syntax throws; fragment append moves children; connected DOM required. Existing suites retain lowercase tagName convention and synchronous rAF override, not actual DOM/layout evidence."
 }

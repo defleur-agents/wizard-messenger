@@ -119,6 +119,9 @@ function browserContext({document, url='https://synthetic.invalid/apps/messenger
   const context=events({document,location,history,crypto:webcrypto,URL,URLSearchParams,AbortController,
     TextEncoder,TextDecoder,performance,console,DOMException,Event,Blob,atob,btoa,structuredClone,
     innerWidth:390,innerHeight:844,navigator:{},localStorage:storage(),sessionStorage:storage(),
+    matchMedia:query=>({media:query,matches:false,addEventListener(){},removeEventListener(){}}),
+    // Explicit lifecycle surface; synthetic tests deliver records with trigger().
+    MutationObserver:class {constructor(callback){this.callback=callback;} observe(target,options){this.target=target;this.options=options;} disconnect(){this.target=null;} trigger(records=[]){this.callback(records,this);}},
     setTimeout:(...args)=>schedule('timeout',...args),setInterval:(...args)=>schedule('interval',...args),
     clearTimeout:id=>timers.delete(id),clearInterval:id=>timers.delete(id),
     requestAnimationFrame:fn=>schedule('animation',fn,16),cancelAnimationFrame:id=>timers.delete(id),
