@@ -84,6 +84,7 @@ class Element {
   removeAttribute(k) {delete this.attrs[k];if(k.startsWith('data-'))delete this.dataset[k.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())];}
   toggleAttribute(k,force) {const on=force===undefined?this.getAttribute(k)===null:!!force;if(on)this.setAttribute(k,'');else this.removeAttribute(k);return on;}
   focus() {if(this.ownerDocument)this.ownerDocument.activeElement=this;}
+  closest(selector) {let el=this;const alternatives=selector.split(',').map(s=>s.trim());while(el){if(alternatives.some(s=>matches(el,s)))return el;el=el.parent;}return null;}
   getClientRects() {return this.hidden || !this.isConnected ? [] : [this.getBoundingClientRect()];}
   checkVisibility() {let el=this;while(el){if(el.hidden)return false;el=el.parent;}return this.isConnected;}
   // Synthetic zero/default geometry, NEVER layout acceptance evidence.
