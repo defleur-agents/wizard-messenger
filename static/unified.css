@@ -1088,3 +1088,24 @@ html[data-presentation="immersive"] #unified-inbox .u-header, html[data-presenta
 .u-unread-divider { display: flex; align-items: center; gap: .75rem; margin: 1rem 0 .375rem; overflow-anchor: none; }
 .u-unread-divider::before, .u-unread-divider::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--accent) 45%, transparent); }
 .u-unread-divider span { font-size: .75rem; font-weight: 600; letter-spacing: .01em; color: var(--link); padding: .25rem .75rem; border-radius: 1rem; background: linear-gradient(color-mix(in srgb, var(--accent) 12%, transparent), color-mix(in srgb, var(--accent) 12%, transparent)) var(--panel-solid); }
+/* Labels (your own groups of chats): checkbox rows, a New label box, Manage labels. Sheets stay opaque; Appearance v1 tokens only. */
+.u-labels-help { margin: 0 0 8px; }
+.u-labels-chat { margin: 0 0 6px; font-weight: 600; color: var(--wz-text, var(--ink)); }
+.u-label-list { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 10px; }
+.u-label-row { display: flex; align-items: center; gap: 14px; width: 100%; min-height: 48px; padding: 0 14px; border-radius: 14px; background: var(--wz-surface-raised, var(--raised)); color: var(--wz-text, var(--ink)); font-size: 15px; text-align: left; justify-content: flex-start; }
+.u-label-row.on { box-shadow: inset 0 0 0 2px var(--wz-accent, var(--accent)); }
+.u-label-row .u-check { flex: 0 0 24px; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: 7px; box-shadow: inset 0 0 0 2px var(--wz-border, var(--line-2)); color: var(--wz-on-accent, var(--on-accent)); }
+.u-label-row.on .u-check { background: var(--wz-accent, var(--accent)); box-shadow: none; }
+.u-label-row .u-check svg { width: 16px; height: 16px; }
+.u-label-name { min-width: 0; overflow-wrap: anywhere; }
+.u-label-new { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; }
+.u-label-new input { flex: 1; min-width: 0; min-height: 44px; }
+.u-label-new button { min-height: 44px; min-width: 64px; flex: 0 0 auto; }
+.u-label-manage { display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 4px 8px 4px 14px; border-radius: 14px; background: var(--wz-surface-raised, var(--raised)); color: var(--wz-text, var(--ink)); }
+.u-label-manage > .u-label-name { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.u-label-manage small { color: var(--wz-text-muted, var(--ink-3)); font-size: 12px; }
+.u-label-manage .u-label-new { flex: 1; margin: 0; }
+.u-label-act { min-height: 44px; min-width: 44px; padding: 0 12px; flex: 0 0 auto; }
+.u-label-act.danger { color: var(--wz-danger, #ff8a8a); }
+.u-chip.manage { font-style: normal; }
+.u-empty .helper { max-width: 320px; margin: 6px auto 12px; }
