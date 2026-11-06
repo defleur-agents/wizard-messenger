@@ -1,9 +1,9 @@
 name: Source tests
 on:
   pull_request:
-    branches: [feature/unified-inbox]
+    branches: [main]
   push:
-    branches: [feature/unified-inbox]
+    branches: [main]
 permissions:
   contents: read
 jobs:
