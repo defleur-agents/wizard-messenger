@@ -1111,3 +1111,27 @@ html[data-presentation="immersive"] #unified-inbox .u-header, html[data-presenta
 .u-empty .helper { max-width: 320px; margin: 6px auto 12px; }
 /* Menu rows (Filters > Labels, chat Labels) are full 44px tap targets. */
 .u-menu .u-act { min-height: 44px; }
+
+/* Catch me up (6 Nov 2026): opaque sheet, --wz-* tokens with the standalone fallbacks, 44px+ targets. */
+.u-catchup-btn svg { stroke: currentColor; }
+.u-unread-catchup { display: flex; justify-content: center; margin: -.125rem 0 .5rem; overflow-anchor: none; }
+.u-unread-catchup-btn { min-height: 44px; padding: 0 18px; font-size: .8125rem; font-weight: 600; color: var(--wz-accent, var(--accent)); border: 1px solid color-mix(in srgb, var(--wz-accent, var(--accent)) 55%, transparent); border-radius: 22px; background: var(--wz-surface, var(--panel-solid)); }
+.u-catchup .u-cu-lead { font-size: 15px; line-height: 1.5; margin: 6px 0; color: var(--wz-text, var(--ink)); }
+.u-catchup .wide { width: 100%; margin-top: 10px; }
+.u-catchup .u-cu-choice, .u-catchup .u-cu-refresh, .u-cu-info .wide:not(.danger), .u-cu-info .danger { border: 1px solid var(--wz-border, var(--line)); color: var(--wz-text, var(--ink)); }
+.u-cu-info .danger { color: var(--err); }
+.u-cu-basis { margin: 4px 0 10px; font-size: 13px; color: var(--wz-text-muted, var(--ink-3)); }
+.u-cu-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.u-cu-bullet { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; min-height: 44px; padding: 11px 14px; border-radius: 14px; text-align: left; line-height: 1.4;
+  color: var(--wz-text, var(--ink)); background: color-mix(in srgb, var(--wz-text, var(--ink)) 8%, var(--panel-solid)); border: 1px solid var(--wz-border, var(--line)); }
+.u-cu-bullet.for_you { border-color: var(--wz-accent, var(--accent)); }
+.u-cu-bullet.plain { cursor: default; }
+.u-cu-kind { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--wz-accent, var(--accent)); }
+.u-cu-text { font-size: 15px; overflow-wrap: anywhere; }
+.u-cu-foot { margin: 14px 0 2px; font-size: 13px; font-weight: 600; color: var(--wz-text-secondary, var(--ink-2)); }
+.u-cu-running { font-size: 15px; margin: 10px 0 4px; }
+.u-cu-bar { height: 4px; border-radius: 2px; margin: 12px 0; background: linear-gradient(90deg, transparent, var(--wz-accent, var(--accent)), transparent) 0 0 / 40% 100% no-repeat, color-mix(in srgb, var(--wz-text, var(--ink)) 12%, var(--panel-solid)); animation: u-cu-slide 1.4s ease-in-out infinite; }
+@keyframes u-cu-slide { from { background-position: -40% 0, 0 0; } to { background-position: 140% 0, 0 0; } }
+@media (prefers-reduced-motion: reduce) { .u-cu-bar { animation: none; } }
+.u-cu-grant { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px; }
+.u-cu-off { border: 1px solid var(--wz-border, var(--line)); }

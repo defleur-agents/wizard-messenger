@@ -130,6 +130,7 @@
     compose: ['M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z', 'M15 5l4 4'],
     merge: ['M6 4v5a6 6 0 0 0 6 6h0a6 6 0 0 0 6-6V4', 'M12 15v5'],
     more: ['M12 5.5v.01', 'M12 12v.01', 'M12 18.5v.01'],
+    sparkle: ['M11 3l1.9 5.6L18.5 10.5l-5.6 1.9L11 18l-1.9-5.6L3.5 10.5l5.6-1.9z', 'M19 15.5v4', 'M17 17.5h4'],
     send: ['M4 12 20 4l-4 16-4-6.5L4 12z', 'm12 13.5 8-9.5'],
     down: ['M12 5v14', 'm5 12 7 7 7-7'], up: ['M12 19V5', 'm5 12 7-7 7 7'], plus: ['M12 5v14', 'M5 12h14'],
     mic: ['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M19 11a7 7 0 0 1-14 0', 'M12 18v3'],
@@ -1533,6 +1534,147 @@
     view.divider.setAttribute('aria-label', view.divider.firstChild.textContent);
     return view.divider;
   }
+  // ---------- Catch me up (James, 6 Nov 2026) ----------
+  // A private summary of what you missed, written by Tinfoil (never a public model, never an agent). The first tap per
+  // chat asks; the answer is kept per chat (this once / 24 hours / always) and can be turned off in the chat's info
+  // sheet or Settings. Every unread message is read: a long chat is read in parts and merged, and the sheet says so.
+  const CU_KINDS = {for_you: 'For you', decision: 'Decision', question: 'Open question', said: ''};
+  const CU_MODELS = {'glm-5-3': 'GLM 5.3', 'deepseek-v4-1-flash': 'DeepSeek V4.1 Flash'};
+  const CU_BASIS = {unread: 'Your unread messages', since: 'Since the new-messages marker', last_sent: 'Since you last wrote here', all: 'The whole chat history'};
+  const cuPath = (id, tail = '') => 'people/' + encodeURIComponent(id) + '/catch-up' + tail;
+  function cuSince(id) {
+    const u = view.id === id ? view.unread : null, m = u?.settled && u.from ? store.threads[id]?.messages.find(x => x.id === u.from) : null;
+    return m ? m.timestamp : undefined;
+  }
+  function catchUpRow() {
+    if (!view.cuRow) { view.cuRow = node('p', 'u-unread-catchup'); view.cuRow.append(button('Summarize these', () => catchUp(view.id, {run: true}), 'u-unread-catchup-btn')); }
+    return view.cuRow;
+  }
+  async function showSource(id, ref) {
+    closeOverlay();
+    const t = store.threads[id]; if (view.id !== id || !t) return;
+    if (!t.messages.some(m => m.id === ref) && t.has_more) toast('Finding that message…', 2400);
+    for (let i = 0; i < 400 && view.id === id && !t.messages.some(m => m.id === ref) && t.has_more; i++) {
+      try { if (!await fetchOlder(t, id, call)) break; } catch (e) { error(e); break; }
+    }
+    if (view.id !== id) return;
+    view.anchor = true; paintThread();
+    setTimeout(() => { if (view.id === id && !view.scroll?.querySelector('[data-id="' + CSS.escape(ref) + '"]')) toast('That message is no longer here'); else jumpTo(ref); }, 60);
+  }
+  function catchUp(id, opts = {}) {
+    if (!id) return;
+    const sheet = overlay('Catch me up'); sheet.classList.add('u-catchup');
+    const body = node('div', 'u-cu-body'); sheet.append(body);
+    const alive = () => sheet.isConnected;
+    let st = {grant: null, cached: null, job: null}, running = false;
+    const note = text => { const el = $('u-error'); if (el) el.textContent = text || ''; };
+    function ask() {
+      body.replaceChildren();
+      body.append(node('p', 'u-cu-lead', 'Catch me up reads this chat’s messages with Tinfoil, a private AI service, and writes a short summary.'),
+        node('p', 'helper', 'It does not let any agent read, draft or send anything. You can turn it off for this chat any time in the chat’s info or in Settings.'));
+      const choose = (mode, label, cls) => body.append(button(label, () => pick(mode), 'wide ' + cls));
+      choose('once', 'Just this once', 'primary'); choose('day', 'This chat for 24 hours', 'u-cu-choice'); choose('always', 'This chat always', 'u-cu-choice');
+      body.querySelector('button')?.focus();
+    }
+    async function pick(mode) {
+      running = true; paintRunning({count: 0});
+      try { await call(cuPath(id, '/grant'), {mode}); } catch (e) { running = false; ask(); error(e); return; }
+      running = false; go();
+    }
+    function paintRunning(job) {
+      body.replaceChildren();
+      const line = node('p', 'u-cu-running', job.count ? 'Reading ' + job.count + (job.count === 1 ? ' message' : ' messages') + '…' : 'Starting…');
+      line.setAttribute('role', 'status'); body.append(line);
+      if (job.total > 1) body.append(node('p', 'helper', 'This chat is long, so it is read in ' + (job.total - 1) + ' parts and then merged. Part ' + Math.min(job.done + 1, job.total) + ' of ' + job.total + '.'));
+      body.append(node('div', 'u-cu-bar'));
+    }
+    async function poll() {
+      while (alive()) {
+        await sleep(1100);
+        if (!alive()) return;
+        try { st = await call(cuPath(id)); } catch (e) { note(e.message); return; }
+        const job = st.job;
+        if (!job || job.state === 'running') { if (job) paintRunning(job); continue; }
+        if (job.state === 'error') { show(); note(job.error); return; }
+        show(); return;
+      }
+    }
+    async function go() { // run now (the grant is in place)
+      running = true; paintRunning({count: 0}); note('');
+      try { const r = await call(cuPath(id), {since: opts.since ?? cuSince(id)}); paintRunning(r.job); }
+      catch (e) {
+        running = false;
+        if (e.code === 'catchup_not_allowed') { ask(); return; }
+        show(); note(e.message); return;
+      }
+      running = false; poll();
+    }
+    function show() {
+      body.replaceChildren();
+      const c = st.cached;
+      if (!c) { body.append(node('p', 'helper', 'No summary yet.')); body.append(button('Catch me up', () => (st.grant ? go() : ask()), 'primary wide')); return; }
+      body.append(node('p', 'u-cu-basis', (CU_BASIS[c.basis] || '') + ' · ' + c.count + (c.count === 1 ? ' message' : ' messages')));
+      const list = node('ul', 'u-cu-list'); list.setAttribute('aria-label', 'Summary');
+      for (const b of c.bullets) {
+        const li = node('li'), kind = CU_KINDS[b.kind];
+        const row = b.refs?.length ? button('', () => showSource(id, b.refs[0]), 'u-cu-bullet ' + b.kind) : node('div', 'u-cu-bullet plain ' + b.kind);
+        if (kind) row.append(node('span', 'u-cu-kind', kind));
+        row.append(node('span', 'u-cu-text', b.text));
+        if (b.refs?.length) row.setAttribute('aria-label', (kind ? kind + ': ' : '') + b.text + '. Open the message');
+        li.append(row); list.append(li);
+      }
+      if (!c.bullets.length) list.append(node('li', 'helper', 'Nothing stood out.'));
+      body.append(list);
+      const foot = node('p', 'u-cu-foot', 'Summarized ' + c.count + (c.count === 1 ? ' message' : ' messages') + (c.parts > 1 ? ' in ' + c.parts + ' parts' : '') + '.');
+      body.append(foot);
+      if (c.parts > 1) body.append(node('p', 'helper u-cu-parts', 'Too long to read at once, so it was read in ' + c.parts + ' parts and merged. Nothing was left out.'));
+      body.append(node('p', 'helper', 'Written privately by ' + (CU_MODELS[c.model] || c.model) + ' on Tinfoil · ' + when(c.created)));
+      body.append(button('Refresh', () => (st.grant ? go() : ask()), 'u-cu-refresh wide'));
+    }
+    // Paint first, reconcile after: the sheet is up this frame; the status arrives behind it.
+    body.append(node('p', 'helper', 'Checking…'));
+    call(cuPath(id)).then(r => {
+      if (!alive()) return; st = r;
+      if (r.job?.state === 'running') { paintRunning(r.job); poll(); }
+      else if (opts.run || !r.cached) { if (r.grant) go(); else ask(); }
+      else show();
+    }).catch(e => { if (alive()) { body.replaceChildren(); note(e.message); } });
+  }
+  // Chat info sheet: what Catch me up may do in this chat, and how to take it back.
+  function catchUpInfo(p) {
+    const box = node('section', 'u-cu-info');
+    const paint = st => {
+      box.replaceChildren(node('h3', '', 'Catch me up'));
+      const g = st.grant;
+      box.append(node('p', 'helper', !g ? 'Asks before it summarizes this chat.' : g.mode === 'always' ? 'Allowed for this chat, always. Tinfoil only; no agent can read, draft or send because of it.'
+        : 'Allowed for this chat until ' + new Date(g.until).toLocaleString([], {weekday: 'short', hour: 'numeric', minute: '2-digit'}) + '. Tinfoil only; no agent can read, draft or send because of it.'));
+      const off = async clear => { try { paint(await call(cuPath(p.id, '/revoke'), {clear})); toast(clear ? 'Turned off and summary cleared' : 'Turned off for this chat'); } catch (e) { error(e); } };
+      if (g) box.append(button('Turn off for this chat', () => off(false), 'wide'));
+      if (g || st.cached) box.append(button(g ? 'Turn off and clear saved summary' : 'Clear saved summary', () => off(true), 'wide danger'));
+    };
+    call(cuPath(p.id)).then(st => { if (box.isConnected) paint(st); }).catch(() => {});
+    return box;
+  }
+  // Settings: the summary model and every standing permission.
+  function catchUpSettings(sheet) {
+    const box = node('section', 'u-cu-settings'); box.hidden = true; sheet.append(box);
+    const paint = st => {
+      box.hidden = false; box.replaceChildren(node('h3', '', 'Catch me up'));
+      const pickModel = node('select'); pickModel.setAttribute('aria-label', 'Summary model');
+      for (const m of st.models) { const o = node('option', '', (CU_MODELS[m] || m) + (m === st.default ? ' (recommended)' : '')); o.value = m; pickModel.append(o); }
+      pickModel.value = st.model;
+      pickModel.onchange = () => action(async () => { paint({...st, ...(await call('catch-up/settings', {model: pickModel.value}))}); });
+      const label = node('label', '', 'Summary model'); label.append(pickModel); box.append(label, node('p', 'helper', 'Both run privately on Tinfoil. Only these models can be used.'));
+      box.append(node('h3', '', 'Chats allowed to be summarized'));
+      if (!st.grants.length) box.append(node('p', 'helper', 'None. Catch me up asks first in each chat.'));
+      for (const g of st.grants) {
+        const row = node('div', 'u-cu-grant'); row.append(node('span', '', g.name + ' · ' + (g.mode === 'always' ? 'always' : 'until ' + new Date(g.until).toLocaleString([], {weekday: 'short', hour: 'numeric', minute: '2-digit'}))));
+        row.append(button('Turn off', () => action(async () => { await call(cuPath(g.person_id, '/revoke'), {clear: false}); paint({...st, grants: st.grants.filter(x => x.person_id !== g.person_id)}); }), 'u-cu-off'));
+        box.append(row);
+      }
+    };
+    call('catch-up/settings').then(st => { if (box.isConnected) paint(st); }).catch(() => {});
+  }
   function reviewedOf(p) { return !!p.language && p.language !== 'en'; }
   function subtitle(p) {
     if ((store.typing[p.id] || []).length) return 'typing…';
@@ -1555,6 +1697,10 @@
       priorityAction(cur, anchor, 'right'),
       ...(cur.native ? [] : [{label: 'Labels', icon: 'tag', run: () => labelsSheet(cur)}]),
     ], {side: 'right'}); };
+    if (p.id) { // Catch me up: next to the chat options, never replaces them
+      const head = root.querySelector('.u-thread-head'), more = head?.querySelector('[aria-label="Chat options"]'), cu = iconButton('sparkle', 'Catch me up', () => catchUp(id), 'u-catchup-btn');
+      if (more) head.insertBefore(cu, more); else head?.append(cu);
+    }
     view.sub = root.querySelector('.u-who-text span') || node('span'); if (!view.sub.parentNode) root.querySelector('.u-who-text').append(view.sub);
     const t = store.threads[id];
     const scroll = node('div', 'u-timeline'); scroll.setAttribute('role', 'log'); scroll.tabIndex = 0;
@@ -1615,7 +1761,7 @@
     posts.forEach((m, i) => {
       const label = dayLabel(m.timestamp);
       if (label !== day) { day = label; kids.push(node('p', 'u-day', label)); }
-      if (from && !divider && (m.id === from || m.photos?.some(x => x.id === from))) kids.push(divider = unreadDivider());
+      if (from && !divider && (m.id === from || m.photos?.some(x => x.id === from))) { kids.push(divider = unreadDivider()); kids.push(catchUpRow()); }
       const prev = posts[i - 1], next = posts[i + 1];
       const jp = prev && dayLabel(prev.timestamp) === day && side(prev) === side(m) && m.timestamp - prev.timestamp < 3e5;
       const jn = next && dayLabel(next.timestamp) === day && side(next) === side(m) && next.timestamp - m.timestamp < 3e5;
@@ -3550,6 +3696,7 @@
     const linkBox = contactsRow(p); if (linkBox) sheet.append(linkBox);
     form.onsubmit = e => { e.preventDefault(); save(); }; sheet.append(form);
     if (!p.native) sheet.append(node('h3', '', 'Labels'), labelPicker(p));
+    if (p.id && !p.native) sheet.append(catchUpInfo(p));
     if (p.identities.every(i => i.kind === 'person')) {
       const others = s.people.filter(x => x.id !== p.id);
       if (others.length) {
@@ -3812,6 +3959,7 @@
     const group = node('div', 'u-settings-group u-more u-more-other');
     group.append(previewsRow());
     sheet.append(head, agents, group);
+    catchUpSettings(sheet);
     // Each part stays away while it has nothing to show.
     const sync = () => {
       head.hidden = agents.hidden = !agents.children.length;
