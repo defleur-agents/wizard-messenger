@@ -39,4 +39,8 @@ See docs/group-mentions-reactions.md for channel limitations, copied Telegram pa
 - EXTEND `refresh_pictures`' existing bounded metadata backfill, plus `PeopleStore.members`' native/plain capability distinction.
 - REUSE Appearance v1, opaque panel floors, existing draft/send/Back/overlay and normal WAM lifecycle. Native Signal and owner-local worker overrides are not changed by this source fix.
 
+## Inbox click scheduling
+
+EXTEND existing `drawList` scheduling in `static/unified.js`: keep a pressed chat row attached until its click dispatches; defer only inbox painting, never chat opening or backend ingestion. Cancellation, blur and a bounded lost-release timeout restore painting.
+
 NEW: none.

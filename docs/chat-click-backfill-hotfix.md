@@ -1,0 +1,9 @@
+# Chat-click backfill hotfix (15.15.1)
+
+Reproduced using synthetic LINE rooms only: drawList replaces every chat button when an update arrives. If replacement happens after pointerdown but before pointerup/click, Chromium dispatches the click on the common parent, not the detached button. No openPerson call occurs. The LINE backfill and native-row refresh paths both call drawList, increasing exposure. This establishes a real client race, not proof that it is James's sole live failure (his session/data were not read).
+
+The hotfix defers only list painting during an active primary pointer gesture on a chat row. Ingestion, timeline updates, backend requests and opening the chat are not delayed. Deferred list painting resumes after click dispatch, on cancellation/blur, or after a bounded lost-release timeout. Existing mention/reactor code is unchanged; fc91189's mention/tooltip changes do not guard drawList and do not fix this race.
+
+Evidence on forum `/srv/work/messenger-click-hotfix`: `before` fails opening the synthetic DM after a forced production repaint between press/release. `after` and `after-r2` passed both standalone skin cases (screenshots) before their desktop harness boot failed. The aggregate browser run remains FAILED, not promoted to a pass. Five failed runs reached the verification-loop cap: initial product failure plus shell harness/selector timing failures. No further browser reruns were made. Desktop/phone in-shell acceptance is NOT complete. Unit tests isolate deferral, cancellation, blur, timeout and unrelated-pointer behavior.
+
+No owner messages, DBs, app-data, environment, container logs or session were accessed. The synthetic LINE DM covers null sender, unknown/sticker media, edits, replies and reactions without reactor identity data. No live send or provider round trip was performed.
