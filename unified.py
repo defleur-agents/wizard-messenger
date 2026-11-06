@@ -867,7 +867,9 @@ class PeopleStore:
                 db.executemany('INSERT INTO room_label VALUES (?,?)', [(ident, l) for l in chosen])
             self._labels_changed(db, identity_ids)
         self.changed()
-        return dict(self.label_catalog(), labels=chosen)
+        # `labels` stays the chat's own list (what the older labels route returned); the catalogue rides along.
+        full = self.label_catalog()
+        return {'labels': chosen, 'catalog': full['labels'], 'rev': full['rev']}
 
     def labels(self, identity_id, labels):
         # Compatibility route (POST groups/<identity>/labels): one chat room, any kind.

@@ -225,6 +225,7 @@ class PeopleTests(unittest.TestCase):
         out = self.store.person_labels(merged['id'], ['WizardOS', 'wizardos', 'Ideas'])
         self.assertEqual(out['labels'], ['Ideas', 'WizardOS'])
         self.assertGreater(self.store.seq, before)  # open views are told
+        self.assertEqual([x['name'] for x in out['catalog']], ['Ideas', 'WizardOS'])  # the catalogue rides along
         self.store.person_labels(group['person_id'], ['WizardOS'])
         self.store.person_labels(solo['person_id'], ['WizardOS'])
         by_name = {p['display_name']: p for p in self.store.people() + self.store.people('group')}

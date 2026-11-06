@@ -3445,7 +3445,7 @@
     const put = list => { for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if (x.id === p.id) x.labels = list; p.labels = list; if (store.threads[p.id]) store.threads[p.id].person.labels = list; drawList(); };
     const before = p.labels || []; put(names);
     labelQueue = labelQueue.then(async () => {
-      try { const r = await call('people/' + encodeURIComponent(p.id) + '/labels', {labels: names}); takeCatalog(r); put(r.labels); persist(); }
+      try { const r = await call('people/' + encodeURIComponent(p.id) + '/labels', {labels: names}); takeCatalog({labels: r.catalog, rev: r.rev}); put(r.labels); persist(); }
       catch (e) { put(before); labelProblem(e); }
     });
     return labelQueue;
