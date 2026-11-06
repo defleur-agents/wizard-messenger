@@ -134,7 +134,7 @@ services:
       retries: 10
     restart: unless-stopped
   line:
-    image: ${MESSENGER_LINE_IMAGE:-sha256:9a47f439a7e634017cc7a0a3f743a670ccef3d93b49d445a786742baa42997e4}
+    image: ${MESSENGER_LINE_IMAGE:-wizard-messenger-line:72c7a51a44f344966b916bd2f42a734381061186}
     user: 1000:1000
     entrypoint:
     - /bin/sh

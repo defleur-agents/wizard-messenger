@@ -224,6 +224,32 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+  line:
+    # Source-pinned local build: tools/build_line_connector.py (see line-first-run.md).
+    image: ${MESSENGER_LINE_IMAGE:-wizard-messenger-line:72c7a51a44f344966b916bd2f42a734381061186}
+    pull_policy: never
+    user: "1000:1000"
+    entrypoint: [/bin/sh, -c]
+    command:
+      - 'until [ -f /data/configured ]; do sleep 2; done; exec /usr/bin/matrix-line -c /data/config.yaml'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,uid=1000,gid=1000"]
+    mem_limit: 512m
+    pids_limit: 128
+    volumes:
+      - ${APP_DATA_DIR}/data/line:/data
+    depends_on:
+      connector-init: {condition: service_completed_successfully}
+      matrix: {condition: service_healthy}
+    networks: [matrix-lane, connector-egress]
+    healthcheck:
+      test: [CMD-SHELL, "test ! -f /data/configured || curl --fail --silent http://127.0.0.1:29322/_matrix/mau/live >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 networks:
   matrix-lane: {internal: true}
   model-lane: {internal: true}

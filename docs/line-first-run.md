@@ -15,6 +15,46 @@
 
 These are source-level defects, not proof that either is the only cause of a particular live server's state. Live container state was deliberately not inspected.
 
+## Installed worker packaging
+
+The normal manifest-selected `runtipi/docker-compose.yml` includes LINE, not only
+`runtipi/connectors.compose.yml`. Both definitions use the same source-pinned
+local image tag and marker-watching command. A release must build/import this
+image before activation (`pull_policy: never`); enabling a network cannot create
+a missing Docker worker. Run `tools/build_line_connector.py` on the designated
+build worker. `MESSENGER_LINE_IMAGE` may pin the verified imported image digest.
+Historical build IDs in `plumbing/connectors-provenance.json` remain historical,
+not a promise that that image ID is present on every host.
+
+The reproduced bridge build uses beeper/line source
+`72c7a51a44f344966b916bd2f42a734381061186` and recipe
+`plumbing/line.Dockerfile` SHA-256
+`11addc6aa7280d28c23a203fea311d238c9a1b7c927485c4b2cc2f0fb2359afc`.
+The deployment packet must record the archive hash, source config digest, loaded
+host manifest digest (Docker storage versions may report different image IDs),
+rootfs layer equality and executable hash; never silently overwrite old pins.
+
+`connector-init` pre-generates LINE's private config and Synapse appservice
+registration, including the registration in `app_service_config_files`, for
+**all** supported optional networks, even while disabled. It sets data ownership
+to UID/GID 1000. Matrix depends on successful connector-init before boot, so an
+already initialized current stack does not need a Synapse or Messenger restart
+just to add the missing worker. Synapse reads registrations at startup; a
+registration first added after its startup would need a coordinated Matrix-only
+restart. Never restart Messenger to add this worker.
+
+For a narrow live repair, back up the owner-local Compose override, import the
+verified image and add only LINE using the existing matrix-lane and
+connector-egress networks. Leave owner-defined service entries outside WAM's
+`x-wizard-networks.services` managed list. WAM includes this override on updates
+and prunes only its own listed stale service entries. Validate without printing
+resolved environment, then start only `line` with `up -d --no-deps line`.
+**Check marker metadata first**: an existing `/data/configured` means a previous
+owner enable already occurred; do not delete it or claim a dormant start. Stop
+for an activation decision if the repair was authorized only for dormancy.
+No worker healthcheck passing while dormant proves bridge readiness; real
+readiness must advertise both supported flow IDs after owner enable.
+
 ## Owner-controlled flow
 
 Back to accounts → Add → LINE → Set up LINE → wait for actual bridge readiness → choose QR or email sign-in. Setup never starts a provider login, scans a QR, enters credentials, pairs an account or sends a message. A one-minute end-to-end deadline produces an explicit retry/repair screen. Late results cannot reopen a closed view or overwrite timeout recovery.
