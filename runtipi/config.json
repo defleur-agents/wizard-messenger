@@ -20,6 +20,7 @@
     "arm64"
   ],
   "dynamic_config": true,
+  "private_data": true,
   "min_tipi_version": "4.8.0",
   "uid": 1000,
   "gid": 1000,
