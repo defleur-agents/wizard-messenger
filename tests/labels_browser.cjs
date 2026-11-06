@@ -98,6 +98,7 @@ const SKINS = {
     });
     const shot = name => page.screenshot({path: path.join(out, `${name}-${label}-${scheme}.png`)});
     const rows = () => page.locator('.u-list > .u-person strong').allTextContents();
+    const outside = async () => { await page.mouse.click(viewport.width - 4, 4); await page.waitForTimeout(550); /* Messenger swallows the release click of an outside tap */ };
     const tall = async (loc, what) => { for (const b of await loc.all()) { const r = await b.boundingBox(); assert.ok(r && r.height >= 44 - 0.5 && r.width >= 44 - 0.5, what + ' tap target >= 44px: ' + JSON.stringify(r)); } };
     await page.goto('https://messenger.test/');
     await page.locator('.u-person', {hasText: 'James Carter'}).waitFor({timeout: 15000});
@@ -128,7 +129,7 @@ const SKINS = {
     await page.waitForTimeout(200);
     assert.deepEqual(calls.filter(c => c[0] === 'labels').at(-1), ['labels', 'james', ['WizardOS', 'Taxes']]);
     // Outside tap closes the sheet (the dim area), and Back-less: the list is still there.
-    await page.mouse.click(viewport.width - 4, 4);
+    await outside();
     assert.equal(await page.locator('.u-sheet').count(), 0, 'outside tap closes the sheet');
     assert.ok((await rows()).includes('James Carter'), 'still on the list');
 
@@ -139,15 +140,19 @@ const SKINS = {
     assert.equal(await page.locator('.u-sheet h3', {hasText: 'Labels'}).count(), 1, 'Labels in the info sheet');
     await page.locator('.u-sheet').getByRole('checkbox', {name: 'WizardOS'}).click();
     await shot('info-sheet');
-    await page.mouse.click(viewport.width - 4, 4);
+    await outside();
     assert.equal(await page.locator('.u-sheet').count(), 0);
-    await page.evaluate(() => history.back()).catch(() => {});
-    if (await page.locator('.u-person').count() === 0) await page.getByRole('button', {name: /back/i}).first().click().catch(() => {});
+    // The thread's own ⋯ menu has Labels too.
+    await page.getByRole('button', {name: 'Chat options'}).click();
+    assert.equal(await page.getByRole('menuitem', {name: 'Labels'}).count(), 1, 'Labels in the thread menu');
+    await outside();
+    assert.equal(await page.locator('.u-sheet,.u-menu').count(), 0, 'outside tap closes the menu');
+    if (viewport.width < 900) { await page.getByRole('button', {name: 'Back'}).click(); await page.locator('.u-thread-head').waitFor({state: 'detached', timeout: 5000}); }
     await page.locator('.u-person', {hasText: 'Marco Bianchi'}).click({button: 'right'});
     await page.getByRole('menuitem', {name: 'Labels'}).click();
     await page.locator('.u-sheet').getByRole('checkbox', {name: 'WizardOS'}).click();
     await page.waitForTimeout(200);
-    await page.mouse.click(viewport.width - 4, 4);
+    await outside();
     assert.deepEqual(calls.filter(c => c[0] === 'labels').map(c => c[1]).sort(), ['fam', 'james', 'james', 'marco'].sort().filter((x, i, a) => true));
 
     // 5. Filter: all networks that carry it.
@@ -159,7 +164,7 @@ const SKINS = {
     // 6. Manage labels: reachable from the filters, rename, delete (two taps), create.
     await page.locator('#u-filters .u-chip[data-filter="manage-labels"]').click();
     const mg = page.locator('.u-sheet.u-manage-labels'); await mg.waitFor();
-    await tall(mg.locator('.u-label-act'), 'manage action');
+    await page.waitForTimeout(400); await tall(mg.locator('.u-label-act'), 'manage action');
     await mg.getByLabel('New label name').fill('Ideas'); await mg.getByRole('button', {name: 'Create'}).click();
     await mg.locator('.u-label-manage', {hasText: 'Ideas'}).waitFor();
     await mg.locator('.u-label-manage', {hasText: 'Taxes'}).getByRole('button', {name: 'Rename'}).click();
@@ -171,14 +176,14 @@ const SKINS = {
     await page.waitForTimeout(200);
     assert.ok(!(await mg.innerText()).includes('Ideas'), 'deleted');
     assert.deepEqual(calls.filter(c => c[0] !== 'labels').map(c => c[0]), ['create', 'rename', 'delete']);
-    await page.mouse.click(viewport.width - 4, 4);
+    await outside();
     assert.equal(await page.locator('.u-sheet').count(), 0);
     assert.deepEqual((await rows()).sort(), ['Family', 'James Carter', 'Marco Bianchi'], 'chats survive label edits');
     // Deleting the label you are looking at falls back to All instead of an empty dead end.
     await page.locator('#u-filters .u-chip[data-filter="manage-labels"]').click();
     await page.locator('.u-sheet .u-label-manage', {hasText: 'WizardOS'}).getByRole('button', {name: 'Delete'}).click();
     await page.getByRole('button', {name: 'Delete label?'}).click(); await page.waitForTimeout(200);
-    await page.mouse.click(viewport.width - 4, 4);
+    await outside();
     assert.equal(await page.locator('#u-filters .u-chip[data-filter="label:WizardOS"]').count(), 0);
     assert.equal(await page.locator('.u-person').count(), 5, 'filter fell back to All, every chat is still there');
     assert.deepEqual(errors, [], 'no page errors');

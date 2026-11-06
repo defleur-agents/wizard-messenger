@@ -2,7 +2,7 @@
 wizard: 0.2
 id: messenger
 name: Messenger
-version: 0.2.0-unified.16.25
+version: 0.2.0-unified.16.26
 type: service
 category: app
 summary: Encrypted text conversations with your peers, inside Wizard.
@@ -35,6 +35,8 @@ provides: [messaging]
 uses: [browser]
 needs: []
 ---
+
+Chats can be put in your own labels (a label is a named group of chats, e.g. WizardOS) from any chat's info sheet; the Inbox filters show a label's chats from every network.
 
 Messenger runs entirely in its own isolated container. Its web view uses only its documented HTTP API; the UI source is shipped separately so a Wizard can customize it. Marmot MDK supplies encrypted conversation and relay synchronization.
 
