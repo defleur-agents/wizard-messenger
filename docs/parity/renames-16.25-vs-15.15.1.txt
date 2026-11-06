@@ -1,0 +1,13 @@
+# app-parity-gate --renames for Messenger 0.2.0-unified.16.25 against James's live 0.2.0-unified.15.15.1 (f95740243fcc).
+# Each label below survives in the candidate; the gate's label heuristic no longer sees it because it now lives in a
+# data table (TYPES/SEGMENTS/PRIORITIES) or a computed `said` toast, or because Low priority moved into the
+# three-level Priority menu (Normal / Medium / Low). Every mapping is pinned to a browser test that exercises it.
+label:Direct => ['direct', 'Direct'] | test=tests/inbox_ux_browser.cjs | token=Direct
+label:Groups => ['groups', 'Groups'] | test=tests/filter_layout_browser.cjs | token=Groups
+label:Merged => ['merged', 'Merged'] | test=tests/filter_layout_browser.cjs | token=Merged
+label:Unread => ['unread', 'Unread'] | test=tests/filter_layout_browser.cjs | token=Unread
+label:Move to Low priority => ['low', 'Low'] | test=tests/filter_layout_browser.cjs | token=Priority: 
+label:Move to Inbox => ['normal', 'Normal'] | test=tests/filter_layout_browser.cjs | token=Priority: 
+label:Moved to Low priority => 'Moved to Low priority' | test=tests/filter_layout_browser.cjs | token=Moved to Low priority
+label:Moved to Inbox => 'Moved to Inbox' | test=tests/filter_layout_browser.cjs | token=Moved to Inbox
+label:Could not move this chat => 'Could not change priority' | test=tests/filter_layout_browser.cjs | token=u-toast

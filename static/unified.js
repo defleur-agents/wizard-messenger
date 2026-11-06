@@ -544,20 +544,38 @@
   // Crossing the width line keeps the open chat: wide shows list + chat, narrow shows just that chat.
   function relayout() {
     const want = wideNow(); if (want === split.on) return;
+    const place = s.person && !s.native ? readingPlace() : null; // measured in the old layout, before it changes
     split.on = want; document.documentElement.toggleAttribute('data-split', want);
     const root = $('unified-inbox');
     if (!root || !s.ready || !document.documentElement.dataset.inboxTab || s.tab === 'messenger') { if (root && !want) { delete root.dataset.split; } return; }
     if (want) root.dataset.split = ''; else delete root.dataset.split;
     root.replaceChildren();
     if (s.native) { root.hidden = !want; if (want) { renderList(); } return; }
-    if (want) { renderList(); if (s.person) reopenThread(); }
-    else if (s.person) reopenThread(); else renderList();
+    if (want) { renderList(); if (s.person) reopenThread(place); }
+    else if (s.person) reopenThread(place); else renderList();
   }
   // Re-draw the open chat in its new place from memory (no refetch); the draft carries over through the server draft.
-  function reopenThread() {
+  // James, 6 Nov 2026: a group must open where he stopped reading, never jump to the bottom on its own. Crossing the
+  // width line (window resize, phone rotation) keeps the message at the top of the window where it was.
+  function reopenThread(place = readingPlace()) {
     const id = s.person, t = store.threads[id];
     if (!t) { openPerson(id); return; }
-    els.clear(); buildThread(id, t.person); paintThread(true);
+    if (view.id !== id) place = null;
+    els.clear(); buildThread(id, t.person); paintThread(!place, !!place);
+    if (place) putPlace(place);
+  }
+  // The first message showing at the top of the open chat, or null when the chat is at the bottom (or not on screen).
+  function readingPlace() {
+    const sc = view.scroll; if (!sc?.isConnected || nearBottom()) return null;
+    const top = sc.getBoundingClientRect().top;
+    for (const el of sc.querySelectorAll('.u-row[data-id]')) { const r = el.getBoundingClientRect(); if (r.bottom > top) return {id: el.dataset.id, off: r.top - top}; }
+    return null;
+  }
+  function putPlace(place) {
+    const sc = view.scroll, el = sc?.querySelector('.u-row[data-id="' + CSS.escape(place.id) + '"]');
+    if (!el) { if (sc) sc.scrollTop = sc.scrollHeight; return; }
+    sc.scrollTop += el.getBoundingClientRect().top - sc.getBoundingClientRect().top - place.off;
+    view.bottom = nearBottom(); if (view.pill) view.pill.hidden = view.bottom;
   }
   function listBase(title) {
     const root = split.on ? panes().list : $('unified-inbox'); root.replaceChildren(); root.dataset.view = s.search != null ? 'search' : 'list';
@@ -760,7 +778,7 @@
     t.messages.sort((a, b) => (a.pending ? 1 : 0) - (b.pending ? 1 : 0) || a.timestamp - b.timestamp || ((a.timeline_order || 0) - (b.timeline_order || 0)) || (a.id < b.id ? -1 : 1));
   }
   function apply(r) {
-    if (r.reset) { for (const k in unreadById) delete unreadById[k]; store.seq = r.seq; store.lists = {people: null, groups: null}; store.threads = Object.create(null); if (s.person) openPerson(s.person); else renderList(); return; }
+    if (r.reset) { for (const k in unreadById) delete unreadById[k]; store.seq = r.seq; store.lists = {people: null, groups: null}; store.threads = Object.create(null); if (s.person) { openPerson(s.person); if (split.on) renderList(); } else renderList(); return; } // desktop: the list beside the chat reloads too
     store.seq = Math.max(store.seq, r.seq);
     for (const id of r.removed || []) {
       for (const k of ['people', 'groups']) if (store.lists[k]) store.lists[k] = store.lists[k].filter(p => p.id !== id);
@@ -1438,10 +1456,12 @@
     // Where to start reading: taken before anything can mark the chat read, kept until the owner leaves the chat.
     // Reopening the chat that is already on screen (wake, reset, rename) keeps the divider it had.
     const again = s.person === id && view.id === id && view.unread?.settled ? view.unread : null;
+    // Still reading above the bottom (wake, reset, rename): park on the divider again instead of the newest.
+    const reading = !!again && !!view.scroll?.isConnected && !nearBottom();
     s.person = id; const epoch = ++s.epoch, gen = ++split.threadGen; inChat(true); els.clear(); view.reply = view.edit = view.attach = null;
     if (split.on) { if (!hasListPane()) renderList(); markSelected(); }
     const cached = store.threads[id];
-    view.unread = again ? {...again, parked: true} : unreadSnapshot(id, hint, cached);
+    view.unread = again ? (reading ? {...again, settled: false, parked: false} : {...again, parked: true}) : unreadSnapshot(id, hint, cached);
     buildThread(id, cached?.person || hint || {display_name: '', identities: []});
     if (fromList) slideIn();
     savedOrder = [id, ...savedOrder.filter(x => x !== id)];
@@ -1571,9 +1591,10 @@
     return posts;
   }
   function nearBottom() { const sc = view.scroll; return sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80; }
-  function paintThread(toBottom = false) {
+  // hold: a rebuilt chat that will be put back where the owner was reading (never followed to the bottom, never read).
+  function paintThread(toBottom = false, hold = false) {
     const t = store.threads[view.id], scroll = view.scroll; if (!t || !scroll) return;
-    const follow = toBottom || nearBottom(), p = t.person, auto = reviewedOf(p), multi = networksOf(p).length > 1, group = (p.identities || []).some(i => i.kind === 'group') || new Set(t.messages.filter(m => !m.outgoing && m.sender).map(m => m.sender)).size > 1;
+    const follow = !hold && (toBottom || nearBottom()), p = t.person, auto = reviewedOf(p), multi = networksOf(p).length > 1, group = (p.identities || []).some(i => i.kind === 'group') || new Set(t.messages.filter(m => !m.outgoing && m.sender).map(m => m.sender)).size > 1;
     const kids = [node('div', 'u-spacer')];
     if (t.has_more) kids.push(node('p', 'u-older', 'Loading earlier messages…'));
     let day = '';
@@ -1644,8 +1665,10 @@
     const counted = (row?.unread || unreadById[view.id] || 0) > 0;
     // The thread's own person record has no read mark; the list row's is the server's.
     const mark = Math.max(t.person.last_read_ts || 0, row?.last_read_ts || 0);
-    if (!last || (last.timestamp <= mark && !counted) || view.reading === last.timestamp) return;
-    view.reading = last.timestamp; t.person.last_read_ts = Math.max(mark, last.timestamp); if (row) row.last_read_ts = t.person.last_read_ts;
+    // Keyed by chat: two chats can share a newest timestamp (Telegram's are whole seconds), and the second must still read.
+    const reading = view.id + ' ' + last?.timestamp;
+    if (!last || (last.timestamp <= mark && !counted) || view.reading === reading) return;
+    view.reading = reading; t.person.last_read_ts = Math.max(mark, last.timestamp); if (row) row.last_read_ts = t.person.last_read_ts;
     if (row) row.unread = 0;
     unreadById[view.id] = 0; syncBadge(); if (split.on && s.tab !== 'messenger') drawList();
     call('people/' + view.id + '/read', {timestamp: last.timestamp}).catch(() => {});
