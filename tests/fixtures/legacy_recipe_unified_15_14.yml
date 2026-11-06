@@ -1,0 +1,237 @@
+services:
+  unified-init:
+    image: ${MESSENGER_IMAGE:-wizard-messenger:0.2.0-unified.15.14}
+    pull_policy: never
+    user: "0:0"
+    entrypoint: [python3, /app/unified_setup.py]
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+    volumes:
+      - ${APP_DATA_DIR}/data:/data
+    restart: "no"
+  messenger:
+    image: ${MESSENGER_IMAGE:-wizard-messenger:0.2.0-unified.15.14}
+    pull_policy: never
+    read_only: true
+    cap_drop: [ALL]
+    user: "1000:1000"
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 1g
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=1000,gid=1000
+      - /run/messenger:rw,noexec,nosuid,size=64m,mode=0700,uid=1000,gid=1000
+    environment:
+      MESSENGER_API_TOKEN: ${MESSENGER_API_TOKEN:?Messenger capability required}
+      MESSENGER_ALLOWED_ORIGINS: ${MESSENGER_ALLOWED_ORIGINS:-}
+      MESSENGER_PUBLIC_PATH: ${MESSENGER_PUBLIC_PATH:-/messenger/}
+      MESSENGER_COOKIE_SECURE: "1"
+      MESSENGER_DATA: /data
+      MESSENGER_PORT: "8765"
+      UNIFIED_ENABLED: "1"
+      CONNECTORS_ENABLED: "1"
+      MESSENGER_CONNECTOR_SENDER_MODE: local-owner
+      MATRIX_URL: http://matrix:8008
+      TELEGRAM_BRIDGE_URL: http://telegram:29317
+      TRANSLATION_URL: http://translation:8766
+      TRANSLATION_MODEL: ${TRANSLATION_MODEL:-gemma4-31b}
+    volumes:
+      - ${APP_DATA_DIR}/data:/data
+    depends_on:
+      unified-init: {condition: service_completed_successfully}
+      matrix: {condition: service_healthy}
+      connector-init: {condition: service_completed_successfully}
+    networks: [matrix-lane, model-lane, relay-egress]
+    # Loopback-only host port for the Wizard gateway, as in 0.1.x.
+    ports:
+      - 127.0.0.1:${APP_PORT}:8765
+    x-runtipi:
+      is_main: true
+      internal_port: 8765
+  matrix:
+    # Official Synapse v1.163.0 multi-architecture manifest.
+    image: ghcr.io/element-hq/synapse@sha256:e98ab72138d90fa8b8876c6421fe78a9fdb181c0d7cc690ad740e5173e0c65e6
+    user: "1000:1000"
+    entrypoint: [python, -m, synapse.app.homeserver, --config-path, /data/homeserver.yaml]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,uid=1000,gid=1000"]
+    mem_limit: 768m
+    pids_limit: 128
+    volumes:
+      - ${APP_DATA_DIR}/data/matrix:/data
+    depends_on:
+      unified-init: {condition: service_completed_successfully}
+      connector-init: {condition: service_completed_successfully}
+    networks: [matrix-lane]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8008/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+  telegram:
+    # Upstream bridgev2 + reproducible album patch; see plumbing/telegram-bridge.
+    image: ${TELEGRAM_IMAGE:-wizard-telegram-bridge:0.2610.0-albums1}
+    pull_policy: never
+    user: "1000:1000"
+    entrypoint: [/bin/sh, -c]
+    command:
+      - 'while [ ! -f /data/configured ]; do sleep 2; done; exec /usr/bin/mautrix-telegram -c /data/config.yaml'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,uid=1000,gid=1000"]
+    mem_limit: 512m
+    pids_limit: 128
+    volumes:
+      - ${APP_DATA_DIR}/data/telegram:/data
+    depends_on:
+      unified-init: {condition: service_completed_successfully}
+      matrix: {condition: service_healthy}
+    networks: [matrix-lane, telegram-egress]
+    healthcheck:
+      test: [CMD-SHELL, "test ! -f /data/configured || wget -q -O /dev/null http://127.0.0.1:29317/_matrix/mau/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+  translation:
+    image: ${MESSENGER_IMAGE:-wizard-messenger:0.2.0-unified.15.14}
+    pull_policy: never
+    entrypoint: [python3, /app/translation.py]
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 64
+    environment:
+      TINFOIL_API_KEY: ${TINFOIL_API_KEY:-}
+      TRANSLATION_MODEL: ${TRANSLATION_MODEL:-gemma4-31b}
+    volumes:
+      - ${APP_DATA_DIR}/data/translation:/data:ro
+    depends_on:
+      unified-init: {condition: service_completed_successfully}
+    networks: [model-lane, model-egress]
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+  connector-init:
+    image: ${MESSENGER_IMAGE:-wizard-messenger:0.2.0-unified.15.14}
+    pull_policy: never
+    user: 0:0
+    entrypoint:
+    - python3
+    - /app/connector_setup.py
+    network_mode: none
+    read_only: true
+    cap_drop:
+    - ALL
+    cap_add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - FOWNER
+    security_opt:
+    - no-new-privileges:true
+    environment:
+      MESSENGER_CONNECTORS: ${MESSENGER_CONNECTORS:-}
+    volumes:
+    - ${APP_DATA_DIR}/data:/data
+    depends_on:
+      unified-init:
+        condition: service_completed_successfully
+    restart: 'no'
+  whatsapp:
+    image: dock.mau.dev/mautrix/whatsapp@sha256:c807054cb015d0f5c90d20d85aac216d062b4a6f4ae834b931fd5e7f03e27391
+    user: 1000:1000
+    entrypoint:
+    - /bin/sh
+    - -c
+    command:
+    - until [ -f /data/configured ]; do sleep 2; done; exec /usr/bin/mautrix-whatsapp -c /data/config.yaml
+    read_only: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m,uid=1000,gid=1000
+    mem_limit: 512m
+    pids_limit: 128
+    volumes:
+    - ${APP_DATA_DIR}/data/whatsapp:/data
+    depends_on:
+      connector-init:
+        condition: service_completed_successfully
+      matrix:
+        condition: service_healthy
+    networks:
+    - matrix-lane
+    - connector-egress
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - test ! -f /data/configured || curl --fail --silent http://127.0.0.1:29318/_matrix/mau/live
+        >/dev/null
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+  signal:
+    image: dock.mau.dev/mautrix/signal@sha256:39afa721aa69472b2e91c75bd7d81a739e47f7e480fc0ff5ac8247af28eb2d0a
+    user: 1000:1000
+    entrypoint:
+    - /bin/sh
+    - -c
+    command:
+    - until [ -f /data/configured ]; do sleep 2; done; exec /usr/bin/mautrix-signal -c /data/config.yaml
+    read_only: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m,uid=1000,gid=1000
+    mem_limit: 512m
+    pids_limit: 128
+    volumes:
+    - ${APP_DATA_DIR}/data/signal:/data
+    depends_on:
+      connector-init:
+        condition: service_completed_successfully
+      matrix:
+        condition: service_healthy
+    networks:
+    - matrix-lane
+    - connector-egress
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - test ! -f /data/configured || curl --fail --silent http://127.0.0.1:29328/_matrix/mau/live
+        >/dev/null
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+networks:
+  matrix-lane: {internal: true}
+  model-lane: {internal: true}
+  telegram-egress: {}
+  connector-egress: {}
+  model-egress: {}
+  # Existing Marmot relay traffic is preserved. Matrix has no egress network.
+  relay-egress: {}
+x-runtipi:
+  schema_version: 2
+  overrides: []

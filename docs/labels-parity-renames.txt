@@ -1,0 +1,2 @@
+label:Family, Friends => New label, e.g. WizardOS | test=tests/labels_browser.cjs | token=New label
+label:Save labels => Manage labels | test=tests/labels_browser.cjs | token=Manage labels

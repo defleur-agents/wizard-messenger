@@ -23,6 +23,38 @@ class ConnectorHistory(unittest.TestCase):
         return {'type':'m.room.message','event_id':mid,'sender':'@peer:messenger.internal',
                 'origin_server_ts':int(time.time()*1000),'content':{'msgtype':'m.text','body':body}}
 
+    def test_v3_rooms_with_avatars_backfill_joined_members_once_in_batches(self):
+        import json
+        from connector_inbox import META_VERSION
+        legacy = {'v':3, 'network':'line', 'kind':'group', 'avatars':{'@line_alice:messenger.internal':'mxc://synthetic/alice'},
+                  'names':{'@line_alice:messenger.internal':'Alice Example'}}
+        with self.store.db() as db:
+            for identity in (self.a, self.b):
+                db.execute('INSERT INTO room_meta VALUES (?,?)', (identity['address'], json.dumps(legacy)))
+                db.execute("UPDATE identity SET kind='group' WHERE id=?", (identity['id'],))
+        # Earlier versions may already have marked the picture-only scan done.
+        self.store.put('meta_pictures_v%d' % META_VERSION, '1')
+        def state(path):
+            net = 'line' if '!line' in path else 'instagram'
+            return [{'type':'m.bridge', 'sender':'@%sbot:messenger.internal' % net,
+                     'content':{'protocol':{'id':net}, 'com.beeper.room_type.v2':'group', 'channel':{'displayname':'Synthetic group'}}},
+                    {'type':'m.room.member', 'state_key':'@line_alice:messenger.internal',
+                     'content':{'membership':'join', 'displayname':'Alice Example', 'avatar_url':'mxc://synthetic/alice'}}]
+        self.inbox.mx = Mock(side_effect=state)
+        self.inbox.room_meta = Mock(wraps=self.inbox.room_meta)
+        before = self.store.seq
+        self.inbox.refresh_pictures(batch=1)
+        self.assertEqual(self.inbox.room_meta.call_count, 1)
+        self.assertFalse(self.store.get('meta_members_v%d' % META_VERSION))
+        self.inbox.refresh_pictures(batch=1)
+        self.assertEqual(self.inbox.room_meta.call_count, 2)
+        self.inbox.refresh_pictures(batch=1)
+        self.assertEqual(self.store.get('meta_members_v%d' % META_VERSION), '1')
+        self.inbox.refresh_pictures(batch=1)
+        self.assertEqual(self.inbox.room_meta.call_count, 2)
+        self.assertEqual(self.store.members(dict(self.a,kind='group'))[0]['name'], 'Alice Example')
+        self.assertGreater(self.store.seq, before, 'membership-only changes reach an already-open composer')
+
     def test_connector_mutations_cannot_cross_thread_and_fts_tracks_redaction(self):
         self.inbox.ingest(self.a, {}, self.event('$one'))
         edit = self.event('$edit')

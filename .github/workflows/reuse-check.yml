@@ -5,5 +5,10 @@ on:
 permissions:
   contents: read
 jobs:
+  private-data-recipe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tests -p test_private_data_recipe.py -v
   reuse:
     uses: humanitylabs-org/wizard-ux/.github/workflows/reuse-check-app.yml@main

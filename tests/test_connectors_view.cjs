@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 class Element {
-  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.value = ''; this.style = {}; this.dataset = {}; this.className = ''; }
+  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.value = ''; this.style = {}; this.dataset = {}; this.className = ''; this.classList = {add() {}, remove() {}}; }
   append(...nodes) { this.children.push(...nodes); }
   replaceChildren(...nodes) { this.children = nodes; }
   setAttribute(k,v) { this.attrs[k] = v; }
@@ -29,13 +29,16 @@ const tick = () => new Promise(r => setTimeout(r, 0));
     return {};
   };
   const ui = window.MessengerConnectors(root,api); await ui.show();
-  const buttons = nodes(root).filter(x => x.tag === 'button');
-  assert.equal(buttons[0].textContent, 'Show QR code', 'QR is the primary action, ahead of pairing code');
+  let buttons = nodes(root).filter(x => x.tag === 'button');
+  assert.equal(nodes(root).filter(x => /c-card/.test(x.className)).length, 0, 'disconnected networks stay in Add');
   // An unsupported network is the same tile as the others, disabled with "Soon": never a working connect button.
   const soon = buttons.filter(x => /c-soon/.test(x.className));
-  assert.equal(buttons.length - soon.length, 2, 'no fake button for an unsupported network');
+  assert.equal(buttons.length - soon.length, 1, 'one Add tile, no fake button for an unsupported network');
   assert.equal(soon.length, 1); assert.equal(soon[0].disabled, true, 'the Soon tile cannot be pressed');
   assert.ok(texts(soon[0]).includes('KakaoTalk') && texts(soon[0]).includes('Soon'), 'unsupported networks show as a dimmed Soon tile');
+  await buttons.find(x => /c-add/.test(x.className)).onclick();
+  buttons = nodes(root).filter(x => x.tag === 'button');
+  assert.equal(buttons[0].textContent, 'Show QR code', 'QR remains primary after explicitly selecting the network');
   const started = buttons[0].onclick(); await tick(); await tick(); await tick();
   assert.ok(nodes(root).some(x => x.tag === 'canvas'), 'QR rendered');
   assert.ok(texts(root).some(t => /Linked devices/.test(t)), 'phone scan steps shown');
@@ -55,6 +58,7 @@ const tick = () => new Promise(r => setTimeout(r, 0));
     return {};
   };
   const privateUI = window.MessengerConnectors(privateRoot,privateApi); await privateUI.show();
+  await nodes(privateRoot).find(x => /c-add/.test(x.className) && x.tag === 'button').onclick();
   await nodes(privateRoot).find(x => x.tag === 'button').onclick();
   const inputs = nodes(privateRoot).filter(x => x.tag === 'input'); assert.equal(inputs.length,3);
   assert.deepEqual(inputs.map(x => x.type), ['email','password','password']);

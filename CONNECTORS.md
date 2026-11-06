@@ -11,7 +11,7 @@ HTTP liveness is a separate claim, recorded in `evidence/five-network-real-http.
 | Telegram | Existing pinned mautrix/telegram service | QR or phone; requires operator-supplied Telegram API ID/hash before running. |
 | WhatsApp | mautrix/whatsapp v0.2610.0 | Linked-device QR or phone pairing. |
 | LINE | beeper/line `72c7a51a44f344966b916bd2f42a734381061186` (MIT) | QR (`network.qr_login: true`) or email/password + phone confirmation. |
-| Instagram DMs | mautrix/meta Instagram binary v0.2610.0 | `android` native login or `instagram-password` web password flow; upstream MFA/challenge steps. |
+| Instagram DMs | mautrix/meta Instagram binary v0.2610.0 | Recommended `instagram` browser cookies; `android` native or `instagram-password` web password alternative, resumable codes/approval/checkpoints where supported. |
 
 Signal remains available as an additional opt-in bridge. KakaoTalk remains
 unsupported; this does **not** imply LINE is unavailable. Previous conclusions
@@ -52,11 +52,19 @@ supports private Synapse. `bbctl` is Beeper-server-only and is **not used** here
   browser challenges can still block linking. This vanilla web UI deliberately
   rejects `cookies`, `client_http` and `webauthn` steps rather than execute
   upstream JavaScript, scrape cookies, build a generic proxy or bypass policies.
-- Instagram provides turnkey username/password flows; no cookie extraction
-  instructions are needed. Provider checkpoints, CAPTCHA, suspended accounts,
-  SSO/device challenges or rate limits may require action in the official app
-  and a retry, or an upstream challenge-capable owner client. Challenge-complete
-  login is **not** certified by unauthenticated bridge HTTP tests.
+- Instagram recommends the bridge's `instagram` browser-cookie flow: sign in
+  and complete verification on instagram.com on a computer, then copy an inbox
+  Network request as cURL into the owner-only form. Header Cookie and cURL `-b`
+  shapes are supported; only bridge-requested fields are submitted. Never paste
+  the request into chat. `android` and `instagram-password` remain alternatives.
+  Code/selection/password steps continue in the same pending login; app approval
+  waits for the owner's Continue; browser checkpoint cookies resume that login.
+  Unsafe client-HTTP, passkey and special CAPTCHA extraction steps deliberately
+  offer a new browser-cookie sign-in, not arbitrary JavaScript/proxy execution.
+  Unknown errors have bounded owner-only redaction, including previous-step
+  credential hashes held only in memory until cancellation/completion/expiry.
+  Challenge-complete login remains **unverified** without owner pairing. See
+  `docs/instagram-signin-contract.md` for exact pinned flow and error evidence.
 - Enter email/password/OTP only in the authenticated private app UI; text fields
   are masked and cleared after submission. Never send secrets in chat. Selection
   fields render only upstream-provided choices as escaped text. No submitted

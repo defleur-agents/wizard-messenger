@@ -77,6 +77,32 @@ class ConnectorTests(unittest.TestCase):
         with self.assertRaises(EngineError): read_only.dispatch('POST', ['whatsapp', 'enable'], {})
         self.assertFalse((self.root / 'whatsapp' / 'configured').exists())
 
+    def test_line_enable_validates_private_prerequisites_before_waking(self):
+        setup_connectors(self.root)
+        controller = Connectors(self.root / 'unified', reader=self.reader, writer=Mock())
+        config_path = self.root / 'unified' / 'connectors.json'
+        secret_path = self.root / 'unified' / 'connector-secrets.json'
+        before = config_path.read_bytes()
+        original = secret_path.read_bytes()
+        # Inject invalid synthetic configuration in memory; never rewrite credentials.
+        read_text = Path.read_text
+        for invalid in (None, '', 'too-short', 123):
+            fixture = json.dumps({'line': {'provisioning': invalid}})
+            def fixture_read(path, *args, **kwargs):
+                return fixture if path == secret_path else read_text(path, *args, **kwargs)
+            with patch.object(Path, 'read_text', fixture_read), self.subTest(invalid=invalid), self.assertRaises(EngineError) as error:
+                controller.dispatch('POST', ['line', 'enable'], {})
+            self.assertEqual(error.exception.code, 'connector_not_configured')
+            self.assertEqual(config_path.read_bytes(), before)
+            self.assertFalse((self.root / 'line' / 'configured').exists())
+        self.assertEqual(controller.dispatch('POST', ['line', 'enable'], {}), {'enabled': True, 'network': 'line'})
+        self.assertTrue((self.root / 'line' / 'configured').exists())
+        self.assertFalse((self.root / 'signal' / 'configured').exists())
+        self.assertEqual(secret_path.read_bytes(), original)
+        self.reader.assert_not_called()
+        self.assertIsNotNone(controller.writer)
+        controller.writer.assert_not_called()  # enable cannot perform account login or send
+
     def test_cookie_step_is_sanitized_for_paste_sign_in(self):
         from connectors import cookie_step
         out = cookie_step({'url': 'https://x.com/i/flow/login', 'extract_js': 'steal()', 'wait_for_url_pattern': '.*',
@@ -270,6 +296,12 @@ class ConnectorTests(unittest.TestCase):
             if name == 'line':
                 self.assertEqual(len(evidence['source_commit']), 40)
                 self.assertEqual(evidence['license'], 'MIT')
+            elif evidence.get('custom_build'):
+                # Locally built bridge: pinned local image ID plus the upstream registry digest it was built from.
+                self.assertRegex(evidence['image'], r'^sha256:[0-9a-f]{64}$')
+                self.assertIn('@sha256:', evidence['upstream_image'])
+                self.assertEqual({m['platform']['architecture'] for m in evidence['upstream_manifest']['manifests']}, {'amd64', 'arm64'})
+                self.assertEqual(len(evidence['built_from_source_revision']), 40)
             else:
                 self.assertIn('@sha256:', evidence['image'])
                 self.assertEqual({m['platform']['architecture'] for m in evidence['manifest']['manifests']}, {'amd64', 'arm64'})

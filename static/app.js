@@ -147,7 +147,7 @@
   }
   if (toGateway()) return;
   if (!window.WizardApp) throw new Error('Messenger requires the shared WizardApp client');
-  window.WizardApp.ready({name: 'messenger', version: '0.2.0-unified.16.23'});
+  window.WizardApp.ready({name: 'messenger', version: '0.2.0-unified.16.27'});
 
   const $ = id => document.getElementById(id);
   const state = {
@@ -626,7 +626,7 @@
     const list = m.deleted ? [] : m.reactions || [];
     if (!list.length) { if (strip) { strip.remove(); node.reactionStrip = null; } return; }
     if (!strip) { strip = node.reactionStrip = element('div', 'u-reactions'); node.children[0].after(strip); }
-    strip.replaceChildren(...list.map(r => { const b = button(r.key + (r.count > 1 ? ' ' + r.count : ''), 'u-react' + (r.mine ? ' mine' : ''), () => reactTo(group, m, r.key)); b.setAttribute('aria-label', (r.mine ? 'Remove your ' : 'React ') + r.key); return b; }));
+    strip.replaceChildren(...list.map(r => window.MessengerUnified.reactionChip(r,list,{pid:null,toggle:() => reactTo(group,m,r.key)})));
   }
   // Long-press, right-click or tap a bubble: every action this chat supports, in one menu.
   function messageMenu(group, node, opts = {}) {

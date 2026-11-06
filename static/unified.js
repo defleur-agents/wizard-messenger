@@ -60,7 +60,58 @@
       };
     } catch (_) { box.textContent = 'Notification settings unavailable.'; }
   }
-  if (typeof module !== 'undefined') module.exports = {backState, fetchOlder, notificationSettings};
+  function mentionQuery(text, caret = text.length) {
+    const match = /(?:^|[\s(])@([^@\n]{0,80})$/u.exec(text.slice(0, caret));
+    return match ? {start: caret - match[1].length - 1, end: caret, query: match[1].toLocaleLowerCase()} : null;
+  }
+  function parseMentions(text, members) {
+    const spans = [], occupied = new Set();
+    const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const member of [...members].sort((a,b) => b.label.length - a.label.length)) {
+      const re = new RegExp('(?<![\\p{L}\\p{N}_@])' + escape('@' + member.label) + '(?![\\p{L}\\p{N}_])', 'gu');
+      for (const match of text.matchAll(re)) {
+        const start = match.index, end = start + match[0].length;
+        if (Array.from({length:end-start}, (_,i) => start+i).some(i => occupied.has(i))) continue;
+        for (let i=start;i<end;i++) occupied.add(i);
+        spans.push({id:member.id, name:member.name, start, end});
+      }
+    }
+    return spans.sort((a,b) => a.start-b.start);
+  }
+  function insertMention(text, query, member) {
+    const token = '@' + member.label + ' ';
+    return {text:text.slice(0, query.start) + token + text.slice(query.end), caret:query.start + token.length};
+  }
+  function mentionKey(key, index, count) {
+    if (!count) return {index, handled:false};
+    if (key === 'ArrowDown' || key === 'ArrowUp') return {index:(index + (key === 'ArrowDown' ? 1 : -1) + count) % count, handled:true};
+    return {index, handled:['Enter','Tab','Escape'].includes(key), select:key === 'Enter' || key === 'Tab', close:key === 'Escape'};
+  }
+  function reactorGroups(reactions) {
+    return reactions.map(r => ({...r, reactors:[...new Map((r.reactors || []).map(u => [u.id,u])).values()],
+      missing:Math.max(0,r.count-new Set((r.reactors || []).map(u => u.id)).size)}));
+  }
+  function composerMembers(person, identityId, messages) {
+    const identity = (person.identities || []).find(i => i.id === identityId);
+    if (!identity || identity.kind !== 'group') return [];
+    const members = (person.members || []).filter(m => m.identity_id === identityId);
+    if (members.length) return members;
+    // Only names already visible in this group's open timeline, never inferred
+    // addresses. Missing/stale membership cannot authorize a native mention.
+    const names = [...new Set(messages.filter(m => m.identity_id === identityId && !m.outgoing && !m.deleted)
+      .map(m => m.sender).filter(n => typeof n === 'string' && n.trim() && !/^@[^\s]+:/.test(n)))];
+    return names.map(name => ({id:'visible:' + name, name, label:name, identity_id:identityId, native:false}));
+  }
+  function floatingBox(anchor, size, bounds, gap = 8) {
+    const left = bounds.left + gap, top = bounds.top + gap;
+    const right = bounds.right - gap, bottom = bounds.bottom - gap;
+    const width = Math.min(size.width, Math.max(0, right - left));
+    const height = Math.min(size.height, Math.max(0, bottom - top));
+    const above = anchor.top - gap - height, below = anchor.bottom + gap;
+    return {left:Math.max(left, Math.min(anchor.left, right - width)),
+      top:Math.max(top, Math.min(above >= top ? above : below, bottom - height)), width, height};
+  }
+  if (typeof module !== 'undefined') module.exports = {backState, fetchOlder, notificationSettings, mentionQuery, parseMentions, insertMention, mentionKey, reactorGroups, composerMembers, floatingBox};
   if (typeof document === 'undefined') return;
   const $ = id => document.getElementById(id);
   const s = {tab: 'people', person: null, overlay: null, search: null, low: false, seg: (() => { try { const v = sessionStorage.getItem('messenger-inbox-seg') || (sessionStorage.getItem('messenger-inbox-low') === '1' ? 'low' : 'all'); return ['all', 'unread', 'medium', 'low'].includes(v) ? v : 'all'; } catch { return 'all'; } })(), ready: false, epoch: 0, busy: false, drafts: {}, people: [], login: null};
@@ -90,6 +141,7 @@
     belloff: ['M6 9a6 6 0 0 1 9.4-4.9', 'M18 9c0 6 2.5 7.5 2.5 7.5H8', 'M10 20a2 2 0 0 0 4 0', 'M3 3l18 18'],
     lowpri: ['M3 4h18v4H3z', 'M5 8v11h14V8', 'M10 12h4'], unread: ['M21 12a9 9 0 1 1-6-8.5', 'M19 7a2 2 0 1 0 0-.01'], inbox: ['M3 13h5l2 3h4l2-3h5', 'M5.5 5h13L21 13v6H3v-6z'],
     smile: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M8.5 14.5s1.3 2 3.5 2 3.5-2 3.5-2', 'M9 9.5v.01', 'M15 9.5v.01'],
+    tag: ['M3 12V4h8l10 10-8 8z', 'M7.5 8.5v.01'],
     qr: ['M4 4h6v6H4z', 'M14 4h6v6h-6z', 'M4 14h6v6H4z', 'M14 14h2v2h-2z', 'M18 14h2', 'M14 18v2', 'M18 18h2v2h-2z'],
   };
   function icon(name) {
@@ -125,11 +177,34 @@
     for (const e of entries) if (e.isIntersecting) { avatarSeen.unobserve(e.target); avatarQueue.push(e.target); }
     pumpAvatars();
   }, {rootMargin: '300px 0px'}) : null;
-  function withPicture(el, url) {
-    if (!url) return el;
-    const img = document.createElement('img'); img.className = 'u-av-img'; img.alt = ''; img.decoding = 'async'; img.dataset.src = url;
-    img.onerror = () => { if (img.dataset.retried) return img.remove(); img.dataset.retried = '1'; setTimeout(() => { if (img.isConnected) { avatarQueue.push(img); pumpAvatars(); } }, 2500 + Math.random() * 2000); };
-    img.onload = () => el.classList.add('has-img'); el.append(img);
+  // A refresh replaces rows, not their decoded pictures. Scope the slot to its
+  // surface so the same person can appear in the list and header simultaneously.
+  // Keep this memory-only and bounded; never persist profile pictures in storage.
+  const avatarPictures = new Map(), AVATAR_CACHE_LIMIT = 512;
+  function withPicture(el, url, slot) {
+    if (!url) { if (slot) avatarPictures.delete(slot); return el; }
+    const cached = slot && avatarPictures.get(slot);
+    if (cached?.url === url) {
+      avatarPictures.delete(slot); avatarPictures.set(slot, cached);
+      el.append(cached.img);
+      if (!cached.img.hidden && cached.img.complete && cached.img.naturalWidth) el.classList.add('has-img');
+      return el;
+    }
+    const img = document.createElement('img'); img.className = 'u-av-img'; img.alt = ''; img.decoding = 'async'; img.dataset.src = url; img.hidden = true;
+    img.onerror = () => {
+      img.hidden = true; img.parentElement?.classList.remove('has-img');
+      if (img.dataset.retried) return;
+      img.dataset.retried = '1'; setTimeout(() => { if (img.isConnected) { avatarQueue.push(img); pumpAvatars(); } }, 2500 + Math.random() * 2000);
+    };
+    img.onload = () => { img.hidden = false; img.parentElement?.classList.add('has-img'); }; el.append(img);
+    if (slot) {
+      avatarPictures.delete(slot); avatarPictures.set(slot, {url, img});
+      // Do not evict a picture which is currently on screen.
+      for (const [key, entry] of avatarPictures) {
+        if (avatarPictures.size <= AVATAR_CACHE_LIMIT) break;
+        if (!entry.img.isConnected && entry.img !== img) avatarPictures.delete(key);
+      }
+    }
     if (avatarSeen) avatarSeen.observe(img); else { img.loading = 'lazy'; img.src = url; }
     return el;
   }
@@ -297,9 +372,12 @@
     s.login = null; s.overlay = null; $('u-overlay')?.remove(); view.lifted?.classList.remove('lifted'); view.lifted = null; lastFocus?.focus(); hold(); syncBar();
   }
   function back() {
+    if (view.mentionClose?.()) return true;
     if (!s.overlay && view.picker?.isOpen) { view.picker.close(); return true; }
     if (!s.overlay && view.selection?.active) { view.selection.clear(); return true; }
+    if (s.overlay && connectorController?.back?.()) return true;
     if (s.overlay === 'Edit QR codes') { myCodes(); return true; }
+    if (s.overlay === 'Manage labels' && view.manageFrom) { const p = view.manageFrom; view.manageFrom = null; labelsSheet(p); return true; } // opened from a chat's Labels: Back returns to it
     if (s.overlay === 'Suggested merges') { accounts(); return true; } // nested: Back returns to the codes, not the list
     if (s.overlay === 'Advanced' || s.overlay === 'Agent drafts') { accounts(); return true; } // pages opened from Settings return to it
     if (!s.overlay && !s.person && detailOpen()) { closePane(); return true; } // New message beside the list
@@ -315,9 +393,10 @@
     closeOverlay(); lastFocus = document.activeElement; s.overlay = title;
     const layer = node('div', 'u-overlay'); layer.id = 'u-overlay';
     const panel = node('section', 'u-sheet'); panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-modal', 'true'); panel.setAttribute('aria-label', title); panel.tabIndex = -1;
-    const head = node('header'); head.append(node('h2', '', title), iconButton('close', 'Close', closeOverlay)); panel.append(node('span', 'grabber'), head);
+    const dismiss = () => { if (!connectorController?.back?.()) closeOverlay(); };
+    const head = node('header'); head.append(node('h2', '', title), iconButton('close', 'Close', dismiss)); panel.append(node('span', 'grabber'), head);
     layer.append(panel); $('messenger').append(layer);
-    layer.onclick = e => { if (e.target === layer) closeOverlay(); };
+    layer.onclick = e => { if (e.target === layer) dismiss(); };
     panel.onkeydown = e => {
       if (e.key !== 'Tab') return;
       const focusable = [...panel.querySelectorAll('button,input,select,textarea')].filter(x => !x.disabled);
@@ -409,7 +488,7 @@
       for (const p of all.filter(p => p.display_name.toLowerCase().includes(q)).slice(0, 8)) {
         const row = button('', () => openPerson(p.id), 'u-directory-row');
         const text = node('span', 'u-who-text'); text.append(node('strong', '', p.display_name), node('span', '', (p.group ? 'Group · ' : '') + networksOf(p).map(netLabel).join(' · ')));
-        row.append(netAvatar(p, 'small'), text); list.append(row);
+        row.append(netAvatar(p, 'small', 'new-message'), text); list.append(row);
       }
       if (!list.children.length) list.append(node('p', 'u-empty', 'No one matches'));
     };
@@ -467,20 +546,38 @@
   // Crossing the width line keeps the open chat: wide shows list + chat, narrow shows just that chat.
   function relayout() {
     const want = wideNow(); if (want === split.on) return;
+    const place = s.person && !s.native ? readingPlace() : null; // measured in the old layout, before it changes
     split.on = want; document.documentElement.toggleAttribute('data-split', want);
     const root = $('unified-inbox');
     if (!root || !s.ready || !document.documentElement.dataset.inboxTab || s.tab === 'messenger') { if (root && !want) { delete root.dataset.split; } return; }
     if (want) root.dataset.split = ''; else delete root.dataset.split;
     root.replaceChildren();
     if (s.native) { root.hidden = !want; if (want) { renderList(); } return; }
-    if (want) { renderList(); if (s.person) reopenThread(); }
-    else if (s.person) reopenThread(); else renderList();
+    if (want) { renderList(); if (s.person) reopenThread(place); }
+    else if (s.person) reopenThread(place); else renderList();
   }
   // Re-draw the open chat in its new place from memory (no refetch); the draft carries over through the server draft.
-  function reopenThread() {
+  // James, 6 Nov 2026: a group must open where he stopped reading, never jump to the bottom on its own. Crossing the
+  // width line (window resize, phone rotation) keeps the message at the top of the window where it was.
+  function reopenThread(place = readingPlace()) {
     const id = s.person, t = store.threads[id];
     if (!t) { openPerson(id); return; }
-    els.clear(); buildThread(id, t.person); paintThread(true);
+    if (view.id !== id) place = null;
+    els.clear(); buildThread(id, t.person); paintThread(!place, !!place);
+    if (place) putPlace(place);
+  }
+  // The first message showing at the top of the open chat, or null when the chat is at the bottom (or not on screen).
+  function readingPlace() {
+    const sc = view.scroll; if (!sc?.isConnected || nearBottom()) return null;
+    const top = sc.getBoundingClientRect().top;
+    for (const el of sc.querySelectorAll('.u-row[data-id]')) { const r = el.getBoundingClientRect(); if (r.bottom > top) return {id: el.dataset.id, off: r.top - top}; }
+    return null;
+  }
+  function putPlace(place) {
+    const sc = view.scroll, el = sc?.querySelector('.u-row[data-id="' + CSS.escape(place.id) + '"]');
+    if (!el) { if (sc) sc.scrollTop = sc.scrollHeight; return; }
+    sc.scrollTop += el.getBoundingClientRect().top - sc.getBoundingClientRect().top - place.off;
+    view.bottom = nearBottom(); if (view.pill) view.pill.hidden = view.bottom;
   }
   function listBase(title) {
     const root = split.on ? panes().list : $('unified-inbox'); root.replaceChildren(); root.dataset.view = s.search != null ? 'search' : 'list';
@@ -507,7 +604,7 @@
     head.append(iconButton('back', 'Back', back, 'u-back')); // hidden in the desktop split: the list is right there
     const who = button('', onInfo || null, 'u-who'); who.disabled = !onInfo;
     const text = node('span', 'u-who-text'); text.append(node('strong', '', name)); if (subtitle) text.append(node('span', '', subtitle));
-    const face = node('span', 'u-av-wrap small'); face.append(withPicture(avatar(name, 'small'), picture));
+    const face = node('span', 'u-av-wrap small'); face.append(withPicture(avatar(name, 'small'), picture, 'thread-header'));
     if (network) { const b = netBadge(network, 'u-net'); b.setAttribute('aria-hidden', 'true'); face.append(b); }
     who.append(face, text); head.append(who);
     // 16.17: with a keyboard and no list beside the chat, ↑ / ↓ step to the previous / next chat (j / k sit on them)
@@ -532,8 +629,14 @@
     if (now - d < 6 * 864e5) return d.toLocaleDateString([], {weekday: 'long'});
     return d.toLocaleDateString([], {weekday: 'short', month: 'short', day: 'numeric', ...(d.getFullYear() !== now.getFullYear() ? {year: 'numeric'} : {})});
   }
+  function recentSharePeople(rows) {
+    // Directory entries may omit activity; the already-loaded chat lists know the latest timestamp.
+    const activity = new Map([...(store.lists.people || []), ...(store.lists.groups || [])].map(p => [p.id, p.last?.timestamp || 0]));
+    const stamp = p => Math.max(p.last?.timestamp || 0, activity.get(p.id) || 0);
+    return [...rows].sort((a, b) => stamp(b) - stamp(a) || a.display_name.localeCompare(b.display_name));
+  }
   async function newChat(shareText) {
-    // The full A-Z contact list lives only here. From Wizard's share sheet it picks who gets the shared text.
+    // New chat keeps its A-Z directory; Send to… offers recent chats first.
     const title = shareText ? 'Send to…' : 'New chat';
     const sheet = overlay(title); sheet.classList.add('tall');
     // Sharing: settles true once the owner picks someone (text placed) or closes the picker (declined).
@@ -543,15 +646,16 @@
     const list = node('div', 'u-directory'); sheet.append(search, list);
     try {
       const d = await call('directory'); if (s.overlay !== title) return settled;
-      const all = [...d.people, ...d.groups.map(g => ({...g, group: true}))].sort((a, b) => a.display_name.localeCompare(b.display_name));
+      const directory = [...d.people, ...d.groups.map(g => ({...g, group: true}))];
+      const all = shareText ? recentSharePeople(directory) : directory.sort((a, b) => a.display_name.localeCompare(b.display_name));
       const draw = () => {
         const q = search.value.trim().toLowerCase(); list.replaceChildren(); let letter = '';
         for (const p of all.filter(p => !q || p.display_name.toLowerCase().includes(q)).slice(0, 200)) {
           const first = ([...p.display_name.trim()][0] || '#').toUpperCase();
-          if (!q && first !== letter) { letter = first; list.append(node('p', 'u-letter', /\p{L}/u.test(first) ? first : '#')); }
+          if (!shareText && !q && first !== letter) { letter = first; list.append(node('p', 'u-letter', /\p{L}/u.test(first) ? first : '#')); }
           const row = button('', () => { if (shareText) placeShared(p.id, shareText); closeOverlay(); openPerson(p.id); }, 'u-directory-row');
           const text = node('span', 'u-who-text'); text.append(node('strong', '', p.display_name), node('span', '', (p.group ? 'Group · ' : '') + networksOf(p).map(netLabel).join(' · ')));
-          row.append(netAvatar(p, 'small'), text); list.append(row);
+          row.append(netAvatar(p, 'small', 'directory'), text); list.append(row);
         }
         if (!list.children.length) list.append(node('p', 'u-empty', 'No one matches'));
       };
@@ -676,8 +780,9 @@
     t.messages.sort((a, b) => (a.pending ? 1 : 0) - (b.pending ? 1 : 0) || a.timestamp - b.timestamp || ((a.timeline_order || 0) - (b.timeline_order || 0)) || (a.id < b.id ? -1 : 1));
   }
   function apply(r) {
-    if (r.reset) { for (const k in unreadById) delete unreadById[k]; store.seq = r.seq; store.lists = {people: null, groups: null}; store.threads = Object.create(null); if (s.person) openPerson(s.person); else renderList(); return; }
+    if (r.reset) { for (const k in unreadById) delete unreadById[k]; store.seq = r.seq; store.lists = {people: null, groups: null}; store.threads = Object.create(null); if (s.person) { openPerson(s.person); if (split.on) renderList(); } else renderList(); return; } // desktop: the list beside the chat reloads too
     store.seq = Math.max(store.seq, r.seq);
+    if (typeof r.labels_rev === 'number' && labelCat.ok && r.labels_rev !== labelCat.rev) loadLabelCatalog(true);
     for (const id of r.removed || []) {
       for (const k of ['people', 'groups']) if (store.lists[k]) store.lists[k] = store.lists[k].filter(p => p.id !== id);
       delete unreadById[id]; delete mutedById[id]; delete lowById[id]; delete mediumById[id]; delete kindById[id];
@@ -835,11 +940,11 @@
     const box = $('u-filters'); if (!box) return all;
     const connected = (accountsSeen || []).filter(p => p.state === 'connected' || p.state === 'degraded').map(p => p.network);
     const nets = [...new Set([...all.flatMap(networksOf), ...connected])].filter(n => n !== 'private' && n !== 'messenger').sort((a, b) => netLabel(a).localeCompare(netLabel(b))).concat('private');
-    const labels = [...new Set(all.flatMap(p => p.labels || []))].sort(), merged = all.some(p => networksOf(p).length > 1);
+    const labels = labelNames(all), merged = all.some(p => networksOf(p).length > 1);
     const f = Object.assign(filterState, {nets, labels, merged});
     if (f.net && !nets.includes(f.net)) setNarrowQuiet('net', '');
     if (!TYPES.some(t => t[0] === f.type) || (f.type === 'merged' && !merged)) setNarrowQuiet('type', 'all');
-    if (f.label && !labels.includes(f.label)) setNarrowQuiet('label', '');
+    if (f.label && labelCat.ok && !labels.includes(f.label)) setNarrowQuiet('label', '');
     // Row 1: exactly one segment. Counts are quiet text: unread chats that would ping (never muted, Medium or Low).
     const inbox = all.filter(p => !isLow(p) && narrowed(p));
     const counts = {unread: inbox.filter(p => p.unread > 0 && !p.muted && !isMedium(p)).length, medium: inbox.filter(p => isMedium(p) && p.unread > 0 && !p.muted).length};
@@ -892,7 +997,7 @@
     const netItems = folded ? [{head: 'Networks'}, radio('All networks', !f.net, pick('net', '')),
       ...f.nets.map(n => radio(n === 'private' ? 'Wizard' : netLabel(n), f.net === n, pick('net', n)))] : [];
     const typeItems = [{head: 'Type'}, ...TYPES.filter(t => t[0] !== 'merged' || f.merged).map(([v, t]) => radio(t, f.type === v, pick('type', v)))];
-    const labelItems = f.labels.length ? [{head: 'Labels'}, radio('Any label', !f.label, pick('label', '')), ...f.labels.map(l => radio(l, f.label === l, pick('label', l)))] : [];
+    const labelItems = [{head: 'Labels'}, ...(f.labels.length ? [radio('Any label', !f.label, pick('label', '')), ...f.labels.map(l => radio(l, f.label === l, pick('label', l)))] : []), {label: f.labels.length ? 'Manage labels' : 'Make a label', icon: 'tag', run: () => manageLabels()}];
     anchor.setAttribute('aria-expanded', 'true');
     actionMenu(anchor, netsFirst ? 'Networks' : 'Filters', netsFirst ? [...netItems, ...typeItems, ...labelItems] : [...typeItems, ...labelItems, ...netItems], {cls: 'u-filter-menu', flip: true, side: 'right', onClose: () => anchor.setAttribute('aria-expanded', 'false')});
   }
@@ -907,8 +1012,8 @@
     if (f.startsWith('label:')) return (p.labels || []).includes(f.slice(6));
     return true;
   }
-  function netAvatar(p, size = '') {
-    const wrap = node('span', 'u-av-wrap' + (size ? ' ' + size : '')); wrap.append(withPicture(avatar(p.display_name, size), pictureURL(p.id, p.avatar)));
+  function netAvatar(p, size = '', surface = 'list') {
+    const wrap = node('span', 'u-av-wrap' + (size ? ' ' + size : '')); wrap.append(withPicture(avatar(p.display_name, size), pictureURL(p.id, p.avatar), surface + ':' + p.id));
     // Merged chats show every network's badge, overlapped (up to three).
     const nets = networksOf(p).slice(0, 3);
     nets.forEach((n, i) => { const b = netBadge(n, 'u-net' + (i ? ' u-net-' + i : '')); wrap.append(b); });
@@ -957,7 +1062,25 @@
       const more = button('More results', () => { more.disabled = true; loadSearch(searchGeneration, searchView.cursor); }); list.append(more);
     }
   }
+  // A feed/backfill repaint must not detach a chat button between pointerdown
+  // and click: browsers then target the list instead and the chat never opens.
+  // Keep the pressed row in place until its click has dispatched; reconcile next.
+  let listPress = null, listPaintPending = false, listPressExpiry = null;
+  const releaseListPress = () => {
+    listPress = null; clearTimeout(listPressExpiry);
+    if (listPaintPending) { listPaintPending = false; drawList(); }
+  };
+  document.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || !e.target.closest?.('.u-person')) return;
+    listPress = e.pointerId; clearTimeout(listPressExpiry);
+    listPressExpiry = setTimeout(releaseListPress, 5000);
+  }, true);
+  for (const type of ['pointerup', 'pointercancel']) document.addEventListener(type, e => {
+    if (e.pointerId === listPress) setTimeout(releaseListPress, 0);
+  }, true);
+  window.addEventListener('blur', releaseListPress);
   function drawList() {
+    if (listPress !== null) { listPaintPending = true; return; }
     if (contacts.ok) applyContacts();
     if (s.search != null) {
       if (searchView.query !== s.search) scheduleSearch(); else drawSearch();
@@ -1016,6 +1139,7 @@
         if (who) line.append(node('span', 'u-snippet-who', who + ': '));
         line.append(snippet(p.last) || ''); bottom.append(line);
       }
+      if (p.unread_mentions) bottom.append(node('span', 'u-badge u-mention-badge', '@'));
       if (p.unread) bottom.append(node('span', 'u-badge' + (p.muted || isLow(p) || isMedium(p) ? ' muted' : ''), p.unread > 99 ? '99+' : String(p.unread)));
       else if (p.last?.outgoing) bottom.append(node('span', 'u-ticks' + (p.peer_read_ts >= p.last.timestamp ? ' read' : ''), p.peer_read_ts >= p.last.timestamp ? '✓✓' : '✓'));
       info.append(top, bottom);
@@ -1033,6 +1157,11 @@
       if (s.seg === 'low' && !narrow) empty.append(node('p', '', 'No low priority chats here'), hint('Low chats stay out of All and never notify you. ' + how + ', then Priority → Low.'));
       else if (s.seg === 'medium' && !narrow) empty.append(node('p', '', 'No medium priority chats here'), hint('Medium chats stay in All but never notify you. ' + how + ', then Priority → Medium.'));
       else if (s.seg === 'unread' && !narrow && !q) empty.append(node('p', '', 'No unread chats'), hint('You are all caught up.'));
+      else if (!q && filterState.label) {
+        const name = filterState.label;
+        empty.append(node('p', '', 'No chats in ' + name + ' yet.'), hint('To add one: ' + how.toLowerCase() + ' and choose Labels, or open a chat, tap its name, and tick ' + name + ' under Labels. Chats from every network can go in.'));
+        empty.append(button('Manage labels', () => manageLabels(), 'secondary u-empty-clear'));
+      }
       else if (q || narrow || s.seg !== 'all') {
         empty.append(node('p', '', q ? 'No matches' : 'Nothing here with this filter'));
         if (narrow) empty.append(button('Clear filters', () => { setNarrowQuiet('net', ''); setNarrowQuiet('type', 'all'); setNarrowQuiet('label', ''); drawList(); }, 'u-chip u-empty-clear'));
@@ -1152,6 +1281,7 @@
     actionMenu(card, p.display_name, [
       muteAction(p.muted, () => p.native ? p.setMuted() : setMuted(p, !p.muted)),
       priorityAction(p, card),
+      ...(p.native ? [] : [{label: 'Labels', icon: 'tag', run: () => labelsSheet(p)}]),
       ...(p.native || listKey(p) === 'groups' ? [] : [{label: 'Merge with…', icon: 'merge', run: () => mergePicker(p)}]),
       ...(contacts.ok && !p.native && listKey(p) !== 'groups' && !p.contact && p.accounts?.length ? [{label: 'Add to Contacts', icon: 'compose', run: () => action(async () => { const r = await saveToContacts(p); if (r) { toast('Added to Contacts'); drawList(); } })}] : []),
       ...(p.native || !p.last ? [] : [p.unread ? {label: 'Mark as read', icon: 'check', run: () => setUnread(p, false)} : {label: 'Mark as unread', icon: 'unread', run: () => setUnread(p, true)}]),
@@ -1332,15 +1462,21 @@
     if (split.on && s.native) native?.close?.(); // the native Wizard thread on the right gives way
     const fromList = !split.on && !s.person ? $('unified-inbox')?.querySelector(':scope > .u-list') : null;
     if (fromList) split.listTop = fromList.scrollTop;
+    // Where to start reading: taken before anything can mark the chat read, kept until the owner leaves the chat.
+    // Reopening the chat that is already on screen (wake, reset, rename) keeps the divider it had.
+    const again = s.person === id && view.id === id && view.unread?.settled ? view.unread : null;
+    // Still reading above the bottom (wake, reset, rename): park on the divider again instead of the newest.
+    const reading = !!again && !!view.scroll?.isConnected && !nearBottom();
     s.person = id; const epoch = ++s.epoch, gen = ++split.threadGen; inChat(true); els.clear(); view.reply = view.edit = view.attach = null;
     if (split.on) { if (!hasListPane()) renderList(); markSelected(); }
     const cached = store.threads[id];
+    view.unread = again ? (reading ? {...again, settled: false, parked: false} : {...again, parked: true}) : unreadSnapshot(id, hint, cached);
     buildThread(id, cached?.person || hint || {display_name: '', identities: []});
     if (fromList) slideIn();
     savedOrder = [id, ...savedOrder.filter(x => x !== id)];
-    if (cached) { paintThread(true); if (!cached.stale) { markRead(); persist(); return; } }
+    if (cached) { paintThread(true); if (!cached.stale) { await landUnread(id); persist(); return; } }
     else view.scroll.append(skeleton(6, 'bubbles'));
-    if (!s.ready) return;
+    if (!s.ready) { if (cached) landUnread(id); return; }
     try {
       const r = await call('people/' + id + '?limit=60');
       store.threads[id] = {person: r.person, messages: r.messages.map(m => pendingReactions(id, m)), has_more: r.has_more, next_cursor: r.next_cursor, warning: r.history_warning};
@@ -1349,8 +1485,53 @@
       persist();
       if (split.on ? gen !== split.threadGen || s.person !== id : s.epoch !== epoch) return;
       if (cached) { paintHead(); paintThread(); } else { buildThread(id, r.person); paintThread(true); }
-      markRead();
-    } catch (e) { error(e); }
+      await landUnread(id);
+    } catch (e) { error(e); if (view.id === id && store.threads[id]) landUnread(id); }
+  }
+  // The list row's unread count is the server's own count (incoming, not deleted, newer than each account's read
+  // mark), so it also places the divider right in merged chats. Without a row, fall back on last_read_ts.
+  function unreadSnapshot(id, hint, cached) {
+    const row = store.lists[kindById[id] || 'people']?.find(x => x.id === id) || ['people', 'groups'].map(k => store.lists[k]?.find(x => x.id === id)).find(Boolean);
+    const count = [row?.unread, hint?.unread, unreadById[id]].find(v => typeof v === 'number');
+    const ts = row?.last_read_ts ?? hint?.last_read_ts ?? cached?.person?.last_read_ts;
+    return {count, ts, settled: false, parked: false, from: null, n: 0};
+  }
+  // First unread message: null = nothing unread, undefined = it is older than what is loaded.
+  function firstUnread(t, u) {
+    const incoming = t.messages.filter(m => !m.outgoing && !m.pending && !m.deleted && m.id);
+    const more = t.has_more && t.next_cursor;
+    if (typeof u.count === 'number') {
+      if (u.count <= 0) return null;
+      if (incoming.length >= u.count) return {id: incoming[incoming.length - u.count].id, n: u.count};
+      return more ? undefined : incoming.length ? {id: incoming[0].id, n: u.count} : null;
+    }
+    const ts = u.ts ?? t.person.last_read_ts;
+    if (typeof ts !== 'number') return null;
+    const fresh = incoming.filter(m => m.timestamp > ts);
+    if (!fresh.length) return null;
+    if (fresh.length === incoming.length && more) return undefined;
+    return {id: fresh[0].id, n: fresh.length};
+  }
+  const UNREAD_PAGES = 5; // at most 300 older messages fetched to reach the first unread
+  async function landUnread(id) {
+    const u = view.unread, t = store.threads[id];
+    if (!u || u.settled || view.id !== id || !t) return;
+    let first = firstUnread(t, u);
+    for (let i = 0; first === undefined && i < UNREAD_PAGES; i++) {
+      try { if (!await fetchOlder(t, id, call)) break; } catch { break; }
+      if (view.id !== id || view.unread !== u || store.threads[id] !== t) return;
+      first = firstUnread(t, u);
+    }
+    if (first === undefined) { const top = t.messages.find(m => !m.outgoing && !m.pending && !m.deleted && m.id); first = top ? {id: top.id, n: u.count} : null; }
+    Object.assign(u, {settled: true, from: first?.id || null, n: first?.n || 0});
+    paintThread(true);
+  }
+  function unreadDivider() {
+    const u = view.unread;
+    if (!view.divider) { view.divider = node('p', 'u-unread-divider'); view.divider.setAttribute('role', 'separator'); view.divider.append(node('span')); }
+    view.divider.firstChild.textContent = u.n > 0 ? u.n + (u.n === 1 ? ' new message' : ' new messages') : 'New messages';
+    view.divider.setAttribute('aria-label', view.divider.firstChild.textContent);
+    return view.divider;
   }
   function reviewedOf(p) { return !!p.language && p.language !== 'en'; }
   function subtitle(p) {
@@ -1372,6 +1553,7 @@
       {label: 'Merge with…', icon: 'merge', run: () => mergePicker(cur)},
       muteAction(cur.muted, () => setMuted(cur, !cur.muted)),
       priorityAction(cur, anchor, 'right'),
+      ...(cur.native ? [] : [{label: 'Labels', icon: 'tag', run: () => labelsSheet(cur)}]),
     ], {side: 'right'}); };
     view.sub = root.querySelector('.u-who-text span') || node('span'); if (!view.sub.parentNode) root.querySelector('.u-who-text').append(view.sub);
     const t = store.threads[id];
@@ -1389,16 +1571,29 @@
     const posts = [];
     for (const m of messages) {
       const last = posts[posts.length - 1];
-      if (m.album && last?.album === m.album && last.sender === m.sender && last.identity_id === m.identity_id && last.network === m.network && last.outgoing === m.outgoing) {
+      if (m.album && m.msgtype === 'm.image' && last?.msgtype === 'm.image' && last?.album === m.album && last.sender === m.sender && last.identity_id === m.identity_id && last.network === m.network && last.outgoing === m.outgoing) {
         last.photos.push(m);
-        if (!last.original && m.original) last.original = m.original;
         last.deleted = last.photos.every(p => p.deleted);
-      } else posts.push(m.album ? {...m, photos: m.photos || [m]} : m);
+      } else posts.push(m.album && m.msgtype === 'm.image' ? {...m, photos: [m]} : m);
     }
     for (const post of posts) if (post.photos) {
+      // Explicit native ordinals, never event-ID or time-window guesses. Telegram
+      // retains its existing timeline order. Incomplete/delayed albums stay usable.
+      if (post.network === 'signal' && post.photos.every(p => Number.isInteger(p.media?.album_index))) {
+        post.photos.sort((a, b) => a.media.album_index - b.media.album_index);
+      }
+      const photos = post.photos;
+      Object.assign(post, photos[0], {photos});
+      post.deleted = photos.every(p => p.deleted);
+      // Keep every distinct caption, in tile order, rather than silently taking
+      // the first. Canonical per-part originals remain untouched for the viewer.
+      post.original = [...new Set(photos.filter(p => !p.deleted).map(p => p.original).filter(Boolean))].join('\n\n');
+      if (photos.filter(p => !p.deleted && p.original).length > 1) post.translated = null;
+      post.links = photos.filter(p => !p.deleted).flatMap(p => p.links || []);
       const reactions = new Map();
       for (const photo of post.photos) for (const reaction of photo.reactions || []) {
         const current = reactions.get(reaction.key) || {key: reaction.key, count: 0, mine: false};
+        if (reaction.reactors) current.reactors = [...new Map([...(current.reactors || []),...reaction.reactors].map(u => [u.id,u])).values()];
         current.count += reaction.count; current.mine ||= reaction.mine; reactions.set(reaction.key, current);
       }
       post.reactions = [...reactions.values()];
@@ -1406,24 +1601,28 @@
     return posts;
   }
   function nearBottom() { const sc = view.scroll; return sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80; }
-  function paintThread(toBottom = false) {
+  // hold: a rebuilt chat that will be put back where the owner was reading (never followed to the bottom, never read).
+  function paintThread(toBottom = false, hold = false) {
     const t = store.threads[view.id], scroll = view.scroll; if (!t || !scroll) return;
-    const follow = toBottom || nearBottom(), p = t.person, auto = reviewedOf(p), multi = networksOf(p).length > 1, group = (p.identities || []).some(i => i.kind === 'group') || new Set(t.messages.filter(m => !m.outgoing && m.sender).map(m => m.sender)).size > 1;
+    const follow = !hold && (toBottom || nearBottom()), p = t.person, auto = reviewedOf(p), multi = networksOf(p).length > 1, group = (p.identities || []).some(i => i.kind === 'group') || new Set(t.messages.filter(m => !m.outgoing && m.sender).map(m => m.sender)).size > 1;
     const kids = [node('div', 'u-spacer')];
     if (t.has_more) kids.push(node('p', 'u-older', 'Loading earlier messages…'));
     let day = '';
     const side = m => (m.outgoing ? 'o' : 'i' + (m.sender || ''));
     const posts = albumPosts(t.messages);
+    const u = view.unread, from = u?.settled && u.from;
+    let divider = null;
     posts.forEach((m, i) => {
       const label = dayLabel(m.timestamp);
       if (label !== day) { day = label; kids.push(node('p', 'u-day', label)); }
+      if (from && !divider && (m.id === from || m.photos?.some(x => x.id === from))) kids.push(divider = unreadDivider());
       const prev = posts[i - 1], next = posts[i + 1];
       const jp = prev && dayLabel(prev.timestamp) === day && side(prev) === side(m) && m.timestamp - prev.timestamp < 3e5;
       const jn = next && dayLabel(next.timestamp) === day && side(next) === side(m) && next.timestamp - m.timestamp < 3e5;
       const pos = jp && jn ? 'mid' : jp ? 'last' : jn ? 'first' : 'single';
       const read = m.outgoing && p.peer_read_ts >= m.timestamp;
       const key = m.client_id || m.id;
-      const sig = JSON.stringify([group && !m.outgoing ? p.faces?.[nameOf(m.sender)] : 0, m.id, m.original, m.translated, m.transcript, m.translation_error, m.edited, m.deleted, m.reactions, m.pending, m.failed, pos, read, shown[m.id], m.reply?.text, m.links?.length, auto, multi, group, m.photos?.map(p => [p.id, p.deleted, p.media, p.local, p.pending])]);
+      const sig = JSON.stringify([group && !m.outgoing ? p.faces?.[nameOf(m.sender)] : 0, m.id, m.original, m.translated, m.transcript, m.translation_error, m.edited, m.deleted, m.mentions, m.mentioned, m.reactions, m.pending, m.failed, pos, read, shown[m.id], m.reply?.text, m.links?.length, auto, multi, group, m.photos?.map(p => [p.id, p.deleted, p.media, p.local, p.pending])]);
       let el = els.get(key);
       if (!el || el.dataset.sig !== sig) { el = bubble(m, pos, {auto, multi, group, read, faces: p.faces}); el.dataset.sig = sig; els.set(key, el); }
       kids.push(el);
@@ -1434,11 +1633,30 @@
     const before = scroll.scrollHeight - scroll.scrollTop;
     const same = kids.length === scroll.children.length && kids.every((k, i) => k === scroll.children[i] || (i === 0 && scroll.children[0].className === 'u-spacer') || (k.className === 'u-day' && scroll.children[i].className === 'u-day' && k.textContent === scroll.children[i].textContent) || (k.className === 'u-older' && scroll.children[i].className === 'u-older'));
     if (!same) scroll.replaceChildren(...kids);
-    if (follow) scroll.scrollTop = scroll.scrollHeight;
+    // First paint after the read position is known: park the divider near the top when the unread run is taller
+    // than the window (the sticky day chip sits above it), otherwise show the newest as always.
+    let park = false;
+    if (toBottom && u?.settled && !u.parked) {
+      u.parked = true;
+      if (divider) {
+        const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+        const top = divider.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop - rem * 3;
+        if (scroll.scrollHeight - top > scroll.clientHeight + 2) { scroll.scrollTop = Math.max(0, top); park = true; }
+      }
+    }
+    if (park) { view.bottom = nearBottom(); if (view.pill) view.pill.hidden = view.bottom; }
+    else if (follow) scroll.scrollTop = scroll.scrollHeight;
     else if (view.anchor) { scroll.scrollTop = scroll.scrollHeight - before; }
     view.anchor = false;
     view.selection?.paint();
-    if (follow) markRead();
+    const mentioned = t.messages.filter(m => m.mentioned && !m.outgoing && !m.deleted);
+    const head = scroll.parentElement.querySelector('.u-thread-head');
+    if (head && mentioned.length && !head.querySelector('.u-jump-mention')) {
+      let cursor = 0;
+      const jump = button('@',() => { const target = mentioned[cursor++ % mentioned.length]; els.get(target.client_id || target.id)?.scrollIntoView({block:'center',behavior:'smooth'}); },'u-jump-mention u-badge');
+      jump.setAttribute('aria-label','Jump to mentions of you'); head.append(jump);
+    }
+    if (follow || park) markRead();
   }
   async function older() {
     const t = store.threads[view.id]; if (!t || !t.has_more || view.loadingOlder) return;
@@ -1450,10 +1668,18 @@
   }
   function markRead() {
     const t = store.threads[view.id]; if (!t || document.hidden || !view.scroll || !nearBottom()) return;
+    if (view.unread && !view.unread.settled) return; // the divider's read position is not known yet
     const last = [...t.messages].reverse().find(m => !m.outgoing && !m.pending);
-    if (!last || last.timestamp <= (t.person.last_read_ts || 0) || view.reading === last.timestamp) return;
-    view.reading = last.timestamp; t.person.last_read_ts = last.timestamp;
-    const row = store.lists[listKey(t.person)]?.find(x => x.id === view.id); if (row) row.unread = 0;
+    const row = store.lists[listKey(t.person)]?.find(x => x.id === view.id);
+    // A merged chat can still count unread on one account below the newest read mark of another.
+    const counted = (row?.unread || unreadById[view.id] || 0) > 0;
+    // The thread's own person record has no read mark; the list row's is the server's.
+    const mark = Math.max(t.person.last_read_ts || 0, row?.last_read_ts || 0);
+    // Keyed by chat: two chats can share a newest timestamp (Telegram's are whole seconds), and the second must still read.
+    const reading = view.id + ' ' + last?.timestamp;
+    if (!last || (last.timestamp <= mark && !counted) || view.reading === reading) return;
+    view.reading = reading; t.person.last_read_ts = Math.max(mark, last.timestamp); if (row) row.last_read_ts = t.person.last_read_ts;
+    if (row) row.unread = 0;
     unreadById[view.id] = 0; syncBadge(); if (split.on && s.tab !== 'messenger') drawList();
     call('people/' + view.id + '/read', {timestamp: last.timestamp}).catch(() => {});
   }
@@ -1465,7 +1691,11 @@
   function contactName(net, acc) { try { return contacts.map.get(accKey(net, acc))?.name || ''; } catch { return ''; } }
   function mentionMarks(text, m) {
     const marks = []; let at = 0;
-    for (const x of m?.mentions || []) {
+    for (const x of (Array.isArray(m) ? m : m?.mentions) || []) {
+      if (Number.isInteger(x?.start) && Number.isInteger(x?.end) && x.start >= 0 && x.end > x.start && x.end <= text.length) {
+        marks.push({start:x.start, end:x.end, label:text.slice(x.start,x.end), id:x.id, me:!!x.me});
+        continue;
+      }
       if (!x?.text) continue;
       const i = text.indexOf(x.text, at); if (i < 0) continue;
       const saved = x.acc && !x.me && contactName(x.net, x.acc);
@@ -1504,7 +1734,8 @@
     for (const k of mentionMarks(text || '', m)) {
       if (k.start < at) continue;
       inline(p, text.slice(at, k.start), 0);
-      const chip = node('span', 'u-mention' + (k.me ? ' me' : ''), k.label); if (k.me) chip.title = 'Mentions you';
+      const chip = node(k.id ? 'a' : 'span', 'u-mention' + (k.me ? ' me' : ''), k.label); if (k.me) chip.title = 'Mentions you';
+      if (k.id) { chip.href = 'https://matrix.to/#/' + encodeURIComponent(k.id); chip.target = '_blank'; chip.rel = 'noopener noreferrer'; }
       p.append(chip); at = k.end;
     }
     inline(p, (text || '').slice(at), 0);
@@ -1524,7 +1755,7 @@
   function bubble(m, pos, ctx) {
     // Direction comes only from message.outgoing: own messages sit right in the accent colour and never carry a name.
     const row = node('div', 'u-row' + (m.outgoing ? ' outgoing' : ' incoming') + ' pos-' + pos + (ctx.group && !m.outgoing ? ' in-group' : '')); row.dataset.id = m.id; row.dataset.direction = m.outgoing ? 'out' : 'in';
-    if (ctx.group && !m.outgoing && (pos === 'last' || pos === 'single')) { const who = nameOf(m.sender), tag = ctx.faces?.[who]; const face = withPicture(avatar(who || '?', 'tiny u-row-av'), pictureURL(view.id, tag, who)); face.title = who; row.append(face); }
+    if (ctx.group && !m.outgoing && (pos === 'last' || pos === 'single')) { const who = nameOf(m.sender), tag = ctx.faces?.[who]; const face = withPicture(avatar(who || '?', 'tiny u-row-av'), pictureURL(view.id, tag, who), 'message:' + view.id + ':' + m.id); face.title = who; row.append(face); }
     const b = node('article', 'u-message' + (m.outgoing ? ' outgoing' : '') + (m.deleted ? ' deleted' : '') + (m.pending ? ' pending' : '') + (m.failed ? ' failed' : ''));
     const visual = !m.deleted && ['m.image', 'm.sticker', 'm.video'].includes(m.msgtype);
     if (visual && !m.original) b.classList.add('bare');
@@ -1561,22 +1792,23 @@
     }
     if (!story && !m.deleted && m.original && m.msgtype !== 'm.location') {
       if (ctx.auto || m.outgoing) {
-        b.append(richText('u-text', m.translated || m.original, m));
+        b.append(richText('u-text', m.translated || m.original, m.translated && m.translated !== m.original ? null : m));
         if (m.translated && m.translated !== m.original) b.append(node('p', 'u-original', m.original));
         if (m.translation_error) b.append(node('p', 'u-original error', m.translation_error));
       } else {
         const translated = shown[m.id] === 'translated' && m.translated;
-        b.append(richText('u-text', translated ? m.translated : m.original, m));
+        b.append(richText('u-text', translated ? m.translated : m.original, translated ? null : m));
         if (foreignScript(m.original)) b.append(button(translated ? 'Show original' : 'Translate', () => translate(m), 'u-translate link'));
       }
     }
-    if (!m.deleted && m.links?.length) for (const [i, l] of m.links.entries()) b.append(linkCard(m, l, i));
+    if (!m.deleted) for (const photo of m.photos || [m]) if (!photo.deleted && photo.links?.length) for (const [i, l] of photo.links.entries()) b.append(linkCard(photo, l, i));
     const meta = node('footer');
     if (ctx.multi) { const via = node('span', 'u-via'); via.append(netBadge(m.network, 'u-via-icon')); via.title = 'via ' + netLabel(m.network); meta.append(via); }
     if (m.edited && !m.deleted) meta.append(node('span', 'u-edited', 'edited'));
     meta.append(node('time', '', new Date(m.timestamp).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})));
     if (m.outgoing) meta.append(m.failed ? node('span', 'u-status-ic fail', '!') : m.pending ? node('span', 'u-status-ic clock', '◷') : node('span', 'u-status-ic' + (ctx.read ? ' read' : ''), ctx.read ? '✓✓' : '✓'));
     b.append(meta);
+    if (m.mentioned && !m.outgoing) { row.classList.add('u-mentioned'); b.prepend(node('span','u-mention-notice','@ You were mentioned')); }
     row.append(b);
     if (m.failed) {
       row.append(button(m.failed === true ? 'Not sent · Tap to retry' : 'Not sent · ' + m.failed + ' · Retry', () => m.retry ? m.retry() : null, 'u-retry link'));
@@ -1584,7 +1816,7 @@
     }
     if (m.reactions?.length) {
       const strip = node('div', 'u-reactions');
-      for (const r of m.reactions) strip.append(button(r.key + (r.count > 1 ? ' ' + r.count : ''), () => react(m, r.key), 'u-react' + (r.mine ? ' mine' : '')));
+      for (const r of m.reactions) strip.append(reactionChip(r, m.reactions, {pid:view.id, toggle:() => react(m,r.key)}));
       row.append(strip);
     }
     if (!m.pending && !m.deleted) gestures(row, b, m);
@@ -1910,7 +2142,7 @@
   function toggledReactions(reactions, key) {
     const had = reactions.some(r => r.mine && r.key === key);
     // Copy every entry: increasing an existing count must not mutate the rollback snapshot.
-    const next = reactions.map(r => ({...r, count: r.count - (r.mine ? 1 : 0), mine: false})).filter(r => r.count > 0);
+    const next = reactions.map(r => ({...r, count: r.count - (r.mine ? 1 : 0), mine: false, ...(r.reactors ? {reactors:r.reactors.filter(u => !u.mine)} : {})})).filter(r => r.count > 0);
     if (!had) { const r = next.find(r => r.key === key); if (r) { r.count++; r.mine = true; } else next.push({key, count: 1, mine: true}); }
     return next;
   }
@@ -2011,7 +2243,10 @@
     const by = row => row?.updated_by || row?.created_by;
     const byAgent = row => by(row) && by(row).id !== 'owner';
     const dirty = () => sd.row ? ui.draft.value !== sd.saved || ui.channel.value !== sd.row.identity_id : !!ui.draft.value.trim();
-    const alive = () => sd.alive && ui.form.isConnected && s.person === id;
+    const alive = () => sd.alive && ui.form.isConnected && s.person === id && view.sd === sd;
+    // The global tray belongs to the currently visible composer, not to a suspended save.
+    // Keep this controller's handles (including an in-flight PUT's mutable sid) across navigation.
+    let attachments = [...(view.attach || [])], saveGeneration = 0;
     const note = () => {
       if (sd.conflict) {
         const box = node('div', 'u-draft-note conflict');
@@ -2045,30 +2280,60 @@
       if (row.identity_id && [...ui.channel.options].some(o => o.value === row.identity_id)) { ui.channel.value = row.identity_id; ui.paintVia(); }
       await loadItems(row);
     }
-    // Bring the tray in line with the draft's attachments. One that fails to load (a blip, a restart) shows the
-    // warning and is tried again on the next poll, which clears the warning once it loads; no reload needed.
+    // Keep failed downloads in the same tray: they must be removable, never silently omitted from a send.
+    const errorsInTray = () => {
+      if (!alive()) return;
+      sd.loadError = (view.attach || []).some(it => it.unavailable || it.removeFailed);
+      sd.uploadError = (view.attach || []).some(it => it.uploadFailed);
+      ui.grow(); ui.paintBar();
+    };
     async function loadItems(row) {
-      const want = row.attachments || [], have = view.attach || [];
-      const tray = have.filter(it => !it.sid || want.some(a => a.id === it.sid));
-      let failed = false;
-      for (const a of want) if (!tray.some(it => it.sid === a.id)) { try { tray.push(await itemFor(a, row.id)); } catch { failed = true; } }
-      if (!alive() || sd.row?.id !== row.id) return;
-      sd.loadError = failed;
-      view.attach = tray.length ? tray : null; ui.grow(); ui.paintBar();
+      const want = row.attachments || [], gen = draftWrites, epoch = sd.epoch, loaded = [];
+      for (const a of want) if (!(view.attach || []).some(it => it.sid === a.id && !it.unavailable)) {
+        try { loaded.push(await itemFor(a, row.id)); }
+        catch { loaded.push({file: true, unavailable: true, key: 'a' + uid(), sid: a.id, name: a.name, bytes: a.bytes}); }
+      }
+      // A slow download must not revive a removed/sent item or replace another conversation's tray.
+      if (!alive() || sd.epoch !== epoch || gen !== draftWrites || sd.row?.id !== row.id || sd.row.revision !== row.revision) {
+        for (const it of loaded) if (it.url) URL.revokeObjectURL(it.url);
+        return;
+      }
+      const tray = (view.attach || []).filter(it => !it.sid || want.some(a => a.id === it.sid));
+      for (const it of loaded) {
+        const at = tray.findIndex(old => old.sid === it.sid);
+        if (at < 0) tray.push(it); else if (tray[at].unavailable) tray[at] = it;
+        else if (it.url) URL.revokeObjectURL(it.url);
+      }
+      attachments = tray; view.attach = tray.length ? tray : null; errorsInTray();
     }
-    async function save() {
+    function save() {
       clearTimeout(sd.timer); sd.timer = null; draftWrote();
-      if (sd.closing) { await sd.closing; if (sd.timer) return; } // a just-sent draft is deleted first; new text starts a new one
-      if (sd.busy) { await sd.busy.catch(() => {}); if (sd.timer) return; }
-      if (view.edit || sd.conflict) return;
+      // Freeze the originating composer before any await. A navigation flush may arrive after
+      // openPerson cleared the global tray; only the old controller's retained handles apply then.
+      if (alive()) attachments = [...(view.attach || [])];
+      const snapshot = {text: ui.draft.value, identity_id: ui.channel.value, attachments: [...attachments],
+        editing: alive() && !!view.edit, epoch: sd.epoch, generation: ++saveGeneration};
+      const saving = saveSnapshot(snapshot);
+      sd.saving = saving;
+      return saving.finally(() => { if (sd.saving === saving) sd.saving = null; });
+    }
+    async function saveSnapshot(snapshot) {
+      const fresh = () => sd.epoch === snapshot.epoch && saveGeneration === snapshot.generation;
+      await sd.uploading?.catch(() => {});
+      if (!fresh()) return;
+      if (sd.closing) { await sd.closing; if (!fresh() || sd.timer) return; } // a just-sent draft is deleted first; new text starts a new one
+      if (sd.busy) { await sd.busy.catch(() => {}); if (!fresh() || sd.timer) return; }
+      if (snapshot.editing || sd.conflict) return;
       const run = (async () => {
-        const text = ui.draft.value, identity_id = ui.channel.value, files = (view.attach || []).some(it => it.sid);
+        const {text, identity_id} = snapshot, items = snapshot.attachments.filter(it => !it.removed);
+        // Server metadata is authoritative after the queue: a later batch may have persisted too.
+        const files = (sd.row?.attachments || []).length || items.some(it => it.sid);
         if (!identity_id) return;
         if (!sd.row) {
           if (!text.trim()) return;
           const r = await api('api/drafts', {method: 'POST', body: {person_id: id, identity_id, text}});
           sd.row = r.draft; sd.saved = text;
-        } else if (!text.trim() && !files && !(view.attach || []).length) {
+        } else if (!text.trim() && !files && !items.length) {
           await api('api/drafts/' + sd.row.id, {method: 'DELETE', body: {revision: sd.row.revision}}); sd.row = null; sd.saved = null;
         } else if (text !== sd.row.text || identity_id !== sd.row.identity_id) {
           const r = await api('api/drafts/' + sd.row.id, {method: 'POST', body: {revision: sd.row.revision, person_id: id, identity_id, text}});
@@ -2086,30 +2351,68 @@
       if (alive()) { ui.paintBar(); if (!sd.conflict && dirty()) schedule(); } refreshDraftIndex();
     }
     const schedule = () => { clearTimeout(sd.timer); sd.timer = setTimeout(save, SD_SAVE_MS); };
-    async function ensure() { if (!sd.row) { if (!ui.draft.value.trim()) { const r = await api('api/drafts', {method: 'POST', body: {person_id: id, identity_id: ui.channel.value, text: ''}}); sd.row = r.draft; sd.saved = ''; } else await save(); } return sd.row; }
-    // A photo or file put in the tray is stored with the draft at once, so it is there on every device and for agents.
-    async function attach(items) {
-      if (sd.closing) await sd.closing;
-      const epoch = sd.epoch;
-      for (const it of items) {
-        if (sd.epoch !== epoch) return; // sent meanwhile: the rest went with the message, not into a deleted draft
-        try {
-          await sd.busy?.catch(() => {}); const row = await ensure(); if (!row) return;
-          draftWrote(); const r = await draftRaw('api/drafts/' + row.id + '/attachments', 'PUT', it.blob, {revision: row.revision, name: it.name || 'Attachment', mime: it.blob.type || 'application/octet-stream'});
-          sd.row = r.draft; it.sid = r.draft.attachments[r.draft.attachments.length - 1].id; // (when sent meanwhile, the send's delete waits for this and needs the new revision)
-        } catch (e) { if (sd.epoch !== epoch) return; sd.uploadError = true; if (e.code === 'draft_changed') { try { sd.conflict = (await api('api/drafts/' + sd.row.id)).draft; ui.paintBar(); } catch { /* next poll */ } } else error(e); ui.paintBar(); }
+    async function ensure() {
+      if (!sd.row) {
+        const text = ui.draft.value;
+        const r = await api('api/drafts', {method: 'POST', body: {person_id: id, identity_id: ui.channel.value, text}});
+        sd.row = r.draft; sd.saved = text;
       }
-      draftWrote(); refreshDraftIndex();
+      return sd.row;
     }
-    async function detach(it) {
-      // Removing a failed local upload clears the block; any other bad attachment remains visible in the tray.
-      if (!it.sid) { sd.uploadError = false; ui.paintBar(); return; }
-      if (!sd.row) return;
-      draftWrote();
-      try { const r = await api('api/drafts/' + sd.row.id + '/attachments/' + it.sid, {method: 'DELETE', body: {revision: sd.row.revision}}); sd.row = r.draft; }
-      catch (e) { if (e.code !== 'not_found') error(e); }
-      draftWrote();
-      if (!ui.draft.value.trim() && !(view.attach || []).length) save();
+    // Picker, paste, removal and autosave share revisions. Queue whole batches, not just their last promise:
+    // two selections before the first PUT returns otherwise race with the same revision and poison the draft.
+    function attachmentWork(work) {
+      const before = sd.uploading, closing = sd.closing;
+      sd.attachmentPending = (sd.attachmentPending || 0) + 1;
+      const run = Promise.resolve(before).catch(() => {}).then(async () => {
+        await closing; await sd.busy?.catch(() => {});
+        draftWrote();
+        try { return await work(); } finally { sd.attachmentPending--; draftWrote(); errorsInTray(); refreshDraftIndex(); }
+      });
+      sd.uploading = run;
+      return run;
+    }
+    function attach(items) {
+      const epoch = sd.epoch;
+      attachments = [...new Set([...attachments, ...items])];
+      return attachmentWork(async () => {
+        for (const it of items) {
+          if (!alive() || sd.epoch !== epoch) return;
+          if (it.removed || it.sid) continue;
+          try {
+            const row = await ensure();
+            const r = await draftRaw('api/drafts/' + row.id + '/attachments', 'PUT', it.blob, {revision: row.revision, name: it.name || 'Attachment', mime: it.blob.type || 'application/octet-stream'});
+            sd.row = r.draft; it.sid = r.draft.attachments[r.draft.attachments.length - 1].id;
+            it.uploadFailed = false;
+          } catch (e) {
+            if (sd.epoch !== epoch) return;
+            it.uploadFailed = true;
+            if (e.code === 'draft_changed' || e.code === 'draft_exists') {
+              try { sd.conflict = (await fetchDrafts(true)).find(d => d.id === sd.row?.id || d.person_id === id) || null; } catch { /* next poll */ }
+            } else if (alive()) error(e);
+          }
+        }
+      });
+    }
+    function detach(it) {
+      it.removed = true; attachments = attachments.filter(old => old !== it); errorsInTray();
+      return attachmentWork(async () => {
+        if (!it.sid || !sd.row) return;
+        try {
+          const r = await api('api/drafts/' + sd.row.id + '/attachments/' + it.sid, {method: 'DELETE', body: {revision: sd.row.revision}});
+          sd.row = r.draft;
+          if (alive()) { view.attach = (view.attach || []).filter(old => old !== it); if (!view.attach.length) view.attach = null; }
+        } catch (e) {
+          // A refused removal is not a successful removal. Keep its chip and block until reconciled.
+          if (alive()) {
+            it.removed = false; it.removeFailed = true;
+            attachments = [...new Set([...attachments, it])];
+            if (!(view.attach || []).includes(it)) view.attach = [...(view.attach || []), it];
+            if (e.code !== 'not_found') error(e);
+          }
+        }
+        if (alive() && !ui.draft.value.trim() && !(view.attach || []).length) schedule();
+      });
     }
     // Sent (or emptied): the draft is done. Delete it so it never comes back.
     async function clear(quiet = false) {
@@ -2151,7 +2454,7 @@
       if (!first && document.hidden) return;
       const gen = draftWrites;
       let rows; try { rows = await fetchDrafts(first); } catch { return; }
-      if (!alive() || sd.busy || sd.timer || sd.closing) return;
+      if (!alive() || sd.busy || sd.timer || sd.closing || sd.attachmentPending) return;
       if (gen !== draftWrites) return check(first); // this screen wrote meanwhile: that list may predate it
       rows = rows.filter(d => !closedDrafts.has(d.id));
       const mine = sd.row && rows.find(d => d.id === sd.row.id && d.state === 'draft');
@@ -2171,13 +2474,142 @@
       await apply(latest);
     }
     sd.poll = setInterval(() => check(false), SD_POLL_MS);
-    const retry = async () => { if (sd.loadError && sd.row) await loadItems(sd.row); };
+    const retry = async () => {
+      await sd.uploading?.catch(() => {});
+      if (!alive() || sd.conflict) return;
+      for (const it of (view.attach || []).filter(it => it.removeFailed)) await detach(it);
+      const unsaved = (view.attach || []).filter(it => !it.sid && !it.removed);
+      if (unsaved.length) await attach(unsaved);
+      if (sd.loadError && sd.row) await loadItems(sd.row);
+      errorsInTray();
+    };
     Object.assign(sd, {schedule, save, attach, detach, clear, closeForSend, afterSend, note, check, retry, stop: () => { sd.alive = false; clearInterval(sd.poll); clearTimeout(sd.timer); sd.timer = null; }});
     setTimeout(() => Promise.resolve(after).catch(() => {}).then(() => check(true)), 0);
     return sd;
   }
 
   // ---------- composer: text, photo, voice; optimistic and idempotent ----------
+  // Extend the existing textarea and reaction strip: no second composer or sheet.
+  // Escape timeline/composer clipping; coordinates stay local to Messenger.
+  function floatPanel(panel, anchor, dismiss, wide = false) {
+    const root = $('messenger'), home = panel.parentElement || panel.parent;
+    const bounds = anchor.closest('.u-pane-thread') || root;
+    root.append(panel);
+    const place = () => {
+      if (!anchor.isConnected) { dismiss(); return; }
+      const r = root.getBoundingClientRect(), b = bounds.getBoundingClientRect(), a = anchor.getBoundingClientRect();
+      const width = Math.max(0, b.right - b.left - 16), height = Math.max(0, b.bottom - b.top - 16);
+      panel.style.maxWidth = width + 'px'; panel.style.minWidth = '0';
+      panel.style.width = Math.min(wide ? Math.max(260, a.width) : 270, width) + 'px';
+      panel.style.maxHeight = Math.min(wide ? 256 : 300, height) + 'px';
+      const p = floatingBox(a, panel.getBoundingClientRect(), b);
+      panel.style.left = (p.left - r.left) + 'px'; panel.style.top = (p.top - r.top) + 'px';
+      panel.style.right = 'auto'; panel.style.bottom = 'auto';
+    };
+    place();
+    const abort = new AbortController();
+    window.addEventListener('resize', place, {signal:abort.signal});
+    document.addEventListener('scroll', place, {capture:true, signal:abort.signal});
+    const resize = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(place) : null;
+    resize?.observe(bounds); resize?.observe(anchor); resize?.observe(panel);
+    const removed = typeof MutationObserver !== 'undefined' ? new MutationObserver(() => { if (!anchor.isConnected) dismiss(); }) : null;
+    removed?.observe(root, {childList:true, subtree:true});
+    return () => { abort.abort(); resize?.disconnect(); removed?.disconnect(); home?.append(panel); };
+  }
+  function mentionComposer(form, field, draft, members, changed) {
+    view.mentionClose?.();
+    const mirror = node('div','u-mention-mirror'); mirror.setAttribute('aria-hidden','true'); field.prepend(mirror);
+    const picker = node('div','u-mention-picker'); picker.id = 'u-mention-picker'; picker.hidden = true;
+    picker.setAttribute('role','listbox'); picker.setAttribute('aria-label','Mention a group member'); form.append(picker);
+    draft.setAttribute('aria-controls',picker.id); draft.setAttribute('aria-expanded','false'); draft.setAttribute('aria-autocomplete','list');
+    let selected = 0, options = [], query = null, outside = null, unfloat = null;
+    const paint = () => {
+      mirror.replaceChildren(); let at = 0;
+      for (const span of parseMentions(draft.value,members())) { mirror.append(draft.value.slice(at,span.start),node('mark','',draft.value.slice(span.start,span.end))); at = span.end; }
+      mirror.append(draft.value.slice(at) + '\n'); mirror.scrollTop = draft.scrollTop;
+    };
+    const close = () => {
+      const open = !picker.hidden; picker.hidden = true; draft.setAttribute('aria-expanded','false'); draft.removeAttribute('aria-activedescendant');
+      outside?.abort(); outside = null; unfloat?.(); unfloat = null; return open;
+    };
+    view.mentionClose = close;
+    function choose(member) {
+      if (!query) return;
+      const next = insertMention(draft.value,query,member); draft.value = next.text;
+      close(); draft.focus(); draft.setSelectionRange(next.caret,next.caret); changed(); close(); paint();
+    }
+    function draw() {
+      picker.replaceChildren(node('small','helper',options.some(m => m.native !== false) ? 'Mention a group member' : 'Insert a name · plain text on this network'));
+      if (!options.length) picker.append(node('p','helper','No matching members'));
+      for (const [i,m] of options.entries()) {
+        const item = button('',() => choose(m),'u-mention-option'); item.type = 'button'; item.id = 'u-mention-option-' + i;
+        item.setAttribute('role','option'); item.setAttribute('aria-selected',String(i===selected));
+        item.append(withPicture(avatar(m.name,'small'),pictureURL(view.id,m.avatar,m.id)),node('span','',m.label));
+        item.onpointerdown = e => e.preventDefault(); picker.append(item);
+      }
+      if (options.length) { draft.setAttribute('aria-activedescendant','u-mention-option-' + selected); picker.querySelector('[aria-selected="true"]')?.scrollIntoView({block:'nearest'}); }
+    }
+    const update = () => {
+      paint(); const all = members(); query = mentionQuery(draft.value,draft.selectionStart);
+      if (!all.length || !query || view.edit) return close();
+      options = all.filter(m => m.label.toLocaleLowerCase().includes(query.query)).slice(0,50); selected = 0;
+      picker.hidden = false; draft.setAttribute('aria-expanded','true'); draw();
+      unfloat?.(); unfloat = floatPanel(picker, draft, close, true);
+      if (!outside) {
+        outside = new AbortController(); document.addEventListener('pointerdown',e => { if (!form.contains(e.target) && !picker.contains(e.target)) close(); },{capture:true,signal:outside.signal});
+      }
+    };
+    draft.addEventListener('keydown',e => {
+      if (picker.hidden || e.isComposing) return;
+      if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); close(); return; }
+      const next = mentionKey(e.key,selected,options.length); if (!next.handled) return;
+      e.preventDefault(); e.stopImmediatePropagation(); selected = next.index;
+      if (next.select) choose(options[selected]); else draw();
+    },true);
+    draft.addEventListener('click',update); draft.addEventListener('scroll',paint);
+    return {paint,update,close};
+  }
+  function reactorFace(user, pid) {
+    return withPicture(avatar(user.name || user.id,'small'),pictureURL(pid,user.avatar,user.id));
+  }
+  function reactorList(reactions, key, pid) {
+    const sheet = overlay('Reactions'), tabs = node('div','u-reactor-tabs'), list = node('div','u-reactor-list');
+    tabs.setAttribute('role','tablist'); sheet.append(tabs,list); const groups = reactorGroups(reactions);
+    const paint = chosen => {
+      list.replaceChildren();
+      for (const tab of tabs.children) tab.setAttribute('aria-selected',String(tab.dataset.key === chosen));
+      for (const group of groups.filter(g => !chosen || g.key === chosen)) {
+        list.append(node('h3','',group.key + ' · ' + group.count));
+        for (const user of group.reactors) { const row = node('div','u-reactor-row'); row.append(reactorFace(user,pid),node('span','',user.name || user.id)); list.append(row); }
+        if (group.missing) list.append(node('p','helper',group.missing + ' reaction' + (group.missing === 1 ? '' : 's') + ' · This network did not provide who reacted.'));
+      }
+    };
+    for (const [value,label] of [['','All'],...groups.map(g => [g.key,g.key + ' ' + g.count])]) {
+      const tab = button(label,() => paint(value),'secondary'); tab.dataset.key = value; tab.setAttribute('role','tab'); tabs.append(tab);
+    }
+    paint(key); return sheet;
+  }
+  function reactionChip(reaction, reactions, {pid, toggle}) {
+    const chip = button(reaction.key + (reaction.count > 1 ? ' ' + reaction.count : ''),e => {
+      if (chip.dataset.held) { delete chip.dataset.held; return; }
+      if (e.pointerType === 'touch' || matchMedia('(hover: none)').matches) reactorList(reactions,reaction.key,pid);
+      else toggle();
+    },'u-react' + (reaction.mine ? ' mine' : ''));
+    chip.setAttribute('aria-label',reaction.key + ', ' + reaction.count + ' reactions. Hold or right-click to see who reacted.');
+    const tip = node('span','u-reactor-tooltip'); tip.setAttribute('role','tooltip'); tip.hidden = true;
+    const group = reactorGroups([reaction])[0];
+    for (const user of group.reactors.slice(0,8)) { const row = node('span','u-reactor-row'); row.append(reactorFace(user,pid),node('span','',user.name || user.id)); tip.append(row); }
+    if (group.reactors.length > 8) tip.append(node('span','', '+' + (group.reactors.length-8) + ' more · right-click to see all'));
+    if (group.missing) tip.append(node('span','','Who reacted is unavailable for ' + group.missing + ' reaction' + (group.missing===1?'':'s')));
+    let unfloat = null;
+    const hide = () => { tip.hidden = true; unfloat?.(); unfloat = null; };
+    const show = () => { hide(); tip.hidden = false; unfloat = floatPanel(tip, chip, hide); };
+    chip.append(tip); chip.addEventListener('pointerenter',e => { if (e.pointerType !== 'touch') show(); });
+    chip.addEventListener('pointerleave',hide); chip.addEventListener('focus',show); chip.addEventListener('blur',hide);
+    chip.addEventListener('pointerdown',e => { chip.classList.add('pressed'); e.stopPropagation(); });
+    for (const event of ['pointerup','pointercancel','pointerleave']) chip.addEventListener(event,() => chip.classList.remove('pressed'));
+    holdToMenu(chip,() => { hide(); reactorList(reactions,reaction.key,pid); }); return chip;
+  }
   function composer(id, p) {
     // A retained DOM view is not proof that its physical mic is still running (e.g. notification Stop).
     if (view.recording?.phase === 'recording') {
@@ -2211,6 +2643,7 @@
     const send = iconButton('send', reviewed ? 'Preview send' : 'Send', () => submit(), 'u-send');
     const mic = iconButton('mic', 'Record voice message', () => record(), 'u-mic'); mic.hidden = !telegramOnly;
     const field = node('div', 'u-field'); field.append(draft);
+    const mentionUI = mentionComposer(form, field, draft, () => composerMembers(store.threads[id]?.person || p, channel.value, store.threads[id]?.messages || []), () => draft.oninput?.());
     // One button opens Emoji / GIFs / Stickers, like Telegram (Miguel, 5 Nov 2026: "I don't know how to send emojis").
     const pickerBtn = iconButton('smile', 'Emoji, GIFs and stickers', () => mediaPicker.toggle(), 'u-pick-btn'); pickerBtn.setAttribute('aria-expanded', 'false');
     field.append(pickerBtn);
@@ -2244,12 +2677,13 @@
     // One tap is one message. Send settles the server draft and uploads before the box empties, so the text stays
     // visible for a moment; a second tap (or Enter) in that window used to send it twice (James's phone, 31 Oct 2026).
     let sending = false;
-    const grow = () => { draft.style.height = 'auto'; draft.style.height = Math.min(draft.scrollHeight, 140) + 'px'; const has = !!draft.value.trim() || !!view.attach?.length; send.hidden = !has && telegramOnly && !view.edit; mic.hidden = !telegramOnly || !send.hidden; send.disabled = !has || sending; send.classList.toggle('busy', sending); send.setAttribute('aria-busy', String(sending)); };
+    const grow = () => { mentionUI.paint(); draft.style.height = 'auto'; draft.style.height = Math.min(draft.scrollHeight, 140) + 'px'; const has = !!draft.value.trim() || !!view.attach?.length; send.hidden = !has && telegramOnly && !view.edit; mic.hidden = !telegramOnly || !send.hidden; send.disabled = !has || sending; send.classList.toggle('busy', sending); send.setAttribute('aria-busy', String(sending)); };
     // The thread rebuilds its composer once the person loads: keep photos/reply already in the tray visible.
     if (view.attach?.length || view.reply) queueMicrotask(() => { paintBar(); grow(); });
     let typingAt = 0, idle = null;
     const typing = on => { if (!telegramOnly) return; call('people/' + id + '/typing', {typing: on}).catch(() => {}); };
     draft.oninput = () => {
+      mentionUI.update();
       s.drafts[id] = view.edit ? s.drafts[id] : draft.value; grow(); saveDrafts(); hold(); if (!view.edit) view.sd?.schedule(); else paintBar();
       if (draft.value && Date.now() - typingAt > 4000) { typingAt = Date.now(); typing(true); }
       clearTimeout(idle); idle = setTimeout(() => { if (typingAt) { typingAt = 0; typing(false); } }, 5000);
@@ -2270,13 +2704,16 @@
     window.WizardApp?.composer?.bind(form, {field: 'textarea', zone: form, onFiles: takeFiles, onSubmit: () => submit(), notice: msg => toast(msg)});
     form.onsubmit = e => { e.preventDefault(); submit(); };
     async function submit() {
+      mentionUI.close();
       if (sending) return;
       sending = true; grow();
       try { await submitOnce(); } finally { sending = false; grow(); }
     }
     async function submitOnce() {
       if (view.sd?.conflict) return toast('Choose which draft to keep first');
-      await view.sd?.retry?.();
+      const draftState = view.sd;
+      await draftState?.retry?.();
+      if (s.person !== id || view.sd !== draftState || !form.isConnected) return;
       if (view.sd?.loadError || view.sd?.uploadError) return toast('An attachment needs attention before sending');
       const text = draft.value.trim(), a = view.attach || [];
       if (!text && !a.length) return;
@@ -2492,7 +2929,7 @@
     Object.assign(view, {draft, grow, paintBar, paintRecording, paintRecordingTick});
     form.append(bar, via, channel, mediaPicker.panel, row, notice); grow(); paintBar(); paintRecording();
     // Switching chats in the split (or redrawing on resize) must not drop a save that is still waiting.
-    const prev = view.sd, flushing = prev?.timer ? prev.save() : prev?.busy;
+    const prev = view.sd, flushing = prev?.timer ? prev.save() : prev?.saving || prev?.busy;
     prev?.stop?.(); view.sd = serverDraft(id, {form, draft, channel, grow, paintBar, paintVia}, prev?.id === id ? flushing : null);
     queueMicrotask(() => { if (!form.isConnected) return; if (!view.recording) record(true); recoverVoice(); });
     return form;
@@ -2982,6 +3419,121 @@
     }
     return box;
   }
+
+  // ---------- Labels: your own groups of chats ----------
+  // A label is a name you make once ("WizardOS") and tick on any chat, from any network, person or group.
+  // Choosing it in the Inbox filters then shows those chats together. The catalogue lives on the box, so an empty label exists.
+  const labelCat = {names: [], counts: {}, rev: -1, ok: false, loading: null};
+  const sameLabel = (a, b) => a.toLowerCase() === b.toLowerCase();
+  const canonLabel = n => labelCat.names.find(x => sameLabel(x, n)) || null;
+  function takeCatalog(r) {
+    if (!r || !Array.isArray(r.labels)) return;
+    labelCat.names = r.labels.filter(x => x && typeof x === 'object').map(x => x.name); labelCat.counts = Object.fromEntries(r.labels.filter(x => x && typeof x === 'object').map(x => [x.name, x.chats | 0]));
+    if (typeof r.rev === 'number') labelCat.rev = r.rev; labelCat.ok = true;
+  }
+  function loadLabelCatalog(force = false) {
+    if (labelCat.loading) return labelCat.loading;
+    if (labelCat.ok && !force) return Promise.resolve();
+    labelCat.loading = call('labels').then(takeCatalog).catch(() => {}).then(() => { labelCat.loading = null; if (s.ready && s.tab === 'people' && (!s.person || split.on)) drawList(); });
+    return labelCat.loading;
+  }
+  const labelNames = all => { const seen = new Map(); for (const n of [...labelCat.names, ...all.flatMap(p => p.labels || [])]) if (!seen.has(n.toLowerCase())) seen.set(n.toLowerCase(), n); return [...seen.values()].sort((a, b) => a.localeCompare(b)); };
+  const labelProblem = e => { if (errorBox()) error(e); else toast(e.message || 'Could not save labels', 3000); };
+  let labelQueue = Promise.resolve();
+  // Tap registers at once (the tick and the list repaint), the box catches up after.
+  function saveChatLabels(p, names) {
+    const put = list => { for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if (x.id === p.id) x.labels = list; p.labels = list; if (store.threads[p.id]) store.threads[p.id].person.labels = list; drawList(); };
+    const before = p.labels || []; put(names);
+    labelQueue = labelQueue.then(async () => {
+      try { const r = await call('people/' + encodeURIComponent(p.id) + '/labels', {labels: names}); takeCatalog({labels: r.catalog, rev: r.rev}); put(r.labels); persist(); }
+      catch (e) { put(before); labelProblem(e); }
+    });
+    return labelQueue;
+  }
+  // Checkbox list of every label plus a "New label" box. Used in the chat info sheet and the chat menu's Labels sheet.
+  function labelPicker(p) {
+    const box = node('div', 'u-labels');
+    box.append(node('p', 'helper u-labels-help', 'A label is your own group of chats. Tick one to put this chat in it; then choose that label in the Inbox filters to see all its chats from every network.'));
+    const list = node('div', 'u-label-list'); list.setAttribute('role', 'group'); list.setAttribute('aria-label', 'Labels for this chat');
+    const form = node('form', 'u-label-new'); const input = node('input'); input.placeholder = 'New label, e.g. WizardOS'; input.maxLength = 64; input.setAttribute('aria-label', 'New label');
+    const add = node('button', 'secondary', 'Add'); add.type = 'submit'; form.append(input, add);
+    const has = n => (p.labels || []).some(x => sameLabel(x, n));
+    const paint = () => {
+      list.replaceChildren();
+      const names = labelNames([p]);
+      if (!names.length) list.append(node('p', 'helper u-label-none', 'No labels yet. Make one below.'));
+      for (const n of names) {
+        const on = has(n), row = button('', () => {
+          const next = has(n) ? (p.labels || []).filter(x => !sameLabel(x, n)) : [...(p.labels || []), n];
+          saveChatLabels(p, next); paint();
+        }, 'u-label-row' + (on ? ' on' : ''));
+        row.setAttribute('role', 'checkbox'); row.setAttribute('aria-checked', String(on));
+        const mark = node('span', 'u-check'); if (on) mark.append(icon('check'));
+        row.append(mark, node('span', 'u-label-name', n)); list.append(row);
+      }
+    };
+    form.onsubmit = e => {
+      e.preventDefault(); const raw = input.value.replace(/\s+/g, ' ').trim(); if (!raw) return;
+      if (raw.length > 64) return labelProblem(new Error('Label names are up to 64 characters'));
+      const name = canonLabel(raw) || raw; if (!canonLabel(raw)) labelCat.names = [...labelCat.names, name].sort((a, b) => a.localeCompare(b));
+      input.value = ''; if (!has(name)) saveChatLabels(p, [...(p.labels || []), name]); paint();
+    };
+    paint(); box.append(list, form);
+    loadLabelCatalog(true).then(() => { if (box.isConnected) paint(); });
+    return box;
+  }
+  // The row and thread menus' Labels: the same picker on its own small sheet.
+  function labelsSheet(p) {
+    const sheet = overlay('Labels'); sheet.append(node('p', 'u-labels-chat', p.display_name), labelPicker(p));
+    sheet.append(button('Manage labels', () => manageLabels(p), 'secondary wide'));
+  }
+  // Create, rename and delete labels. Deleting a label never touches the chats in it.
+  function manageLabels(from = null) {
+    const sheet = overlay('Manage labels'); view.manageFrom = from; sheet.classList.add('u-manage-labels');
+    sheet.append(node('p', 'helper', 'Labels are your own groups of chats, such as WizardOS. Add a chat to one from its info sheet or by holding it in the list. Deleting a label never deletes the chats.'));
+    const list = node('div', 'u-label-list');
+    const form = node('form', 'u-label-new'); const input = node('input'); input.placeholder = 'New label, e.g. WizardOS'; input.maxLength = 64; input.setAttribute('aria-label', 'New label name');
+    const add = node('button', 'primary', 'Create'); add.type = 'submit'; form.append(input, add);
+    let editing = null, confirming = null;
+    const refreshList = () => { if (s.ready && s.tab === 'people' && (!s.person || split.on)) drawList(); };
+    const mutate = async (optimistic, path, body) => {
+      optimistic(); paint(); refreshList();
+      try { takeCatalog(await call(path, body)); } catch (e) { error(e); await loadLabelCatalog(true); }
+      if (s.overlay === 'Manage labels') paint(); refreshList();
+    };
+    function paint() {
+      list.replaceChildren();
+      const all = labelNames([...(store.lists.people || []), ...(store.lists.groups || [])]);
+      if (!all.length) list.append(node('p', 'helper u-label-none', 'No labels yet. Make your first one below.'));
+      for (const n of all) {
+        const row = node('div', 'u-label-manage'), count = labelCat.counts[n] ?? [...(store.lists.people || []), ...(store.lists.groups || [])].filter(x => (x.labels || []).includes(n)).length;
+        if (editing === n) {
+          const f = node('form', 'u-label-new'); const i = node('input'); i.value = n; i.maxLength = 64; i.setAttribute('aria-label', 'Rename ' + n);
+          const ok = node('button', 'primary', 'Save'); ok.type = 'submit';
+          f.append(i, ok, button('Cancel', () => { editing = null; paint(); }, 'secondary'));
+          f.onsubmit = e => { e.preventDefault(); const to = i.value.replace(/\s+/g, ' ').trim(); editing = null; if (!to || to === n) return paint();
+            if (filterState.label === n) setNarrowQuiet('label', canonLabel(to) || to);
+            mutate(() => { labelCat.names = labelCat.names.filter(x => x !== n); if (!canonLabel(to)) labelCat.names.push(to); for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if ((x.labels || []).includes(n)) x.labels = [...new Set(x.labels.map(l => l === n ? (canonLabel(to) || to) : l))].sort(); }, 'labels/rename', {from: n, to}); };
+          row.append(f); setTimeout(() => i.focus(), 0);
+        } else {
+          const name = node('span', 'u-label-name'); name.append(node('strong', '', n), node('small', '', count === 1 ? '1 chat' : count + ' chats'));
+          row.append(name, button('Rename', () => { editing = n; confirming = null; paint(); }, 'secondary u-label-act'));
+          row.append(confirming === n
+            ? button('Delete label?', () => { confirming = null; mutate(() => { labelCat.names = labelCat.names.filter(x => x !== n); for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if ((x.labels || []).includes(n)) x.labels = x.labels.filter(l => l !== n); }, 'labels/delete', {name: n}); }, 'secondary danger u-label-act')
+            : button('Delete', () => { confirming = n; paint(); }, 'secondary u-label-act'));
+        }
+        list.append(row);
+      }
+    }
+    form.onsubmit = e => {
+      e.preventDefault(); const name = input.value.replace(/\s+/g, ' ').trim(); if (!name) return;
+      if (name.length > 64) return error(new Error('Label names are up to 64 characters'));
+      input.value = ''; if (canonLabel(name)) return toast('That label already exists');
+      mutate(() => { labelCat.names = [...labelCat.names, name].sort((a, b) => a.localeCompare(b)); }, 'labels', {name});
+    };
+    sheet.append(list, form); paint();
+    loadLabelCatalog(true).then(() => { if (s.overlay === 'Manage labels') paint(); });
+  }
   function editPerson(p) {
     const sheet = overlay(p.identities.every(i => i.kind === 'person') ? 'Contact' : 'Group'); const form = node('form');
     const hero = node('div', 'u-hero'); hero.append(avatar(p.display_name, 'large'), node('strong', '', p.display_name), node('span', '', networksOf(p).map(netLabel).join(' · '))); sheet.append(hero);
@@ -2997,6 +3549,7 @@
     form.append(button('Save', save, 'primary wide'));
     const linkBox = contactsRow(p); if (linkBox) sheet.append(linkBox);
     form.onsubmit = e => { e.preventDefault(); save(); }; sheet.append(form);
+    if (!p.native) sheet.append(node('h3', '', 'Labels'), labelPicker(p));
     if (p.identities.every(i => i.kind === 'person')) {
       const others = s.people.filter(x => x.id !== p.id);
       if (others.length) {
@@ -3005,10 +3558,6 @@
         sheet.append(node('h3', '', 'Merge'), mergeLabel, button('Merge', () => action(async () => { await call('people/' + p.id + '/merge', {source_id: select.value}); closeOverlay(); delete store.threads[p.id]; store.lists = {people: null, groups: null}; await openPerson(p.id); }), 'secondary wide'));
       }
       if (p.identities.length > 1) for (const i of p.identities) sheet.append(button('Separate ' + netLabel(i.network) + ' · ' + i.label, () => action(async () => { await call('people/' + p.id + '/unmerge', {identity_id: i.id}); closeOverlay(); delete store.threads[p.id]; store.lists = {people: null, groups: null}; await openPerson(p.id); }), 'secondary wide'));
-    } else {
-      const labels = node('input'); labels.placeholder = 'Family, Friends'; labels.value = (p.labels || []).join(', ');
-      const labelsLabel = node('label', '', 'Labels'); labelsLabel.append(labels);
-      sheet.append(labelsLabel, button('Save labels', () => action(async () => { await call('groups/' + p.identities[0].id + '/labels', {labels: labels.value.split(',').map(x => x.trim()).filter(Boolean)}); closeOverlay(); }), 'secondary wide'));
     }
   }
   // My QR codes: the owner's own Telegram, WhatsApp, Signal… as big scannable codes, one tap from Chats.
@@ -3236,18 +3785,26 @@
     row.append(node('strong', 'u-agent-name', name), choice);
     return row;
   }
-  // Message previews in the chat list: off by default (compact list), remembered on this device.
-  const PREVIEWS_KEY = 'messenger.previews';
-  function previewsOn() { try { return localStorage.getItem(PREVIEWS_KEY) === '1'; } catch { return false; } }
-  function setPreviews(on) {
-    try { if (on) localStorage.setItem(PREVIEWS_KEY, '1'); else localStorage.removeItem(PREVIEWS_KEY); } catch { /* this visit only */ }
-    $('messenger')?.classList.toggle('u-compact', !on); drawList();
+  // Inbox view (James, 6 Nov 2026): "Chats" is the default, the way Messenger has always read: picture, name, last message
+  // (a group names its sender), time and unread badge. "Compact" is the denser 16.x row (name, time, badge; no last line).
+  // One row renderer in drawList() draws both; this only flips the flag. Saves at once and is remembered on this device.
+  const VIEW_KEY = 'messenger.inboxView';
+  const VIEWS = [['chats', 'Chats', 'Last message under each name'], ['compact', 'Compact', 'Names only, more chats on screen']];
+  function inboxView() { try { const v = localStorage.getItem(VIEW_KEY); if (v === 'chats' || v === 'compact') return v; } catch { /* default */ } return 'chats'; }
+  const previewsOn = () => inboxView() === 'chats';
+  function setInboxView(view) {
+    try { localStorage.setItem(VIEW_KEY, view); } catch { /* this visit only */ }
+    $('messenger')?.classList.toggle('u-compact', view === 'compact'); drawList();
   }
-  function previewsRow() {
-    const row = node('label', 'u-more-row u-more-previews'), sw = node('input', 'u-switch');
-    sw.type = 'checkbox'; sw.setAttribute('role', 'switch'); sw.checked = previewsOn(); sw.onchange = () => setPreviews(sw.checked);
-    row.append(node('span', 'u-more-label', 'Message previews in the list'), sw);
-    return row;
+  function inboxViewRow() {
+    const row = node('div', 'u-more-row u-more-view'), group = node('div', 'u-view-choice'); group.setAttribute('role', 'radiogroup'); group.setAttribute('aria-label', 'Inbox view');
+    row.append(node('span', 'u-more-label', 'Inbox view'), group);
+    const paint = () => { for (const b of group.children) { const on = b.dataset.view === inboxView(); b.setAttribute('aria-checked', String(on)); b.classList.toggle('on', on); } };
+    for (const [id, label, hint] of VIEWS) {
+      const b = button(label, () => { setInboxView(id); paint(); }, 'u-view-btn'); b.dataset.view = id; b.title = hint;
+      b.setAttribute('role', 'radio'); group.append(b);
+    }
+    paint(); return row;
   }
   // A quiet list row that opens another page.
   function moreLink(label, fn, cls = '') {
@@ -3261,7 +3818,7 @@
   function moreSettings(sheet) {
     const head = node('h3', 'u-more-head', 'Agent access'), agents = node('div', 'u-settings-group u-more u-more-agents');
     const group = node('div', 'u-settings-group u-more u-more-other');
-    group.append(previewsRow());
+    group.append(inboxViewRow());
     sheet.append(head, agents, group);
     // Each part stays away while it has nothing to show.
     const sync = () => {
@@ -3270,7 +3827,6 @@
     };
     const paintAgents = st => {
       agents.replaceChildren();
-      if (st.gateway_connected === false) agents.append(node('p', 'u-more-note warn', 'Your agents can\'t reach Messenger yet. Ask your Wizard to finish connecting it.'));
       for (const agent of st.wizard_agents || []) {
         agents.append(levelRow(agent, agent.label || 'Your Wizard agent', st.wizard_levels || [], async level => {
           await api('api/view/agents/wizard/' + encodeURIComponent(agent.id), {method: 'POST', body: {level}});
@@ -3610,9 +4166,9 @@
   const SHARE_TARGETS = 12;
   let sharedTargetsKey = '';
   function shareTargetRows() {
-    return [...(store.lists.people || []), ...(store.lists.groups || []).map(g => ({...g, group: true}))]
-      .filter(p => p.id && p.display_name).sort((a, b) => (b.last?.timestamp || 0) - (a.last?.timestamp || 0)).slice(0, SHARE_TARGETS)
-      .map(p => ({id: p.id, name: p.display_name, detail: p.group || listKey(p) === 'groups' ? 'Group' : networksOf(p).map(cap).join(' · ')}));
+    return recentSharePeople([...(store.lists.people || []), ...(store.lists.groups || []).map(g => ({...g, group: true}))])
+      .filter(p => p.id && p.display_name).slice(0, SHARE_TARGETS)
+      .map(p => ({id: p.id, name: p.display_name, lastActivity: p.last?.timestamp || 0, detail: p.group || listKey(p) === 'groups' ? 'Group' : networksOf(p).map(cap).join(' · ')}));
   }
   function shareTargets() {
     const share = window.WizardApp?.share; if (!share?.targets) return;
@@ -3638,7 +4194,7 @@
     try { window.WizardApp?.share?.receive?.({accepts: ['text', 'url'], receive: receiveShare}); } catch { /* standalone or an older Wizard: no share sheet */ }
   }
   window.MessengerUnified = {
-    settings: accounts, showNative, returnNative,
+    settings: accounts, showNative, returnNative, reactionChip, reactorList,
     setNativeRows(rows) { nativeRows = rows; nativeUnread = rows.reduce((n, p) => n + (p.muted || p.low_priority || p.medium_priority || !(p.unread > 0) ? 0 : 1), 0); syncBadge(); if ((!s.native && !s.person) || split.on) drawList(); if (s.resumeNative && rows.some(p => p.group_id === s.resumeNative)) { const group = s.resumeNative; s.resumeNative = null; openNative(group); } },
     receiveShare, shareTargetRows,
     ask, toast, holdToMenu, actionMenu, muteAction, icon, messageGestures, messageSelection,
@@ -3651,7 +4207,7 @@
       resume(); return true;
     },
     authenticated() {
-      if (s.ready) return; s.ready = true; restore(); loadContacts();
+      if (s.ready) return; s.ready = true; restore(); loadContacts(); loadLabelCatalog();
       const painted = document.documentElement.dataset.inboxTab;
       if (!painted) resume();
       else if (openLinkedChat()) { /* Wizard inbox deep link */ }

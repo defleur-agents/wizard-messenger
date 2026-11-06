@@ -153,6 +153,10 @@ class InboxWizardMedia(unittest.TestCase):
         out = self.inbox.send(self.pid, {'upload_id': up['upload_id'], 'client_id': 'wizfile-12345'})
         self.assertEqual(self.sent[-1][3], ['Q3 report.pdf'])
         self.assertEqual((out['message']['msgtype'], out['message']['media']['filename']), ('m.file', 'Q3 report.pdf'))
+
+    def test_album(self):
+        # Separate transport event from the preceding file-send fixture: real
+        # message IDs are unique; album scoping correctly rejects file/photo mixing.
         ups = [self.inbox.upload(self.pid, 'image', PNG)['upload_id'] for _ in range(3)]
         out = self.inbox.send(self.pid, {'upload_ids': ups, 'client_id': 'wizalbum-12345', 'text': 'trip'})
         self.assertEqual(len(self.sent[-1][1]['paths']), 3)  # one kind-9 message carrying three imeta tags

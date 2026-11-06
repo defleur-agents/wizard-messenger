@@ -1,0 +1,11 @@
+# Synthetic source-only suites: no owner/provider accounts or container access.
+PyYAML
+pytest
+cryptography
+cbor2
+httpx
+fastapi
+webauthn
+pyOpenSSL
+pywebpush
+uvicorn
