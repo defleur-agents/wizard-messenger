@@ -18,6 +18,10 @@ from engine import EngineError, vault_password
 
 HEADER = 'X-Messenger-Owner-Proof'
 DOMAIN = 'wizard-messenger-owner-v1'
+# Platform owner proof (wizard-os spec/OWNER_PROOF.md, DECISIONS 106 approved, amended by 107): the App Manager's owner edge signs with this header and
+# domain, bound to the app id. The legacy header/domain above stay accepted for boxes still on a hand-built ingress.
+PLATFORM_HEADER = 'X-Wizard-App-Owner-Proof'
+PLATFORM_DOMAIN = 'wizard-app-owner-v1'
 
 
 def private_key(path):
@@ -44,9 +48,18 @@ def sign_request(key, method, target, *, now=None, nonce=None):
     return '.'.join((timestamp, nonce, signature))
 
 
+def sign_platform_request(key, app_id, method, target, *, now=None, nonce=None):
+    """What the platform owner edge sends (tests and fixtures only; Messenger never signs in production)."""
+    timestamp = str(int(time.time() if now is None else now))
+    nonce = nonce or secrets.token_hex(24)
+    message = '\n'.join((PLATFORM_DOMAIN, app_id, timestamp, nonce, method, target)).encode()
+    return '.'.join((timestamp, nonce, hmac.new(key, message, hashlib.sha256).hexdigest()))
+
+
 class TrustedOwner:
-    def __init__(self, data, *, enabled=False, proof_file=None, wrap_file=None):
+    def __init__(self, data, *, enabled=False, proof_file=None, wrap_file=None, app_id='messenger'):
         self.enabled = enabled
+        self.app_id = app_id
         self.lock = threading.Lock()
         self.seen = {}
         if not enabled:
@@ -65,9 +78,15 @@ class TrustedOwner:
 
     @classmethod
     def from_environment(cls, data):
-        return cls(data, enabled=os.environ.get('MESSENGER_TRUST_WIZARD_OWNER') == '1',
-                   proof_file=os.environ.get('MESSENGER_OWNER_PROOF_KEY_FILE'),
-                   wrap_file=os.environ.get('MESSENGER_OWNER_WRAP_KEY_FILE'))
+        env = os.environ.get
+        # The App Manager provisions WIZARD_OWNER_* for apps that declare `owner_proof` in wizard.md; a box with a
+        # hand-built ingress keeps its MESSENGER_OWNER_* lines. An explicit MESSENGER_TRUST_WIZARD_OWNER=0 opts out.
+        flag = env('MESSENGER_TRUST_WIZARD_OWNER')
+        platform = bool(env('WIZARD_OWNER_PROOF_KEY_FILE') and env('WIZARD_OWNER_WRAP_KEY_FILE'))
+        return cls(data, enabled=flag == '1' or (flag is None and platform),
+                   proof_file=env('MESSENGER_OWNER_PROOF_KEY_FILE') or env('WIZARD_OWNER_PROOF_KEY_FILE'),
+                   wrap_file=env('MESSENGER_OWNER_WRAP_KEY_FILE') or env('WIZARD_OWNER_WRAP_KEY_FILE'),
+                   app_id=env('WIZARD_OWNER_PROOF_APP') or 'messenger')
 
     def require(self, handler):
         if not self.enabled:
@@ -76,18 +95,25 @@ class TrustedOwner:
         if handler.headers.get('Authorization'):
             raise EngineError('owner_only', 'Owner browser access is required', 403)
         handler._origin(required=handler.command not in ('GET', 'HEAD'))
-        values = handler.headers.get_all(HEADER, [])
+        legacy = handler.headers.get_all(HEADER, [])
+        platform = handler.headers.get_all(PLATFORM_HEADER, [])
         try:
-            if len(values) != 1:
+            # Exactly one proof, of one kind: both kinds at once means something in front is misconfigured.
+            if len(legacy) + len(platform) != 1:
                 raise ValueError()
-            timestamp, nonce, signature = values[0].split('.')
+            value = (platform or legacy)[0]
+            timestamp, nonce, signature = value.split('.')
             if not timestamp.isdigit() or len(nonce) != 48 or any(c not in '0123456789abcdef' for c in nonce):
                 raise ValueError()
             now = time.time()
             if abs(now - int(timestamp)) > 30:
                 raise ValueError()
-            expected = sign_request(self.proof_key, handler.command, handler.path, now=int(timestamp), nonce=nonce)
-            if not hmac.compare_digest(expected, values[0]):
+            if platform:
+                expected = sign_platform_request(self.proof_key, self.app_id, handler.command, handler.path,
+                                                 now=int(timestamp), nonce=nonce)
+            else:
+                expected = sign_request(self.proof_key, handler.command, handler.path, now=int(timestamp), nonce=nonce)
+            if not hmac.compare_digest(expected, value):
                 raise ValueError()
             with self.lock:
                 self.seen = {k: v for k, v in self.seen.items() if v > now}

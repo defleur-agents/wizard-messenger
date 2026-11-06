@@ -31,6 +31,13 @@ view:
     build: "python3 tools/build_view.py"
     dist: static
 health: /healthz
+# Passphrase-free owner access through the platform owner edge (wizard-os spec/OWNER_PROOF.md, DECISIONS 106 approved, amended by 107). An App Manager that
+# doesn't know this key ignores it, and Messenger then keeps its passphrase sign-in.
+owner_proof:
+  scheme: hmac-v1
+  wrap_key: true                    # independent key for the remembered-unlock envelope, kept outside /data
+  activity: [/api/drafts]           # the visible view polls drafts; the hidden long poll does not count
+  strip: [X-Messenger-Owner-Proof]  # legacy proof header: never accepted from a browser
 provides: [messaging]
 uses: [browser]
 needs: []
