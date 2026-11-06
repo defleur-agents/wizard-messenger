@@ -4,7 +4,7 @@
 
 Open **Store** in Wizard and get **Messenger**. Everything installs on your own box; nothing is shared with Humanity Labs.
 
-Messenger is listed in the [official public Wizard App Index](https://apps.aiwizards.com/v1/apps/humanitylabs-org/wizard-messenger). Choose the **Standard** release for the current public recipe. It uses public, digest-pinned GHCR images for amd64 and arm64; Alpha membership, access to a developer's computer and rebuilding an image are not required. The older private Alpha catalog is a separate source, not the current public release.
+Messenger is listed in the [official public Wizard App Index](https://apps.aiwizards.com/v1/apps/humanitylabs-org/wizard-messenger). Messenger has one release channel: the Standard release. It uses public, digest-pinned GHCR images for amd64 and arm64; access to a developer's computer and rebuilding an image are not required.
 
 Messenger is a user-facing app and belongs under **Apps** in Store. Agent apps have no user interface; `type: service` describes Messenger's backend packaging, not its Store section. Searching **Messenger** also finds it; being installed does not hide its card. Do not switch an existing installation's release merely to find or open it.
 

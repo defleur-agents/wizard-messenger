@@ -5,7 +5,7 @@ name: Publish bridge images
 # Tags are immutable: sha-<this repo's commit> always, plus the upstream commit the first time it is built.
 on:
   push:
-    branches: [feature/unified-inbox, main]
+    branches: [main]
     paths: [.github/workflows/bridges.yml, plumbing/line.Dockerfile, plumbing/connectors-provenance.json]
   workflow_dispatch: {}
 permissions:
