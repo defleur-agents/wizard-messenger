@@ -76,6 +76,10 @@ def test_artifact_error_never_masks_primary_and_receipt(runner,monkeypatch,kind)
 
 
 def test_native_namespace_exit_failure_keeps_receipt(runner,monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules,'resource_guard',types.SimpleNamespace(acquire_resource_locks=lambda _: -1,resource_sample=lambda *a:{}))
+    cap=runner['ROOT']/'capsule';cap.mkdir();(cap/'resource-plan.json').write_text('{}')
+    monkeypatch.setattr(subprocess,'check_output',lambda *a,**k:'0 synthetic\n')
     monkeypatch.setitem(runner,'verify',lambda:{'source':'immutable','images':[]})
     (runner['ROOT']/'manifest.json').write_text('{}')
     monkeypatch.setitem(runner,'tools',lambda _:tuple(Path('/synthetic') for _ in range(4)))
