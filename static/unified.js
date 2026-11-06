@@ -2753,7 +2753,6 @@
     };
     const paintAgents = st => {
       agents.replaceChildren();
-      if (st.gateway_connected === false) agents.append(node('p', 'u-more-note warn', 'Your agents can\'t reach Messenger yet. Ask your Wizard to finish connecting it.'));
       for (const agent of st.wizard_agents || []) {
         agents.append(levelRow(agent, agent.label || 'Your Wizard agent', st.wizard_levels || [], async level => {
           await api('api/view/agents/wizard/' + encodeURIComponent(agent.id), {method: 'POST', body: {level}});
