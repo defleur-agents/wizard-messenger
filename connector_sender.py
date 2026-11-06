@@ -10,8 +10,8 @@ import json
 import re
 import socket
 
-# Fixed messages keyed by pinned bridge contracts. Never forward upstream text:
-# it may contain identifiers, cookies, request URLs or submitted credentials.
+# Fixed messages keyed by pinned bridge contracts. Instagram unknown errors use
+# a bounded, redacted owner-only fallback below; never log raw bridge responses.
 LOGIN_ERRORS = {
     'FI.MAU.BRIDGE.LOGIN_CANCELLED': ('login_cancelled', 'Login was cancelled. Start again when you are ready.', 409),
     'FI.MAU.BRIDGE.LOGIN_TIMED_OUT': ('login_expired', 'Login timed out. Start a new login.', 409),
@@ -23,6 +23,14 @@ LOGIN_ERRORS = {
     'FI.MAU.META_ACCOUNT_SUSPENDED': ('login_account_restricted', 'Instagram reports an account suspension. Review it in Instagram before retrying.', 409),
     'FI.MAU.META_ACCOUNT_PENDING_DELETION': ('login_account_restricted', 'Instagram reports this account is scheduled for deletion. Review it in Instagram before retrying.', 409),
     'FI.MAU.META_INBOX_LOAD_FAILED': ('login_inbox_failed', 'Instagram could not load the inbox after login. Check the official app and try again later.', 502),
+    'FI.MAU.META_MISSING_COOKIES': ('login_missing_cookies', 'The copied browser request is missing Instagram sign-in cookies. Open your Instagram inbox, reload with Network open, then copy the inbox request again.', 409),
+    'FI.MAU.META_TOKEN_ERROR': ('login_session_rejected', 'Instagram ended this browser session immediately. Sign in again in your browser and copy a fresh inbox request.', 409),
+    'FI.MAU.META_AFAD_STOPPED': ('login_approval_rejected', 'The Instagram approval request expired or was declined. Start again and approve the new request in Instagram.', 409),
+    'FI.MAU.META_NO_SMS_AVAILABLE': ('login_sms_unavailable', 'Instagram will not send a text message code right now. Choose another verification method, or try browser sign-in.', 409),
+    'FI.MAU.META_TOKEN_EXCHANGE_FAILED': ('login_session_failed', 'Instagram did not provide a usable sign-in session. Try the recommended browser sign-in.', 409),
+    'FI.MAU.META_CAA_FAILED': ('login_password_failed', 'Instagram could not complete username and password sign-in. Try the recommended browser sign-in instead.', 409),
+    'FI.MAU.META_CAA_CLIENT_HTTP_FAILED': ('login_request_failed', 'The Instagram verification request could not complete on this device. Try browser sign-in, or start again.', 409),
+    'FI.MAU.IG_MISSING_AUTH': ('login_session_failed', 'Instagram accepted a sign-in step but did not provide a messaging session. Try the recommended browser sign-in.', 409),
     'FI.MAU.META_WEB_CHECKPOINT_FAILED': ('login_verification_failed', 'Instagram verification did not complete. Start again when your connection is stable.', 502),
     'FI.MAU.SLACK.CAPTCHA_REJECTED': ('login_challenge_required', 'Slack requires a new interactive CAPTCHA. This view cannot safely complete it.', 409),
     'DEV.HIGHEST.LINE.TOO_MANY_ATTEMPTS': ('login_rate_limited', 'LINE is limiting sign-in attempts. Wait before starting again.', 429),
@@ -30,15 +38,82 @@ LOGIN_ERRORS = {
     'DEV.HIGHEST.LINE.VERIFICATION_FAILED': ('login_verification_failed', 'LINE verification did not complete. Start a new login and approve it on your phone.', 409),
     'DEV.HIGHEST.LINE.NO_KEYCHAIN': ('login_keys_unavailable', 'LINE did not provide the encryption keys required by this bridge. Review linked devices in LINE before trying again.', 409),
 }
-for _code in ('FI.MAU.META_CHALLENGE_ERROR', 'FI.MAU.META_CHECKPOINT_ERROR', 'FI.MAU.META_CONSENT_ERROR', 'FI.MAU.META_ACCOUNT_RECOVERY_REQUIRED', 'FI.MAU.META_NO_SUPPORTED_MFA', 'FI.MAU.META_GOOGLE_RECAPTCHA', 'FI.MAU.META_PASSKEY_MANDATORY', 'FI.MAU.META_OAUTH_MANDATORY', 'FI.MAU.META_UNSUPPORTED_CAA_STEP', 'FI.MAU.META_UNSUPPORTED_WEB_CHECKPOINT', 'FI.MAU.META_WEB_CHECKPOINT_CAPTCHA', 'FI.MAU.IG_CAA_FALLBACK_DISABLED'):
-    LOGIN_ERRORS[_code] = ('login_challenge_required', 'Instagram requires verification this view cannot safely complete. Finish verification in Instagram, then start a new login.', 409)
+# Distinguish the actions an owner must take instead of calling every rejection
+# "verification". These are terminal bridge errors, not resumable LoginSteps.
+for _code, _message in {
+    'FI.MAU.META_CHALLENGE_ERROR': 'Instagram needs a security check. Complete it on instagram.com, then use browser sign-in.',
+    'FI.MAU.META_CHECKPOINT_ERROR': 'Instagram stopped this sign-in at a security checkpoint. Complete it on instagram.com, then use browser sign-in.',
+    'FI.MAU.META_CONSENT_ERROR': 'Instagram needs you to accept an account notice. Open Instagram, review it, then use browser sign-in.',
+    'FI.MAU.META_ACCOUNT_RECOVERY_REQUIRED': 'Instagram requires account recovery, not a verification code. Finish recovery in the official app or website before trying again.',
+    'FI.MAU.META_WEB_CHECKPOINT_CAPTCHA': 'Instagram requires an interactive CAPTCHA. Use browser sign-in and finish the check on instagram.com.',
+    'FI.MAU.META_PASSKEY_MANDATORY': 'Instagram requires a passkey. Use browser sign-in to complete it on instagram.com.',
+    'FI.MAU.META_GOOGLE_RECAPTCHA': 'Instagram requires reCAPTCHA. Use browser sign-in and finish it on instagram.com.',
+    'FI.MAU.META_OAUTH_MANDATORY': 'Instagram requires Google sign-in. Use browser sign-in instead.',
+    'FI.MAU.META_NO_SUPPORTED_MFA': 'Instagram offered no verification method this password flow supports. Use browser sign-in instead.',
+    'FI.MAU.META_UNSUPPORTED_CAA_STEP': 'Instagram returned a password sign-in step this bridge cannot safely complete. Use browser sign-in instead.',
+    'FI.MAU.META_UNSUPPORTED_WEB_CHECKPOINT': 'Instagram returned a security check this bridge cannot safely complete. Finish it on instagram.com, then use browser sign-in.',
+    'FI.MAU.IG_CAA_FALLBACK_DISABLED': 'Instagram returned an unexpected verification step. Complete verification on instagram.com, then use browser sign-in.',
+}.items():
+    LOGIN_ERRORS[_code] = ('login_challenge_required', _message, 409)
 from types import MappingProxyType
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, quote, quote_plus
+import html
+import unicodedata
+import hashlib
+import threading
+import time
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 from urllib.error import HTTPError, URLError
 from unified import fail, http
 from engine import EngineError
 from connectors import PROVIDERS
+
+
+def sanitized_login_error(value, body=None, token='', fingerprints=()):
+    """Owner-only diagnostic, never a log payload; reject structured dumps.
+
+    Strip submitted values (including URL/JSON/HTML encodings) before clipping,
+    then remove URLs, contact identifiers, headers, cookie pairs and opaque IDs.
+    No upstream HTML is interpreted by the view (it uses textContent).
+    """
+    if not isinstance(value, str) or not value.strip() or len(value) > 4096:
+        return ''
+    secrets = [token] if token else []
+    def collect(obj):
+        if isinstance(obj, dict):
+            for v in obj.values(): collect(v)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj: collect(v)
+        elif isinstance(obj, str) and obj: secrets.append(obj)
+    collect(body)
+    text = unicodedata.normalize('NFKC', html.unescape(value))
+    for secret in sorted({unicodedata.normalize('NFKC', html.unescape(s)) for s in secrets}, key=len, reverse=True):
+        for v in {secret, quote(secret, safe=''), quote_plus(secret), json.dumps(secret)[1:-1]}:
+            text = re.sub(re.escape(v), '[hidden]', text, flags=re.I)
+    # Previous-step credentials are held only as hashes, never plaintext.
+    # Scan before clipping so a prior password echoed at a later code/approval
+    # step cannot reappear in an owner-facing diagnostic.
+    hidden = set()
+    for size, digest in fingerprints:
+        for start in range(max(0, len(text) - size + 1)):
+            if hashlib.sha256(text[start:start + size].casefold().encode()).digest() == digest:
+                hidden.update(range(start, start + size))
+    if hidden:
+        text = ''.join('[hidden]' if i in hidden and (i == 0 or i - 1 not in hidden) else '' if i in hidden else c for i, c in enumerate(text))
+    # Credential headers/assignments can include values from an earlier step.
+    text = re.sub(r'(?i)\b(?:authorization|cookie|set-cookie)\s*:[^\r\n]*', '[hidden]', text)
+    text = re.sub(r'(?i)\b(?:password|passwd|sessionid|csrftoken|access_token|token|verification_code|username)\s*[=:]\s*[^\s,;]+', '[hidden]', text)
+    text = re.sub(r'(?i)(?:https?://|www\.)[^\s<>]+', '[link removed]', text)
+    text = re.sub(r'\b[^\s@]+@[^\s@]+\.[^\s@]+', '[hidden]', text)
+    text = re.sub(r'\b[\w.+%-]+=[^\s,;]+', '[hidden]', text)
+    text = re.sub(r'\b[\w/+=.-]{24,}\b|\b[0-9]{4,}\b', '[hidden]', text)
+    text = ''.join(c for c in text if not unicodedata.category(c).startswith('C'))
+    text = re.sub(r'<[^>]*>', '', text)
+    text = ' '.join(text.split())
+    # JSON/stack dumps are not useful owner-facing explanations.
+    if any(c in text for c in '{}') or 'Traceback' in text:
+        return ''
+    return text[:300]
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -60,7 +135,9 @@ class LocalOwnerSender:
             if u.scheme not in ('http', 'https') or not u.hostname or u.username or u.password or u.path or u.query or u.fragment:
                 raise ValueError('A base must be an operator-pinned origin')
         self.bases = MappingProxyType(targets)
-        self.opener = build_opener(NoRedirect)
+        self.opener = build_opener(NoRedirect())
+        self._login_redactions = {}
+        self._redaction_lock = threading.Lock()
 
     def __call__(self, *, network, base, path, method, body, token='', timeout=15, content_type=None):
         if base != self.bases.get(network) or method not in ('POST', 'PUT'):
@@ -113,14 +190,40 @@ class LocalOwnerSender:
             encoded = json.dumps(body).encode()
             headers['Content-Type'] = 'application/json'
         login_route = network != 'matrix' and route.startswith('/login/')
+        fingerprints = ()
+        redaction_key = None
+        if network == 'instagram' and login_route:
+            match = re.match(r'/login/(?:step|cancel)/([^/]+)', route)
+            if match:
+                redaction_key = match[1]
+                with self._redaction_lock:
+                    now = time.monotonic()
+                    self._login_redactions = {k: v for k, v in self._login_redactions.items() if now - v[0] < 1200}
+                    prior = self._login_redactions.get(redaction_key, (now, set()))[1]
+                    if isinstance(body, dict):
+                        for secret in body.values():
+                            if isinstance(secret, str) and secret:
+                                value = unicodedata.normalize('NFKC', html.unescape(secret)).casefold()
+                                # Include the same encodings removed from current submissions.
+                                for variant in {value, quote(value, safe=''), quote_plus(value), json.dumps(value)[1:-1]}:
+                                    prior.add((len(variant), hashlib.sha256(variant.encode()).digest()))
+                    fingerprints = tuple(prior)
+                    self._login_redactions[redaction_key] = (now, prior)
+                    if len(prior) > 512 or len(self._login_redactions) > 64 or route.startswith('/login/cancel/'):
+                        self._login_redactions.pop(redaction_key, None)
         # Only step workers use the long bound; other owner writes retain 65s.
         limit = 620 if login_route and route.startswith('/login/step/') else 65
         try:
             with self.opener.open(Request(base + path, data=encoded, headers=headers, method=method), timeout=min(timeout, limit)) as response:
-                return json.loads(response.read(8 * 1024 * 1024))
+                result = json.loads(response.read(8 * 1024 * 1024))
+                if redaction_key and isinstance(result, dict) and result.get('type') == 'complete':
+                    with self._redaction_lock:
+                        self._login_redactions.pop(redaction_key, None)
+                return result
         except HTTPError as error:
             status = error.code
             code = None
+            data = {}
             try:
                 if login_route:
                     data = json.loads(error.read(16384))
@@ -135,6 +238,10 @@ class LocalOwnerSender:
                     fail(*mapped)
                 if status == 429:
                     fail('login_rate_limited', 'Sign-in is rate limited. Wait before trying again.', 429)
+                if network == 'instagram':
+                    reason = sanitized_login_error(data.get('error') if isinstance(data, dict) else None, body, token, fingerprints)
+                    if reason:
+                        fail('login_failed', 'Instagram sign-in: ' + reason + ' Try browser sign-in if this keeps happening.', 409)
                 if status in (400, 401, 403):
                     fail('login_failed', 'Bridge sign-in could not complete. Review verification in the provider app, then start again.', 409)
             fail('owner_transport_failed', 'Private owner transport failed', 502)

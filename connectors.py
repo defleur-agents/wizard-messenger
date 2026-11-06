@@ -40,7 +40,7 @@ PROVIDERS = {p.id: p for p in (
     # Google/SSO workspaces where the emailed code never comes). 'app' is bot-only and stays off.
     Provider('slack', 'Slack', 29335, ('token', 'email')),
     Provider('line', 'LINE', 29322, ('dev.highest.matrix.line.qr_login', 'dev.highest.matrix.line.email_login')),
-    Provider('instagram', 'Instagram DMs', 29330, ('android', 'instagram-password')),
+    Provider('instagram', 'Instagram DMs', 29330, ('instagram', 'android', 'instagram-password')),
     # Browser sign-in networks (bridgev2 'cookies' step): the owner pastes his signed-in browser request.
     Provider('facebook', 'Facebook Messenger', 29319, ('messenger', 'facebook')),
     Provider('twitter', 'X', 29327, ('cookies',)),

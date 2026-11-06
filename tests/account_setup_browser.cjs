@@ -5,15 +5,16 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
 const staticDir = path.resolve(__dirname, '../static'), shellDir = process.env.SHELL_DIR;
 const lineOnly = process.env.LINE_SETUP_ONLY === '1';
-const fixtureSkins = lineOnly ? ['nebula', 'signal'] : ['nebula', 'sepia'];
+const instagramOnly = process.env.INSTAGRAM_SETUP_ONLY === '1';
+const fixtureSkins = lineOnly || instagramOnly ? ['nebula', 'signal'] : ['nebula', 'sepia'];
 let lineHost;
-if(lineOnly) {
+if(lineOnly || instagramOnly) {
   // Reuse the current shared Appearance host contract from draft_attachment_recovery_browser.
   const vm=require('node:vm'),src=fs.readFileSync(path.join(shellDir,'core/skins.js'),'utf8');
   const table=src.slice(src.indexOf('  const SKINS = ['),src.indexOf('  // Each skin'));
   const palettes=vm.runInNewContext('const T=o=>o;'+table+';SKINS').filter(s=>fixtureSkins.includes(s.id)).map(s=>({id:s.id,t:s.t}));
   assert.equal(palettes.length,2);
-  lineHost=`<!doctype html><html data-skin="nebula"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><script>window.WizCore={apps:()=>({APPS:[{url:'/app/'}]})};window.setFixtureSkin=id=>{const s=JSON.parse(atob('${Buffer.from(JSON.stringify(palettes)).toString('base64')}')).find(s=>s.id===id);for(const[k,v]of Object.entries(s.t))document.documentElement.style.setProperty('--'+k,v);document.documentElement.dataset.skin=id;window.WizAppearance?.sync()};setFixtureSkin('nebula')</script><script src="/wizard-os-home/core/appearance-host.js" defer></script><style>html,body{margin:0;height:100%;background:var(--bg)}nav{height:36px;display:flex}nav button{flex:1}iframe{border:0;display:block;width:100%;height:calc(100vh - 36px)}</style></head><body><nav><button onclick="setFixtureSkin('nebula')">Nebula</button><button onclick="setFixtureSkin('signal')">Signal</button></nav><div class="st-embed win"><iframe src="/app/" title="Synthetic LINE setup"></iframe></div></body></html>`;
+  lineHost=`<!doctype html><html data-skin="nebula"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><script>window.WizCore={apps:()=>({APPS:[{url:'/app/'}]})};window.setFixtureSkin=id=>{const s=JSON.parse(atob('${Buffer.from(JSON.stringify(palettes)).toString('base64')}')).find(s=>s.id===id);for(const[k,v]of Object.entries(s.t))document.documentElement.style.setProperty('--'+k,v);document.documentElement.dataset.skin=id;window.WizAppearance?.sync()};setFixtureSkin('nebula')</script><script src="/wizard-os-home/core/appearance-host.js" defer></script><style>html,body{margin:0;height:100%;background:var(--bg)}nav{height:36px;display:flex}nav button{flex:1}iframe{border:0;display:block;width:100%;height:calc(100vh - 36px)}</style></head><body><nav><button onclick="setFixtureSkin('nebula')">Nebula</button><button onclick="setFixtureSkin('signal')">Signal</button></nav><div class="st-embed win"><iframe src="/app/" title="Synthetic account setup"></iframe></div></body></html>`;
 }
 const out = path.resolve(process.argv[2] || 'account-setup-evidence'); fs.mkdirSync(out, {recursive:true});
 const L = require('../static/app.js');
@@ -31,7 +32,10 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
     page.on('pageerror',e=>errors.push(e.message));
     const prov=(network,label,state,flows=[])=>({network,label,state,flows,supported:true,logins:state==='connected'?[{id:'fixture',name:'Fixture account'}]:[]});
     const providers=[prov('telegram','Telegram','connected'),prov('slack','Slack','disconnected',[{id:'cookies',name:'Browser'}]),prov('instagram','Instagram DMs','disconnected',[{id:'android',name:'Native'}]),prov('twitter','X','not_configured')];
-    let releaseEnable, statusReads=0, enableCount=0;
+    if(instagramOnly) providers.find(p=>p.network==='instagram').flows=['instagram','android','instagram-password'].map(id=>({id}));
+    let releaseEnable, statusReads=0, enableCount=0, loginPhase=0;
+    const loginCalls=[];
+    const loginStep=(type,step_id,params={})=>({login_id:'synthetic-instagram',txn_id:'bls_'+step_id,type,step_id:'fi.mau.meta.instagram.'+step_id,...params});
     if(lineOnly) providers.push(prov('line','LINE','not_configured'));
     let seq=0, id=0, releaseFrameCapture=null, holdFrames=false;
     let frameCaptureGate=Promise.resolve();
@@ -40,7 +44,7 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
       if(u.origin!=='https://messenger.test'){forbidden.push(u.origin);return route.abort();}
       const p=u.pathname, api=p.replace(/^\/app\//,'/');
       const ok=result=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,result})});
-      if(p==='/host')return route.fulfill({contentType:'text/html',body:lineOnly?lineHost:host});
+      if(p==='/host')return route.fulfill({contentType:'text/html',body:lineOnly||instagramOnly?lineHost:host});
       if(p.startsWith('/wizard-os-home/')){const file=path.join(shellDir,p.slice(16));return fs.existsSync(file)&&fs.statSync(file).isFile()?route.fulfill({contentType:types[path.extname(file)]||'application/octet-stream',body:fs.readFileSync(file)}):route.fulfill({status:404,body:''});}
       if(api==='/api/view/session')return ok({authenticated:true,csrf_token:'synthetic'});
       if(api==='/api/status')return ok({state:'ready',account_configured:true});
@@ -56,6 +60,19 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
         Object.assign(p,++statusReads===1 ? {state:'unavailable',flows:[]} : {state:'disconnected',flows:[{id:'dev.highest.matrix.line.qr_login'},{id:'dev.highest.matrix.line.email_login'}]}); return ok(p);
       }
       if(lineOnly && /\/line\/(start|step|disconnect)$/.test(api)) { forbidden.push(api); return route.abort(); }
+      if(instagramOnly && api==='/api/unified/connectors/instagram/start') {
+        const b=JSON.parse(req.postData()); loginCalls.push({action:'start',flow:b.flow}); loginPhase=0;
+        if(b.flow==='instagram') return ok(loginStep('cookies','cookies',{cookies:{url:'https://www.instagram.com/',fields:['sessionid','csrftoken','ds_user_id'].map(id=>({id,required:true,sources:[{type:'cookie',name:id}]}))}}));
+        return ok(loginStep('user_input','credentials',{user_input:{fields:[{id:'username',name:'Username',type:'username'},{id:'password',name:'Password',type:'password'}]}}));
+      }
+      if(instagramOnly && api==='/api/unified/connectors/instagram/step') {
+        const b=JSON.parse(req.postData()); loginCalls.push({action:'step',type:b.type,fields:Object.keys(b.fields||{})});
+        if(b.fields?.username==='synthetic-rejected') return route.fulfill({status:409,json:{ok:false,error:{code:'login_failed',message:'Instagram sign-in: The password you entered is incorrect. Try browser sign-in if this keeps happening.'}}});
+        if(b.type==='cookies') {assert.deepEqual(Object.keys(b.fields).sort(),['csrftoken','ds_user_id','sessionid']);return ok({type:'complete'});}
+        if(++loginPhase===1) return ok(loginStep('user_input','totp',{instructions:'Enter the code from your authenticator app.',user_input:{fields:[{id:'code',name:'Verification code',type:'2fa_code'}]}}));
+        if(loginPhase===2) return ok(loginStep('display_and_wait','afad_wait',{instructions:'Approve this request in the Instagram app.',display_and_wait:{type:'nothing'}}));
+        return ok({type:'complete'});
+      }
       if(api==='/api/unified/connectors/browser/start'){starts.push(JSON.parse(req.postData()));return ok({id:'synthetic-'+(++id)});}
       if(/\/browser\/[^/]+\/frame$/.test(api)){await new Promise(r=>setTimeout(r,120));if(holdFrames)await frameCaptureGate;return ok({seq:++seq,frame,state:'signing_in',host:'synthetic.invalid'});}
       if(/\/browser\/[^/]+\/input$/.test(api)){inputs.push(JSON.parse(req.postData()));return ok({});}
@@ -78,6 +95,49 @@ const host = `<!doctype html><html data-shell="proxy"><head><meta name="viewport
     assert.equal(await f.locator('.c-viewer').count(),0);
     await f.locator('.c-plus').click();
     assert.deepEqual(await f.locator('.c-add').evaluateAll(es=>es.map(e=>e.dataset.network).sort()),lineOnly?['instagram','line','slack','twitter']:['instagram','slack','twitter']);
+    if(instagramOnly) {
+      await f.locator('.c-add[data-network=instagram]').click();
+      const doc=await f.evaluate(()=>window.__instagramDocument=crypto.randomUUID());
+      const captures=async state=>{
+        for(const skin of fixtureSkins) {
+          await page.getByRole('button',{name:skin==='nebula'?'Nebula':'Signal',exact:true}).click();
+          await f.waitForFunction(s=>document.documentElement.dataset.skin===s,skin); await page.waitForTimeout(350);
+          assert.equal(await f.evaluate(()=>window.__instagramDocument),doc);
+          assert.equal(await f.locator('.u-sheet').evaluate(e=>e.scrollWidth>e.clientWidth+1),false);
+          await page.screenshot({path:path.join(out,`${profile.name}-${skin}-instagram-${state}.png`)});
+        }
+      };
+      assert.equal(await f.locator('.c-card button').first().innerText(),'Sign in with browser (recommended)');
+      await captures('options');
+      await f.getByRole('button',{name:'Sign in with browser (recommended) for Instagram DMs',exact:true}).click();
+      await f.locator('.c-paste').waitFor(); await captures('browser');
+      const paste="curl 'https://www.instagram.com/direct/inbox/' -H 'cookie: sessionid=synthetic-session; csrftoken=synthetic-csrf; ds_user_id=1234; other=discarded'";
+      await f.locator('.c-paste').fill(paste); await captures('browser-draft');
+      assert.equal(await f.locator('.c-paste').inputValue(),paste,'skin changes preserve unsent cookie draft');
+      await f.getByRole('button',{name:'Connect',exact:true}).click();
+      await f.getByText('Instagram connected',{exact:true}).waitFor();
+      await f.getByRole('button',{name:'Done',exact:true}).click();
+      await f.locator('.c-plus').click(); await f.locator('.c-add[data-network=instagram]').click();
+      await f.getByRole('button',{name:'Username and password for Instagram DMs',exact:true}).click();
+      await f.locator('input[name=username]').fill('synthetic-owner'); await f.locator('input[name=password]').fill('synthetic-password');
+      await f.getByRole('button',{name:'Continue',exact:true}).click();
+      await f.locator('input[name=code]').waitFor(); assert.equal(await f.locator('input[name=code]').getAttribute('type'),'password');
+      await captures('verification-code');
+      await f.locator('input[name=code]').fill('123456'); await f.getByRole('button',{name:'Continue',exact:true}).click();
+      await f.getByRole('button',{name:'I approved it — continue',exact:true}).waitFor(); await captures('approval');
+      await f.getByRole('button',{name:'I approved it — continue',exact:true}).click();
+      await f.getByText('Instagram connected',{exact:true}).waitFor();
+      await f.getByRole('button',{name:'Done',exact:true}).click();
+      await f.locator('.c-plus').click(); await f.locator('.c-add[data-network=instagram]').click();
+      await f.getByRole('button',{name:'Username and password for Instagram DMs',exact:true}).click();
+      await f.locator('input[name=username]').fill('synthetic-rejected'); await f.locator('input[name=password]').fill('synthetic-password');
+      await f.getByRole('button',{name:'Continue',exact:true}).click();
+      await f.getByText(/The password you entered is incorrect/).waitFor();
+      await f.getByRole('button',{name:'Use browser sign-in',exact:true}).waitFor(); await captures('rejection');
+      assert.equal(starts.length,0,'Instagram never opens a remote browser'); assert.deepEqual(errors,[]); assert.deepEqual(forbidden,[]);
+      summary.push({profile:profile.name,status:'PASS',coverage:'synthetic hosted Instagram browser cookies + credentials/code/approval only; no real login',loginCalls});
+      await ctx.close(); continue;
+    }
     if(lineOnly) {
       await f.locator('.c-add[data-network=line]').click();
       assert.equal(await f.locator('.c-card .c-pill').innerText(),'Needs one-time setup');

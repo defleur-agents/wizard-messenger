@@ -181,8 +181,52 @@ async function lineSetupFailureAndClose() {
     assert.equal(calls.filter(p=>p.endsWith('/start')).length,0); await ui.close();
   }
 }
+async function instagramBrowserAndPasswordSteps() {
+  const root=new Element('main'), calls=[]; let phase=0, held=deferred();
+  const fields=['sessionid','csrftoken','ds_user_id'].map(id=>({id,required:true,sources:[{type:'cookie',name:id}]}));
+  const credentials=step({step_id:'fi.mau.meta.instagram.credentials',user_input:{fields:[{id:'username',type:'username'},{id:'password',type:'password'}]}});
+  const ui=window.MessengerConnectors(root,async(p,m,b)=>{
+    calls.push({p,b:b&&JSON.parse(JSON.stringify(b))});
+    if(p.endsWith('/start')) return b.flow==='instagram' ? step({type:'cookies',cookies:{url:'https://www.instagram.com/',fields}}) : credentials;
+    if(p.endsWith('/step')) {
+      if(b.type==='cookies') return {type:'complete'};
+      if(++phase===1) return step({step_id:'totp',txn_id:'bls_code',user_input:{fields:[{id:'code',type:'2fa_code'}]}});
+      if(phase===2) return step({type:'display_and_wait',step_id:'afad_wait',txn_id:'bls_approve',instructions:'Approve the request in the Instagram app',display_and_wait:{type:'nothing'}});
+      return held.promise;
+    }
+    return {providers:[{network:'instagram',label:'Instagram DMs',supported:true,state:'disconnected',flows:['android','instagram-password','instagram'].map(id=>({id})),logins:[]}]};
+  });
+  await ui.show(); await all(root).find(n=>n.tag==='button'&&n.dataset.network==='instagram').onclick();
+  const actions=all(root).filter(n=>n.tag==='button');
+  assert.equal(actions[0].textContent,'Sign in with browser (recommended)');
+  await actions[0].onclick();
+  assert.match(text(root),/Network tab/); assert.match(text(root),/never into chat/);
+  const paste=all(root).find(n=>n.tag==='textarea');
+  paste.value="curl 'https://www.instagram.com/direct/inbox/' -b 'sessionid=synthetic-session; csrftoken=synthetic-csrf; ds_user_id=1234; other=not-forwarded'";
+  await submit(root); assert.equal(paste.value,'');
+  assert.deepEqual(calls.find(c=>c.p.endsWith('/step')).b.fields,{sessionid:'synthetic-session',csrftoken:'synthetic-csrf',ds_user_id:'1234'});
+  await ui.start('instagram','android');
+  for(const n of all(root).filter(n=>n.tag==='input')) n.value='synthetic';
+  await submit(root); assert.equal(all(root).find(n=>n.name==='code').type,'password');
+  all(root).find(n=>n.name==='code').value='123456'; await submit(root);
+  const approved=button(root,'I approved it — continue'); assert.ok(approved);
+  assert.equal(phase,2,'wait does not advance until owner continues');
+  const pending=approved.onclick(); await approved.onclick(); await tick();
+  assert.match(text(root),/Checking Instagram approval/); assert.equal(phase,3,'approval double click deduplicated');
+  assert.deepEqual(calls.filter(c=>c.p.endsWith('/step')).at(-1).b.fields,{});
+  await ui.close(); held.reject(new Error('late approval failure')); await pending;
+  assert.equal(root.children.length,0,'late verification cannot reopen closed sheet');
+}
+async function instagramCaptchaOffersSafeBrowserFallback() {
+  const root=new Element('main');
+  const ui=window.MessengerConnectors(root,async()=>step({type:'cookies',cookies:{fields:[{id:'captcha_token',sources:[{type:'special',name:'captcha_token'}]}]}}));
+  await ui.start('instagram','instagram-password');
+  assert.match(text(root),/interactive CAPTCHA/); assert.ok(button(root,'Use browser sign-in'));
+  assert.equal(all(root).filter(n=>n.tag==='textarea').length,0,'never ask owner to invent CAPTCHA token');
+  await ui.close();
+}
 (async()=>{
-  const tests=[delayedStartClose,competingStartsAndCloseDuringCancel,waitErrorsAreNotExpiry,pendingPollsDoNotReplaySecrets,lineQRPinAndCloseErrorFence,challengeIsHumanActionNotBlankFailure,telegramApplicationSetup,lineFirstRunSetup,lineSetupFailureAndClose];
+  const tests=[instagramBrowserAndPasswordSteps,instagramCaptchaOffersSafeBrowserFallback,delayedStartClose,competingStartsAndCloseDuringCancel,waitErrorsAreNotExpiry,pendingPollsDoNotReplaySecrets,lineQRPinAndCloseErrorFence,challengeIsHumanActionNotBlankFailure,telegramApplicationSetup,lineFirstRunSetup,lineSetupFailureAndClose];
   for(const test of tests) await test();
   console.log(`connector login runtime: ${tests.length} synthetic UI regressions passed`);
 })().catch(e=>{console.error(e);process.exitCode=1;});

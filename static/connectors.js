@@ -65,7 +65,7 @@
     telegram: 'Links as a new Telegram device.',
     slack: 'Signs in as you, like the Slack desktop app. Works with Google and SSO workspaces.',
     line: 'Links as a LINE desktop device. LINE may show a PIN to confirm.',
-    instagram: 'Signs in for your Instagram DMs. Instagram may ask you to approve the new login.',
+    instagram: 'Browser sign-in handles Instagram verification in your own browser. Use a computer for the recommended option. Username and password is an alternative.',
     signal: 'Links as a Signal linked device.',
     facebook: 'Signs in like messenger.com in your browser. Facebook may ask for your encrypted-chats PIN.',
     twitter: 'Signs in like x.com in your browser, then asks for your X Chat passcode (4 digits).',
@@ -83,7 +83,7 @@
   const FLOW_LABEL = {
     qr: 'Show QR code', phone: 'Use a pairing code instead', email: 'Sign in with email', token: 'Use my browser sign-in',
     'dev.highest.matrix.line.qr_login': 'Show QR code', 'dev.highest.matrix.line.email_login': 'Sign in with email & password',
-    android: 'Sign in with username & password', 'instagram-password': 'Try the web sign-in instead',
+    instagram: 'Sign in with browser (recommended)', android: 'Username and password', 'instagram-password': 'Username and password (web alternative)',
     messenger: 'Sign in with your browser', facebook: 'Use facebook.com instead', cookies: 'Sign in with your browser', google: 'Sign in with Google', browser: 'Sign in with your browser',
   };
   const STATE = {
@@ -168,9 +168,9 @@
     async function start(network, flow) {
       detailOpen = true;
       if (flow === 'browser' || String(flow).startsWith('browser:')) return startBrowser(network, String(flow).split(':')[1]);
+      root.replaceChildren(heading(network), element('p', 'helper', 'Starting…'));
       const mine = generation + 1;
       await cancel(); if (mine !== generation) return;
-      root.replaceChildren(heading(network), element('p', 'helper', 'Starting…'));
       try {
         const result = await request(network, 'start', {flow});
         if (mine !== generation) {
@@ -187,6 +187,7 @@
       root.classList.remove('c-viewer'); resizeCleanup?.(); resizeCleanup = null;
       problem(error);
       button(root, 'Start again', async () => start(network, flow), 'primary wide');
+      if (network === 'instagram' && flow !== 'instagram') button(root, 'Use browser sign-in', () => start(network, 'instagram'));
       button(root, 'Back to accounts', async () => show());
     }
     async function advance(network, payload, fields, mine) {
@@ -261,6 +262,17 @@
         back();
         // The bridge answers once the phone acts, or with a refreshed code, so wait while this owner
         // screen is open. Closing the sheet bumps the generation and cancels the login.
+        if (network === 'instagram') {
+          wait.textContent = 'Approve this sign-in in Instagram, then continue here.';
+          let checking = false;
+          const approve = button(root, 'I approved it — continue', async () => {
+            if (checking || mine !== generation) return;
+            checking = true; approve.disabled = true; wait.textContent = 'Checking Instagram approval…';
+            try { await step(network, flow, await advance(network, payload(), {}, mine), mine); }
+            catch (err) { failure(err, network, flow, mine); }
+          }, 'primary wide');
+          return;
+        }
         let next;
         try { next = await advance(network, payload(), {}, mine); }
         catch (e) {
@@ -272,7 +284,8 @@
         await step(network, flow, next, mine);
       } else if (result.type === 'challenge') {
         root.append(element('p', 'helper', label(network) + ' requires browser verification (such as a CAPTCHA or checkpoint). This view cannot safely complete it. Finish verification in the official app or website, then start a new login. Completing it elsewhere may not resume this bridge session.'));
-        button(root, 'Start again', async () => start(network, flow), 'primary wide'); back();
+        if (network === 'instagram') button(root, 'Use browser sign-in', () => start(network, 'instagram'), 'primary wide');
+        button(root, 'Start again', async () => start(network, flow)); back();
       } else if (result.type === 'user_input') {
         if (result.instructions) root.append(element('p', 'helper', result.instructions));
         const form = element('form', 'c-form'), inputs = {}; form.autocomplete = 'off';
@@ -349,7 +362,10 @@
     function fromPaste(field, pasted) {
       for (const src of field.sources || []) {
         const name = src.name || '';
-        if (src.type === 'cookie' && pasted.jar[name] != null) return pasted.jar[name];
+        if (src.type === 'cookie') {
+          if (pasted.jar[name] != null) return pasted.jar[name];
+          if (typeof pasted.json[name] === 'string') return pasted.json[name];
+        }
         if (src.type === 'request_header' && pasted.headers[name.toLowerCase()] != null) return pasted.headers[name.toLowerCase()];
         if (src.type === 'special' || src.type === 'local_storage') {
           const key = name.split('.').pop(), camel = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
@@ -360,6 +376,11 @@
     }
     // Where to look, per network: the page to copy from and what to copy.
     const PASTE_HOW = {
+      instagram: {steps: () => [
+        'On a computer, open instagram.com in your own browser and sign in. Finish any code, approval or security check there first.',
+        'Open Instagram Messages (instagram.com/direct/inbox/). Press F12 (⌥⌘I on a Mac) and choose the Network tab.',
+        'Reload the inbox. Right-click the direct/inbox request to www.instagram.com → Copy → Copy as cURL (bash). Paste it below, then choose Connect.',
+        'Treat this copied request like a password: paste it only here, never into chat or a support message. Only the named sign-in cookies go to your private bridge. Close the extra tab afterwards; signing out may disconnect Messenger.']},
       dots: {page: 'https://chatgpt.com/api/auth/session', steps: host => [
         'On a computer, sign in at chatgpt.com in your browser.',
         'In the same browser, open chatgpt.com/api/auth/session (link below). It shows a block of text.',
@@ -375,6 +396,11 @@
     };
     function cookieForm(network, flow, result, payload, mine, back) {
       const params = result.cookies || {}, fields = params.fields || [], custom = PASTE_HOW[network];
+      if (network === 'instagram' && fields.some(f => (f.sources || []).some(s => s.type === 'special'))) {
+        root.append(element('p', 'helper', 'Instagram requires an interactive CAPTCHA that this password flow cannot display safely. Use browser sign-in instead and complete the check on instagram.com.'));
+        button(root, 'Use browser sign-in', () => start(network, 'instagram'), 'primary wide'); back(); return;
+      }
+      if (result.instructions && network === 'instagram' && flow !== 'instagram') root.append(element('p', 'helper', result.instructions));
       let host = ''; try { host = new URL(params.url).hostname.replace(/^www\./, ''); } catch (_) { /* no url */ }
       const how = element('ol', 'c-steps');
       const tips = custom ? custom.steps(host) : [
@@ -608,7 +634,11 @@
       const BROWSER_FLOW = {twitter: 'cookies', linkedin: 'cookies', dots: 'cookies', facebook: 'facebook', gmessages: 'google'};
       const web = {id: 'browser', name: 'Sign in with your browser'};
       let shown = flows;
-      if (provider.state === 'unavailable') shown = flows;
+      if (provider.network === 'instagram') {
+        // Use the existing owner cookie form, not the remote browser framebuffer.
+        shown = ['instagram', 'android', 'instagram-password'].flatMap(id => flows.filter(f => f.id === id));
+      }
+      else if (provider.state === 'unavailable') shown = flows;
       else if (provider.network === 'slack') shown = [web, ...flows.filter(f => f.id === 'email')];
       else if (BROWSER_FLOW[provider.network] && flows.some(f => f.id === BROWSER_FLOW[provider.network])) {
         const bf = BROWSER_FLOW[provider.network];
