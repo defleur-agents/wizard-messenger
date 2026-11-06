@@ -1,13 +1,33 @@
 // SYNTHETIC DOM only: behavior, not screenshot/layout/provider evidence.
 const test=require('node:test'), assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('node:vm');
-const {mentionQuery,parseMentions,insertMention,mentionKey,reactorGroups}=require('../static/unified.js');
+const {mentionQuery,parseMentions,insertMention,mentionKey,reactorGroups,composerMembers,floatingBox}=require('../static/unified.js');
 const {makeDocument,browserContext,Element}=require('./helpers/unified_browser_context.cjs');
 const members=[{id:'@telegram_1:synthetic.invalid',name:'Alice Example',label:'Alice Example',identity_id:'synthetic'},
 {id:'@telegram_2:synthetic.invalid',name:'Bob Example',label:'Bob Example',identity_id:'synthetic'}];
 test('mention query excludes emails and supports caret in the middle',()=>{
+  assert.deepEqual(mentionQuery('@'),{start:0,end:1,query:''});
   assert.equal(mentionQuery('mail@example.org'),null);
   assert.deepEqual(mentionQuery('Hi @Al rest',6),{start:3,end:6,query:'al'});
   assert.equal(mentionQuery('Hi @Al\nrest'),null);
+});
+test('floating boxes clamp to thread pane, flip at top and cap oversized panels',()=>{
+  const bounds={left:600,top:50,right:920,bottom:700};
+  for(const anchor of [{left:890,top:400,bottom:425},{left:608,top:53,bottom:75}]) {
+    const p=floatingBox(anchor,{width:270,height:120},bounds);
+    assert(p.left>=608 && p.left+p.width<=912);assert(p.top>=58 && p.top+p.height<=692);
+  }
+  const p=floatingBox({left:890,top:53,bottom:75},{width:600,height:900},bounds);
+  assert.equal(p.width,304);assert.equal(p.height,634);assert.equal(p.left,608);assert.equal(p.top,58);
+});
+test('missing membership falls back only to visible senders on selected group, as plain text',()=>{
+  const person={identities:[{id:'a',kind:'group'},{id:'b',kind:'person'}],members:[]};
+  const rows=[{identity_id:'a',sender:'Alice Example'},{identity_id:'a',sender:'Alice Example'},
+    {identity_id:'a',sender:'Owner',outgoing:true},{identity_id:'a',sender:'Removed',deleted:true},
+    {identity_id:'other',sender:'Other group'},{identity_id:'a',sender:'@raw:synthetic.invalid'}];
+  const found=composerMembers(person,'a',rows);assert.equal(found.length,1);assert.equal(found[0].name,'Alice Example');assert.equal(found[0].native,false);
+  assert.deepEqual(composerMembers(person,'b',rows),[]);
+  const explicit={...person,members:[{id:'known',name:'Known',label:'Known',identity_id:'a',native:true}]};
+  assert.deepEqual(composerMembers(explicit,'a',rows),explicit.members);
 });
 test('selected mention replaces only the query and preserves trailing text',()=>{
   const text='Hi @Al later', q=mentionQuery(text,6), next=insertMention(text,q,members[0]);
@@ -31,7 +51,7 @@ test('reactor groups deduplicate identities and retain missing count',()=>{
 });
 function fixture(touch=false) {
   const document=makeDocument(), root=document.createElement('main'); root.id='messenger'; document.body.append(root);
-  const app=browserContext({document,overrides:{matchMedia:()=>({matches:touch,addEventListener(){}}), ResizeObserver:class{observe(){}},navigator:{vibrate(){}},getComputedStyle:()=>({})}});
+  const app=browserContext({document,overrides:{matchMedia:()=>({matches:touch,addEventListener(){}}), ResizeObserver:class{observe(){} disconnect(){}},navigator:{vibrate(){}},getComputedStyle:()=>({})}});
   // Only add concrete browser methods this controller exercises; never synthesize unknown properties.
   Element.prototype.prepend=function(...nodes){const prior=[...this.children];this.replaceChildren(...nodes,...prior);};
   Element.prototype.scrollIntoView=function(){};
@@ -58,7 +78,7 @@ test('renderer keyboard chooses highlighted member, mirror paints name, outside 
 test('desktop hover tooltip names actual reactors; right-click opens emoji tabs and Back keeps app',()=>{
   const f=fixture(), {qa,root}=f, r={key:'👍',count:2,reactors:[{id:'a',name:'Synthetic Alice'}]};let toggles=0;
   const chip=qa.reactionChip(r,[r],{pid:null,toggle:()=>toggles++});root.append(chip);
-  chip.dispatchEvent({type:'pointerenter',pointerType:'mouse'});const tip=chip.querySelector('.u-reactor-tooltip');assert(!tip.hidden);assert.match(tip.textContent,/Synthetic Alice/);assert.match(tip.textContent,/unavailable/);
+  chip.dispatchEvent({type:'pointerenter',pointerType:'mouse'});const tip=root.querySelector('.u-reactor-tooltip');assert(!tip.hidden);assert.match(tip.textContent,/Synthetic Alice/);assert.match(tip.textContent,/unavailable/);
   chip.dispatchEvent({type:'contextmenu',preventDefault(){}});assert.equal(root.querySelectorAll('.u-reactor-tabs button').length,2);
   assert.equal(toggles,0);assert.equal(qa.back(),true);assert.equal(root.querySelector('.u-overlay'),null);assert(root.isConnected);
   f.dispose();

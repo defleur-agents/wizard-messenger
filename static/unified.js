@@ -91,7 +91,27 @@
     return reactions.map(r => ({...r, reactors:[...new Map((r.reactors || []).map(u => [u.id,u])).values()],
       missing:Math.max(0,r.count-new Set((r.reactors || []).map(u => u.id)).size)}));
   }
-  if (typeof module !== 'undefined') module.exports = {backState, fetchOlder, notificationSettings, mentionQuery, parseMentions, insertMention, mentionKey, reactorGroups};
+  function composerMembers(person, identityId, messages) {
+    const identity = (person.identities || []).find(i => i.id === identityId);
+    if (!identity || identity.kind !== 'group') return [];
+    const members = (person.members || []).filter(m => m.identity_id === identityId);
+    if (members.length) return members;
+    // Only names already visible in this group's open timeline, never inferred
+    // addresses. Missing/stale membership cannot authorize a native mention.
+    const names = [...new Set(messages.filter(m => m.identity_id === identityId && !m.outgoing && !m.deleted)
+      .map(m => m.sender).filter(n => typeof n === 'string' && n.trim() && !/^@[^\s]+:/.test(n)))];
+    return names.map(name => ({id:'visible:' + name, name, label:name, identity_id:identityId, native:false}));
+  }
+  function floatingBox(anchor, size, bounds, gap = 8) {
+    const left = bounds.left + gap, top = bounds.top + gap;
+    const right = bounds.right - gap, bottom = bounds.bottom - gap;
+    const width = Math.min(size.width, Math.max(0, right - left));
+    const height = Math.min(size.height, Math.max(0, bottom - top));
+    const above = anchor.top - gap - height, below = anchor.bottom + gap;
+    return {left:Math.max(left, Math.min(anchor.left, right - width)),
+      top:Math.max(top, Math.min(above >= top ? above : below, bottom - height)), width, height};
+  }
+  if (typeof module !== 'undefined') module.exports = {backState, fetchOlder, notificationSettings, mentionQuery, parseMentions, insertMention, mentionKey, reactorGroups, composerMembers, floatingBox};
   if (typeof document === 'undefined') return;
   const $ = id => document.getElementById(id);
   const s = {tab: 'people', person: null, overlay: null, search: null, low: (() => { try { return sessionStorage.getItem('messenger-inbox-low') === '1'; } catch { return false; } })(), ready: false, epoch: 0, busy: false, drafts: {}, people: [], login: null};
@@ -1990,13 +2010,39 @@
 
   // ---------- composer: text, photo, voice; optimistic and idempotent ----------
   // Extend the existing textarea and reaction strip: no second composer or sheet.
+  // Escape timeline/composer clipping; coordinates stay local to Messenger.
+  function floatPanel(panel, anchor, dismiss, wide = false) {
+    const root = $('messenger'), home = panel.parentElement || panel.parent;
+    const bounds = anchor.closest('.u-pane-thread') || root;
+    root.append(panel);
+    const place = () => {
+      if (!anchor.isConnected) { dismiss(); return; }
+      const r = root.getBoundingClientRect(), b = bounds.getBoundingClientRect(), a = anchor.getBoundingClientRect();
+      const width = Math.max(0, b.right - b.left - 16), height = Math.max(0, b.bottom - b.top - 16);
+      panel.style.maxWidth = width + 'px'; panel.style.minWidth = '0';
+      panel.style.width = Math.min(wide ? Math.max(260, a.width) : 270, width) + 'px';
+      panel.style.maxHeight = Math.min(wide ? 256 : 300, height) + 'px';
+      const p = floatingBox(a, panel.getBoundingClientRect(), b);
+      panel.style.left = (p.left - r.left) + 'px'; panel.style.top = (p.top - r.top) + 'px';
+      panel.style.right = 'auto'; panel.style.bottom = 'auto';
+    };
+    place();
+    const abort = new AbortController();
+    window.addEventListener('resize', place, {signal:abort.signal});
+    document.addEventListener('scroll', place, {capture:true, signal:abort.signal});
+    const resize = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(place) : null;
+    resize?.observe(bounds); resize?.observe(anchor); resize?.observe(panel);
+    const removed = typeof MutationObserver !== 'undefined' ? new MutationObserver(() => { if (!anchor.isConnected) dismiss(); }) : null;
+    removed?.observe(root, {childList:true, subtree:true});
+    return () => { abort.abort(); resize?.disconnect(); removed?.disconnect(); home?.append(panel); };
+  }
   function mentionComposer(form, field, draft, members, changed) {
     view.mentionClose?.();
     const mirror = node('div','u-mention-mirror'); mirror.setAttribute('aria-hidden','true'); field.prepend(mirror);
     const picker = node('div','u-mention-picker'); picker.id = 'u-mention-picker'; picker.hidden = true;
     picker.setAttribute('role','listbox'); picker.setAttribute('aria-label','Mention a group member'); form.append(picker);
     draft.setAttribute('aria-controls',picker.id); draft.setAttribute('aria-expanded','false'); draft.setAttribute('aria-autocomplete','list');
-    let selected = 0, options = [], query = null, outside = null;
+    let selected = 0, options = [], query = null, outside = null, unfloat = null;
     const paint = () => {
       mirror.replaceChildren(); let at = 0;
       for (const span of parseMentions(draft.value,members())) { mirror.append(draft.value.slice(at,span.start),node('mark','',draft.value.slice(span.start,span.end))); at = span.end; }
@@ -2004,7 +2050,7 @@
     };
     const close = () => {
       const open = !picker.hidden; picker.hidden = true; draft.setAttribute('aria-expanded','false'); draft.removeAttribute('aria-activedescendant');
-      outside?.abort(); outside = null; return open;
+      outside?.abort(); outside = null; unfloat?.(); unfloat = null; return open;
     };
     view.mentionClose = close;
     function choose(member) {
@@ -2013,7 +2059,7 @@
       close(); draft.focus(); draft.setSelectionRange(next.caret,next.caret); changed(); close(); paint();
     }
     function draw() {
-      picker.replaceChildren(node('small','helper','Mention a group member'));
+      picker.replaceChildren(node('small','helper',options.some(m => m.native !== false) ? 'Mention a group member' : 'Insert a name · plain text on this network'));
       if (!options.length) picker.append(node('p','helper','No matching members'));
       for (const [i,m] of options.entries()) {
         const item = button('',() => choose(m),'u-mention-option'); item.type = 'button'; item.id = 'u-mention-option-' + i;
@@ -2028,8 +2074,9 @@
       if (!all.length || !query || view.edit) return close();
       options = all.filter(m => m.label.toLocaleLowerCase().includes(query.query)).slice(0,50); selected = 0;
       picker.hidden = false; draft.setAttribute('aria-expanded','true'); draw();
+      unfloat?.(); unfloat = floatPanel(picker, draft, close, true);
       if (!outside) {
-        outside = new AbortController(); document.addEventListener('pointerdown',e => { if (!form.contains(e.target)) close(); },{capture:true,signal:outside.signal});
+        outside = new AbortController(); document.addEventListener('pointerdown',e => { if (!form.contains(e.target) && !picker.contains(e.target)) close(); },{capture:true,signal:outside.signal});
       }
     };
     draft.addEventListener('keydown',e => {
@@ -2074,11 +2121,14 @@
     for (const user of group.reactors.slice(0,8)) { const row = node('span','u-reactor-row'); row.append(reactorFace(user,pid),node('span','',user.name || user.id)); tip.append(row); }
     if (group.reactors.length > 8) tip.append(node('span','', '+' + (group.reactors.length-8) + ' more · right-click to see all'));
     if (group.missing) tip.append(node('span','','Who reacted is unavailable for ' + group.missing + ' reaction' + (group.missing===1?'':'s')));
-    chip.append(tip); chip.addEventListener('pointerenter',e => { if (e.pointerType !== 'touch') tip.hidden = false; });
-    chip.addEventListener('pointerleave',() => { tip.hidden = true; }); chip.addEventListener('focus',() => { tip.hidden = false; }); chip.addEventListener('blur',() => { tip.hidden = true; });
+    let unfloat = null;
+    const hide = () => { tip.hidden = true; unfloat?.(); unfloat = null; };
+    const show = () => { hide(); tip.hidden = false; unfloat = floatPanel(tip, chip, hide); };
+    chip.append(tip); chip.addEventListener('pointerenter',e => { if (e.pointerType !== 'touch') show(); });
+    chip.addEventListener('pointerleave',hide); chip.addEventListener('focus',show); chip.addEventListener('blur',hide);
     chip.addEventListener('pointerdown',e => { chip.classList.add('pressed'); e.stopPropagation(); });
     for (const event of ['pointerup','pointercancel','pointerleave']) chip.addEventListener(event,() => chip.classList.remove('pressed'));
-    holdToMenu(chip,() => { tip.hidden = true; reactorList(reactions,reaction.key,pid); }); return chip;
+    holdToMenu(chip,() => { hide(); reactorList(reactions,reaction.key,pid); }); return chip;
   }
   function composer(id, p) {
     // A retained DOM view is not proof that its physical mic is still running (e.g. notification Stop).
@@ -2113,7 +2163,7 @@
     const send = iconButton('send', reviewed ? 'Preview send' : 'Send', () => submit(), 'u-send');
     const mic = iconButton('mic', 'Record voice message', () => record(), 'u-mic'); mic.hidden = !telegramOnly;
     const field = node('div', 'u-field'); field.append(draft);
-    const mentionUI = mentionComposer(form, field, draft, () => (p.members || []).filter(m => m.identity_id === channel.value), () => draft.oninput?.());
+    const mentionUI = mentionComposer(form, field, draft, () => composerMembers(store.threads[id]?.person || p, channel.value, store.threads[id]?.messages || []), () => draft.oninput?.());
     const row = node('div', 'u-compose-row'); row.append(attach, field, send, mic, file);
     const paintBar = () => {
       bar.replaceChildren(); const target = view.edit || view.reply; const a = view.attach || [];

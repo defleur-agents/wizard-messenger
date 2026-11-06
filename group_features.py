@@ -5,7 +5,7 @@ from html.parser import HTMLParser
 from urllib.parse import unquote
 
 # Native mention conversion is known for these maintained Matrix bridges. Other
-# networks keep their existing text composer rather than promising a notification.
+# networks offer name autocomplete as plain text, without promising a notification.
 MENTION_NETWORKS = frozenset(('telegram', 'signal', 'whatsapp', 'slack'))
 MXID = re.compile(r'@[^\s:<>"/]{1,255}:[^\s<>"/]{1,255}\Z')
 
@@ -21,6 +21,9 @@ def find_mentions(body, members):
     """Exact, boundary-delimited display tokens; longest first; UTF-16 offsets."""
     out, occupied = [], set()
     for member in sorted(members, key=lambda m: -len(m['label'])):
+        # Picker-only names are plain text, never evidence of native addressing.
+        if member.get('native') is False:
+            continue
         for match in re.finditer(r'(?<![\w@])' + re.escape('@' + member['label']) + r'(?![\w])', body):
             a, b = match.span()
             if occupied.intersection(range(a, b)):

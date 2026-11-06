@@ -33,4 +33,10 @@ Reuse:
 
 See docs/group-mentions-reactions.md for channel limitations, copied Telegram patterns and bounded acceptance.
 
+## 15.16 corrections
+
+- EXTEND the same `mentionComposer` / `reactionChip` with one pane-bounded floating-panel placement helper; no replacement composer, reaction renderer or sheet.
+- EXTEND `refresh_pictures`' existing bounded metadata backfill, plus `PeopleStore.members`' native/plain capability distinction.
+- REUSE Appearance v1, opaque panel floors, existing draft/send/Back/overlay and normal WAM lifecycle. Native Signal and owner-local worker overrides are not changed by this source fix.
+
 NEW: none.

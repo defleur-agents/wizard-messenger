@@ -281,8 +281,10 @@ button { touch-action: manipulation; }
 .u-mention-option { display: flex; align-items: center; text-align: left; gap: 10px; width: 100%; padding: 8px; color: inherit; border-radius: 10px; overflow-wrap: anywhere; }
 .u-mention-option[aria-selected="true"], .u-mention-option:active, .u-react.pressed { background: var(--wz-accent-soft, var(--accent-soft, #25436c)); outline: 1px solid var(--wz-accent, var(--accent, #93b9ff)); }
 .u-react { position: relative; }
-.u-reactor-tooltip { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 40; width: max-content; max-width: min(270px, 75vw); padding: 10px; border-radius: 12px; text-align: left; font-weight: 400; pointer-events: none; }
-.u-row.out .u-reactor-tooltip { left: auto; right: 0; }
+.u-reactor-tooltip { position: absolute; z-index: 40; max-width: 270px; padding: 10px; border-radius: 12px; text-align: left; font-weight: 400; pointer-events: none; overflow: auto; }
+.u-mention-picker, .u-reactor-tooltip { box-sizing: border-box; overflow-wrap: anywhere; }
+.u-reactor-row > span:last-child, .u-mention-option > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.u-reactor-row > .avatar, .u-mention-option > .avatar { flex-shrink: 0; }
 .u-reactor-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; overflow-wrap: anywhere; white-space: normal; }
 .u-reactor-tabs { display: flex; gap: 6px; overflow: auto; padding: 5px 0; flex-shrink: 0; }
 .u-reactor-tabs button { flex-shrink: 0; }

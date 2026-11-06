@@ -12,18 +12,27 @@ const palettes=vm.runInNewContext('const T=o=>o;'+table+';SKINS').filter(s=>['ne
 assert.equal(palettes.length,2);
 const host=`<!doctype html><html data-skin="nebula"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/wizard-os-home/core/skins.css"><script>window.WizCore={apps:()=>({APPS:[{url:'/app/'}]})};window.setFixtureSkin=id=>{const s=JSON.parse(atob('${Buffer.from(JSON.stringify(palettes)).toString('base64')}')).find(s=>s.id===id);for(const[k,v]of Object.entries(s.t))document.documentElement.style.setProperty('--'+k,v);document.documentElement.dataset.skin=id;window.WizAppearance?.sync()};setFixtureSkin('nebula')</script><script src="/wizard-os-home/core/appearance-host.js" defer></script><style>html,body{margin:0;height:100%;background:var(--bg)}.win,iframe{width:100%;height:100%;border:0}</style></head><body><div class="st-embed win"><iframe src="/app/" title="Synthetic group"></iframe></div></body></html>`;
 const {origin,createFixture}=require('./helpers/group_features_fixture.cjs');
+async function inside(f, selector, paneSelector='#messenger') {
+ const rects=await f.locator(selector).evaluate((el,paneSelector)=>{
+   const r=el.getBoundingClientRect(),pane=document.querySelector(paneSelector)||document.querySelector('#messenger'),b=pane.getBoundingClientRect();
+   return {r:{left:r.left,right:r.right,top:r.top,bottom:r.bottom},b:{left:b.left,right:b.right,top:b.top,bottom:b.bottom}};
+ },paneSelector);
+ const {r,b}=rects;assert(r.left>=b.left&&r.right<=b.right&&r.top>=b.top&&r.bottom<=b.bottom,selector+' inside '+paneSelector+': '+JSON.stringify(rects));
+ return rects;
+}
 const types={'.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.html':'text/html'};
 (async()=>{const browser=await chromium.launch({headless:true,args:['--no-sandbox'],executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE});const results=[];
-try { for(const profile of [{name:'desktop',viewport:{width:1280,height:860}},{name:'phone',viewport:{width:390,height:844},isMobile:true,hasTouch:true}]) {
+try { for(const scenario of ['native','line','v3-with-avatars']) for(const device of [{name:'desktop',viewport:{width:1280,height:860}},{name:'narrow-desktop',viewport:{width:1280,height:860},paneWidth:460},{name:'phone',viewport:{width:390,height:844},isMobile:true,hasTouch:true}]) {
+ const profile={...device,name:device.name+'-'+scenario};
  const ctx=await browser.newContext({...profile,deviceScaleFactor:1,reducedMotion:'reduce'}),page=await ctx.newPage(),errors=[],consoleErrors=[],forbidden=[],unmatched=[],requests=[];
  page.on('pageerror',e=>errors.push(e.stack||e.message));page.on('console',m=>{if(m.type()==='error')consoleErrors.push(m.text());});
- const fixture=createFixture();
+ const fixture=createFixture(scenario);
  try {
  await page.route('**/*',async route=>{const req=route.request(),u=new URL(req.url()),p=u.pathname;
   requests.push({method:req.method(),path:p+u.search});
   if(u.origin!==origin){forbidden.push(u.origin);return route.abort();}
   const json=data=>route.fulfill({json:data});
-  if(p==='/')return route.fulfill({body:host,contentType:'text/html'});
+  if(p==='/')return route.fulfill({body:profile.paneWidth?host.replace('</head>',`<style>.win{width:${profile.paneWidth}px;height:760px;margin:40px auto}</style></head>`):host,contentType:'text/html'});
   if(p.startsWith('/wizard-os-home/')){const file=path.join(shell,p.slice('/wizard-os-home/'.length));if(fs.existsSync(file))return route.fulfill({path:file,contentType:types[path.extname(file)]||'text/plain'});unmatched.push(p);return route.fulfill({status:404,body:''});}
   if(p==='/app/')return route.fulfill({path:path.join(staticDir,'index.html'),contentType:'text/html'});
   if(!p.includes('/api/')){const name=p.replace(/^\/app\//,'');const file=path.join(staticDir,!fs.existsSync(path.join(staticDir,name))&&['favicon.svg','icon-192.png'].includes(name)?'../'+name:name);if(fs.existsSync(file)&&fs.statSync(file).isFile())return route.fulfill({path:file,contentType:types[path.extname(file)]||'application/octet-stream'});unmatched.push(p);return route.fulfill({status:404,body:''});}
@@ -41,21 +50,33 @@ try { for(const profile of [{name:'desktop',viewport:{width:1280,height:860}},{n
   if(previousAccent)await page.waitForFunction(old=>getComputedStyle(document.querySelector('iframe').contentDocument.documentElement).getPropertyValue('--wz-accent').trim()!==old,previousAccent);
   previousAccent=await f.locator('html').evaluate(el=>getComputedStyle(el).getPropertyValue('--wz-accent').trim());assert(previousAccent);
   const draft=f.locator('.u-composer textarea');await draft.fill('@');await f.locator('.u-mention-picker:not([hidden])').waitFor();
+  assert.equal(await f.locator('.u-mention-option').count(),scenario==='v3-with-avatars'?1:2,'empty @ lists available members');
+  await inside(f,'.u-mention-picker:not([hidden])','.u-pane-thread');
   await page.screenshot({path:path.join(out,`${profile.name}-${skin}-mention-picker.png`)});
+  if(scenario!=='native') {
+   assert.match(await f.locator('.u-mention-picker').textContent(),/plain text/);
+   await f.locator('.u-mention-option').first().click();assert.equal(await draft.inputValue(),'@Alice Example ');
+   await f.locator('.u-send').click();await f.locator('.u-message.outgoing .u-text').filter({hasText:'@Alice Example'}).last().waitFor();
+   assert.equal(await f.locator('.u-message.outgoing .u-mention').count(),0,'plain name never claims native mention');
+   results.push({profile:profile.name,skin,plainPicker:true,timelineFallback:scenario==='v3-with-avatars'});continue;
+  }
   const panel=await f.locator('.u-mention-picker').evaluate(el=>getComputedStyle(el).backgroundColor);assert.match(panel,/^rgb\(/,'opaque picker floor');
   await draft.press('ArrowDown');await draft.press('Tab');assert.equal(await draft.inputValue(),'@Bob Example ');assert.equal(await f.locator('.u-mention-mirror mark').textContent(),'@Bob Example');
   await f.locator('.u-send').click();await f.locator('.u-message.outgoing .u-mention').last().waitFor();await page.screenshot({path:path.join(out,`${profile.name}-${skin}-sent-mention.png`)});
   assert.equal(await f.locator('html').getAttribute('data-qa-document'),docMarker,'live skin never reloads document');
   assert(await f.locator('.u-mentioned').count(),'incoming owner mention highlight');
-  const chip=f.locator('.u-react').first();
+  const chip=f.locator('.u-row.outgoing .u-react').first();
   if(profile.hasTouch)await chip.focus();else await chip.hover();
-  await chip.locator('.u-reactor-tooltip:not([hidden])').waitFor();assert.match(await chip.locator('.u-reactor-tooltip').textContent(),/Alice Example.*Bob Example/s);
+  await f.locator('.u-reactor-tooltip:not([hidden])').waitFor();assert.match(await f.locator('.u-reactor-tooltip:not([hidden])').textContent(),/Alice Example.*Bob Example/s);
+  await inside(f,'.u-reactor-tooltip:not([hidden])','.u-pane-thread');
+  const tipColour=await f.locator('.u-reactor-tooltip:not([hidden])').evaluate(el=>getComputedStyle(el).backgroundColor);assert.match(tipColour,/^rgb\(/,'opaque tooltip floor');
   await page.screenshot({path:path.join(out,`${profile.name}-${skin}-reactor-tooltip${profile.hasTouch?'-keyboard-focus':''}.png`)});
   if(profile.hasTouch){const box=await chip.boundingBox(),cdp=await ctx.newCDPSession(page),points=[{x:box.x+box.width/2,y:box.y+box.height/2}];await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:points});await page.waitForTimeout(520);await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await cdp.detach();}
   else await chip.click({button:'right'});
   await f.locator('.u-reactor-list').waitFor();await page.waitForTimeout(100);assert(await f.locator('.u-reactor-list').isVisible(),'long-press release keeps sheet open');
   await f.getByRole('tab',{name:'All',exact:true}).click();assert.equal(await f.locator('.u-reactor-list .u-reactor-row').filter({hasText:'Alice Example'}).count(),1);
   await f.getByRole('tab',{name:'❤️ 1',exact:true}).click();assert.equal(await f.locator('.u-reactor-list .u-reactor-row').count(),1);await f.getByRole('tab',{name:'All',exact:true}).click();
+  await inside(f,'.u-sheet');
   await page.screenshot({path:path.join(out,`${profile.name}-${skin}-reactor-sheet.png`)});
   await f.locator('.u-overlay').click({position:{x:8,y:8}});await f.locator('.u-overlay').waitFor({state:'detached'});assert(await f.locator('.u-timeline').isVisible());
   await chip.click(profile.hasTouch?{}:{button:'right'});await f.locator('.u-reactor-list').waitFor();assert.equal(await f.evaluate(()=>window.MessengerUnified.back()),true,'Back handled by Messenger');await f.locator('.u-overlay').waitFor({state:'detached'});assert(await f.locator('.u-timeline').isVisible(),'Back closes sheet, not app');
