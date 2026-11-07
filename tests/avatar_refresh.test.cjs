@@ -30,3 +30,18 @@ test('detached avatar cache is bounded and versioned URLs are stable',()=>{
  const {box,paint,loaded}=fixture();for(let i=0;i<530;i++){const el=paint('avatar?v='+i,'list:'+i);loaded(el);el.remove();}
  assert(box.cache.size<=512);assert.equal(box.url('synthetic','v1'),box.url('synthetic','v1'));assert.equal(box.url('private:synthetic','v1'),'');
 });
+test('lazy loading watches the visible avatar circle, not the hidden picture (16.27-16.29 showed no photos)',()=>{
+ const document=makeDocument(),source=fs.readFileSync(require('node:path').join(__dirname,'../static/unified.js'),'utf8');
+ Object.defineProperty(Element.prototype,'parentElement',{configurable:true,get(){return this.parent;}});
+ const watched=new Set();
+ // Like a real browser: an element with the hidden attribute (display:none) never intersects.
+ class IntersectionObserver{constructor(cb){this.cb=cb;IntersectionObserver.last=this;}observe(el){watched.add(el);}unobserve(el){watched.delete(el);}
+  flush(){this.cb([...watched].map(target=>({target,isIntersecting:!target.hidden})));}}
+ const box={document,URLSearchParams,setTimeout(){},Math,IntersectionObserver};
+ vm.createContext(box);vm.runInContext(source.slice(source.indexOf('  // Real profile pictures'),source.indexOf('  const networksOf'))+';this.picture=withPicture',box);
+ const paint=()=>{const el=document.createElement('span');document.body.append(el);box.picture(el,'avatar?v=1','list:lazy');return el;};
+ const first=paint(),img=first.children[0];assert.equal(img.hidden,true);
+ const second=paint();first.remove();assert.equal(second.children[0],img); // repaint before it scrolled into view
+ IntersectionObserver.last.flush();
+ assert.equal(img.src,'avatar?v=1','an on-screen avatar must request its picture');
+});

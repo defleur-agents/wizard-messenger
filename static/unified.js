@@ -174,10 +174,22 @@
       img.src = img.dataset.src;
     }
   }
+  // Watch the visible avatar circle, never the picture: the picture stays hidden until it loads, and a hidden
+  // element never intersects, so observing it directly meant no picture was ever requested (16.27-16.29).
+  const avatarFor = new WeakMap();
   const avatarSeen = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
-    for (const e of entries) if (e.isIntersecting) { avatarSeen.unobserve(e.target); avatarQueue.push(e.target); }
+    for (const e of entries) if (e.isIntersecting) {
+      avatarSeen.unobserve(e.target);
+      const img = avatarFor.get(e.target); avatarFor.delete(e.target);
+      if (img && !img.src && img.parentElement === e.target && !avatarQueue.includes(img)) avatarQueue.push(img);
+    }
     pumpAvatars();
   }, {rootMargin: '300px 0px'}) : null;
+  function watchAvatar(el, img) {
+    if (img.src) return;
+    if (!avatarSeen) { img.loading = 'lazy'; img.src = img.dataset.src; return; }
+    avatarFor.set(el, img); avatarSeen.observe(el);
+  }
   // A refresh replaces rows, not their decoded pictures. Scope the slot to its
   // surface so the same person can appear in the list and header simultaneously.
   // Keep this memory-only and bounded; never persist profile pictures in storage.
@@ -189,6 +201,7 @@
       avatarPictures.delete(slot); avatarPictures.set(slot, cached);
       el.append(cached.img);
       if (!cached.img.hidden && cached.img.complete && cached.img.naturalWidth) el.classList.add('has-img');
+      watchAvatar(el, cached.img); // a repaint before it came on screen: watch the new circle
       return el;
     }
     const img = document.createElement('img'); img.className = 'u-av-img'; img.alt = ''; img.decoding = 'async'; img.dataset.src = url; img.hidden = true;
@@ -206,7 +219,7 @@
         if (!entry.img.isConnected && entry.img !== img) avatarPictures.delete(key);
       }
     }
-    if (avatarSeen) avatarSeen.observe(img); else { img.loading = 'lazy'; img.src = url; }
+    watchAvatar(el, img);
     return el;
   }
   const networksOf = p => [...new Set((p.identities || []).map(i => i.network))];
