@@ -852,7 +852,8 @@ class SignalMvpTests(unittest.TestCase):
                 response.headers = {'Content-Type': mime}
                 with patch('unified.urlopen', return_value=response):
                     blob = self.inbox.media(out['event_id'], 'full')
-                self.assertEqual((blob.mime, blob.inline), ('application/octet-stream', False))
+                # Active content stays an opaque download; real PDF bytes keep their type so phones save a .pdf, never .bin.
+                self.assertEqual((blob.mime, blob.inline), ('application/pdf' if data.startswith(b'%PDF') else 'application/octet-stream', False))
                 self.assertEqual(blob.path.read_bytes(), data)
 
     def test_read_marks_chat_read_and_posts_receipt(self):

@@ -110,7 +110,7 @@ class ViewBoundary(unittest.TestCase):
             status,download_headers,content=self.request('GET','/api/unified/media/%24file',headers={'Cookie':cookie})
         self.assertEqual((status,content),(200,data))
         self.assertTrue(download_headers['Content-Disposition'].startswith('attachment;'))
-        self.assertEqual(download_headers['Content-Type'],'application/octet-stream')
+        self.assertEqual(download_headers['Content-Type'],'application/pdf')
         self.assertEqual(download_headers['X-Content-Type-Options'],'nosniff')
         self.assertIn('sandbox',download_headers['Content-Security-Policy'])
         status,_,body=self.request('PUT',path,b'<html>not a PDF',dict(headers,**{'Content-Type':'application/pdf'}))
@@ -120,6 +120,27 @@ class ViewBoundary(unittest.TestCase):
             status,_,body=self.request('PUT',path,payload,h)
             self.assertEqual((status,body['error']['code']),(413,'too_large'))
         self.assertEqual(inbox.matrix_upload.call_count,2)
+
+    def test_download_header_keeps_pdf_extension_for_long_and_unicode_names(self):
+        import io
+        from unified import Blob
+        calls=[]
+        class Fake:
+            wfile=io.BytesIO()
+            headers={}
+            def send_response(self,code): pass
+            def send_header(self,k,v): calls.append((k,v))
+            def end_headers(self): pass
+        path=Path(self.temp.name)/'f.pdf'; path.write_bytes(b'%PDF-1.7\nx')
+        for name in ('wizardos-desktop-phone-v3-2026-11-05.pdf','Résumé '+'long-'*40+'.pdf'):
+            calls.clear()
+            from web import ViewHandler as H
+            H._blob(Fake(),Blob(path,'application/pdf',name,False))
+            disposition=dict(calls)['Content-Disposition']
+            self.assertTrue(disposition.startswith('attachment; filename="'),disposition)
+            quoted=disposition.split('filename="')[1].split('"')[0]
+            self.assertTrue(quoted.endswith('.pdf') and len(quoted)<=80,disposition)
+            self.assertEqual(dict(calls)['Content-Type'],'application/pdf')
 
     def test_machine_key_cannot_read_or_send_messages_without_owner_grant(self):
         bearer={'Authorization':'Bearer '+TOKEN}

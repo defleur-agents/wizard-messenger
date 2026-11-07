@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import hashlib
 import hmac
 import json
+import mimetypes
 import os
 from pathlib import Path
 import queue
@@ -75,6 +76,30 @@ class Blob:
 # Served inline only for these; everything else (SVG, HTML, PDF...) is an attachment download.
 INLINE_MIME = {'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'audio/ogg', 'audio/mpeg', 'audio/mp4',
                'audio/webm', 'audio/aac', 'audio/x-m4a', 'video/mp4', 'video/webm', 'video/quicktime'}
+# Downloads (never shown inline) keep their real type so the phone saves report.pdf as a PDF, not report.bin.
+# Always served as an attachment inside a sandbox with nosniff; HTML, SVG and scripts stay octet-stream.
+DOWNLOAD_MIME = {'application/pdf', 'application/zip', 'audio/wav', 'text/plain', 'text/csv', 'application/json',
+                 'application/msword', 'application/vnd.ms-excel', 'application/vnd.ms-powerpoint',
+                 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                 'application/vnd.openxmlformats-officedocument.presentationml.presentation'}
+
+
+def download_mime(served, declared, name):
+    """The honest type for a non-inline download: sniffed PDF/wav bytes decide; names and declared types only refine zip or unknown bytes."""
+    if served in ('application/pdf', 'audio/wav'):
+        return served
+    OFFICE = 'application/vnd.openxmlformats-officedocument.'
+    candidates = [c for c in (declared, mimetypes.guess_type(name or '')[0]) if c in DOWNLOAD_MIME]
+    if served == 'application/zip':
+        return next((c for c in candidates if c == 'application/zip' or c.startswith(OFFICE)), served)
+    if served in DOWNLOAD_MIME:
+        return served
+    if served in (None, '', 'application/octet-stream') and candidates:
+        return candidates[0]
+    return 'application/octet-stream'
+
+
 MXC = re.compile(r'mxc://([A-Za-z0-9.:_-]+)/([A-Za-z0-9_-]+)')
 
 # Bridges tag ghost names with their network ("Ana (WA)"); the Inbox already shows the network's icon.
@@ -2635,7 +2660,8 @@ class UnifiedInbox:
         else:
             os.utime(path)
         served = meta_path.read_text().strip() if meta_path.exists() else 'application/octet-stream'
-        return Blob(path, served if served in INLINE_MIME else 'application/octet-stream', media.get('filename') or 'media', served in INLINE_MIME)
+        name = media.get('filename') or 'media'
+        return Blob(path, served if served in INLINE_MIME else download_mime(served, media.get('mime'), name), name, served in INLINE_MIME)
 
     # ---------- composer pickers: the owner's own Telegram stickers and GIFs ----------
     # The Telegram bridge (plumbing/telegram-bridge/pickers.patch) lists recent/favourite stickers, installed packs,
@@ -2822,7 +2848,7 @@ class UnifiedInbox:
             served = 'video/webm'
         if served == 'audio/mp4' and mime.startswith('video/'):
             served = 'video/mp4'
-        return Blob(path, served if served in INLINE_MIME else 'application/octet-stream', name, served in INLINE_MIME)
+        return Blob(path, served if served in INLINE_MIME else download_mime(served, mime, name), name, served in INLINE_MIME)
 
     def evict(self, cache):
         files = [(p.stat().st_atime, p.stat().st_size, p) for p in cache.iterdir() if p.is_file() and not p.name.endswith('.type')]

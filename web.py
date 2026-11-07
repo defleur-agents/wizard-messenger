@@ -13,7 +13,7 @@ import secrets
 import signal
 import threading
 import time
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import urlsplit, parse_qs, quote
 from typing import cast
 from engine import EngineError, MarmotEngine, vault_password
 from server import Handler, MessengerServer
@@ -282,8 +282,13 @@ class ViewHandler(Handler):
         self.send_header('X-Content-Type-Options','nosniff')
         self.send_header('Referrer-Policy','no-referrer')
         self.send_header('Content-Security-Policy',"default-src 'none'; sandbox")
-        safe=re.sub(r'[^A-Za-z0-9._-]','_',blob.filename or 'file')[:80]
-        self.send_header('Content-Disposition',('inline' if blob.inline else 'attachment')+'; filename="'+safe+'"')
+        raw=blob.filename or 'file'
+        ext=re.sub(r'[^A-Za-z0-9.]','',os.path.splitext(raw)[1])[:12]
+        stem=re.sub(r'[^A-Za-z0-9._-]','_',os.path.splitext(raw)[0])[:80-len(ext)] or 'file'
+        safe=stem+ext  # a long name never loses its extension (a cut .pdf is saved as .bin)
+        disposition=('inline' if blob.inline else 'attachment')+'; filename="'+safe+'"'
+        if safe!=raw: disposition+="; filename*=UTF-8''"+quote(raw[:160],safe='')
+        self.send_header('Content-Disposition',disposition)
         self.end_headers()
         with blob.path.open('rb') as f:
             f.seek(start); left=end-start+1
