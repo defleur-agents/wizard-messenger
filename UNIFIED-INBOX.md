@@ -99,3 +99,7 @@ Title-bar sparkle beside the chat menu, and "Summarize these" under the "N new m
 ## 0.2.0-unified.16.30 (profile pictures load again)
 
 16.27 kept each profile picture hidden until it loaded but handed that hidden picture to the lazy-load observer; a hidden element never intersects, so no picture was ever requested and every chat showed initials. The observer now watches the visible avatar circle and requests its picture when the row comes near the screen, including after a repaint. Guard: `tests/avatar_refresh.test.cjs` (lazy loading watches the visible avatar circle).
+
+## 0.2.0-unified.16.31 (PDFs and Office files save with their real type)
+
+Downloads of attached files were always sent as `application/octet-stream`, so Android's download manager saved a PDF as `name.bin`, and the 80-character filename cut could drop the extension. PDF, zip, wav, Office and plain-text files now keep their real type (still `attachment`, sandboxed and `nosniff`); HTML, SVG and script files stay octet-stream. Long filenames keep their extension and carry an RFC 5987 `filename*`. Guards: `tests/test_download_type.py`, `tests/test_web.py`, `tests/test_unified.py`.
