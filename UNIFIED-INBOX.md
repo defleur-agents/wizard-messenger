@@ -95,3 +95,7 @@ Title-bar sparkle beside the chat menu, and "Summarize these" under the "N new m
 ## 0.2.0-unified.16.29 (single trunk, Standard release)
 
 `main` is the one trunk (renamed from `feature/unified-inbox` on 6 Nov 2026). There is no Alpha channel for Messenger: this is the Standard release (public digest-pinned GHCR images for amd64 and arm64). It carries Catch me up (16.28) and the platform owner proof (#107): with an App Manager that provides the owner proof, Messenger accepts it and the fingerprint prompt stops repeating; without one it fails closed to the existing unlock.
+
+## 0.2.0-unified.16.30 (profile pictures load again)
+
+16.27 kept each profile picture hidden until it loaded but handed that hidden picture to the lazy-load observer; a hidden element never intersects, so no picture was ever requested and every chat showed initials. The observer now watches the visible avatar circle and requests its picture when the row comes near the screen, including after a repaint. Guard: `tests/avatar_refresh.test.cjs` (lazy loading watches the visible avatar circle).
