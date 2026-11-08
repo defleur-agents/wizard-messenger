@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 from engine import EngineError
@@ -43,8 +44,8 @@ class ViewBoundary(unittest.TestCase):
         self.server.shutdown(); self.server.server_close(); self.thread.join(); self.temp.cleanup()
     def request(self,method,path,body=None,headers=None):
         conn=http.client.HTTPConnection('127.0.0.1',self.server.server_port,timeout=3)
-        h=dict(headers or {})
-        if body is not None: h['Content-Type']='application/json'; body=json.dumps(body)
+        h={'Connection':'close', **(headers or {})}
+        if body is not None and not isinstance(body,bytes): h['Content-Type']='application/json'; body=json.dumps(body)
         conn.request(method,path,body,headers=h); response=conn.getresponse()
         result=response.read(); status=response.status; result_headers=dict(response.getheaders()); conn.close()
         return status,result_headers,json.loads(result) if result_headers.get('Content-Type','').startswith('application/json') else result
@@ -52,10 +53,12 @@ class ViewBoundary(unittest.TestCase):
         s,_,d=self.request('POST','/api/view/ticket',{}, {'Authorization':'Bearer '+TOKEN})
         self.assertEqual(s,200); return d['result']['ticket']
     def session(self):
-        s,h,d=self.request('POST','/api/view/session',{'ticket':self.ticket()},{'Origin':ORIGIN})
-        self.assertEqual(s,200)
-        self.assertIn('HttpOnly',h['Set-Cookie']); self.assertIn('SameSite=Strict',h['Set-Cookie']); self.assertIn('Secure',h['Set-Cookie'])
-        return h['Set-Cookie'].split(';')[0],d['result']['csrf_token']
+        # A fixture owner session, NOT a machine-issued launcher ticket.
+        token, session = self.server.auth.create()
+        return 'wizard_messenger_session=' + token, session['csrf']
+    def owner_headers(self):
+        cookie, csrf = self.session()
+        return {'Cookie': cookie, 'Origin': ORIGIN, 'X-Messenger-CSRF': csrf}
     def test_unified_routes_keep_owner_cookie_csrf_and_origin_boundary(self):
         from unittest.mock import Mock
         unified = Mock()
@@ -75,6 +78,70 @@ class ViewBoundary(unittest.TestCase):
         self.assertEqual(status, 200)
         unified.dispatch.assert_called_with('POST', '/api/unified/sync', {}, {}, None)
 
+    def test_james_owner_any_file_raw_upload_send_and_attachment_download(self):
+        import io
+        from urllib.parse import quote
+        from unittest.mock import Mock
+        from unified import UnifiedInbox
+        inbox=UnifiedInbox(Path(self.temp.name)/'unified',self.server.engine)
+        self.server.unified=inbox
+        inbox.matrix_token=lambda:'test-token'
+        inbox.matrix_upload=Mock(return_value={'content_uri':'mxc://messenger.internal/file'})
+        peer=inbox.store.identity('telegram','!peer','Peer')
+        path='/api/unified/people/%s/upload?kind=file&name='%peer['person_id']+quote('../../... final\x00  report.pdf',safe='')
+        data=b'%PDF-1.7\ncontent'
+        self.assertEqual(self.request('PUT',path,data,{'Origin':ORIGIN})[0],401)
+        cookie,csrf=self.session()
+        self.assertEqual(self.request('PUT',path,data,{'Cookie':cookie,'Origin':ORIGIN})[0],403)
+        headers={'Cookie':cookie,'Origin':ORIGIN,'X-Messenger-CSRF':csrf,'Content-Type':'image/png'}
+        status,_,body=self.request('PUT',path,data,headers)
+        self.assertEqual(status,200)
+        up=body['result']
+        self.assertEqual((up['mime'],up['name'],up['size']),('application/pdf','final report.pdf',len(data)))
+        inbox.matrix_upload.assert_called_once_with(data,'attachment','application/pdf')
+        inbox.mx=Mock(return_value={'event_id':'$file'})
+        status,_,sent=self.request('POST','/api/unified/people/%s/send'%peer['person_id'],
+                                   {'upload_id':up['upload_id'],'client_id':'http-file-12345678'},headers)
+        self.assertEqual(status,200)
+        self.assertEqual(sent['result']['message']['msgtype'],'m.file')
+        response=io.BytesIO(data)
+        response.headers={'Content-Type':'application/pdf'}
+        with patch('unified.urlopen',return_value=response):
+            status,download_headers,content=self.request('GET','/api/unified/media/%24file',headers={'Cookie':cookie})
+        self.assertEqual((status,content),(200,data))
+        self.assertTrue(download_headers['Content-Disposition'].startswith('attachment;'))
+        self.assertEqual(download_headers['Content-Type'],'application/pdf')
+        self.assertEqual(download_headers['X-Content-Type-Options'],'nosniff')
+        self.assertIn('sandbox',download_headers['Content-Security-Policy'])
+        status,_,body=self.request('PUT',path,b'<html>not a PDF',dict(headers,**{'Content-Type':'application/pdf'}))
+        self.assertEqual((status,body['result']['mime']),(200,'application/octet-stream'))
+        # View rejects oversized or empty raw bodies before calling the transport.
+        for payload,h in [(b'',headers),(b'x',dict(headers,**{'Content-Length':str(25*1024*1024+1)}))]:
+            status,_,body=self.request('PUT',path,payload,h)
+            self.assertEqual((status,body['error']['code']),(413,'too_large'))
+        self.assertEqual(inbox.matrix_upload.call_count,2)
+
+    def test_download_header_keeps_pdf_extension_for_long_and_unicode_names(self):
+        import io
+        from unified import Blob
+        calls=[]
+        class Fake:
+            wfile=io.BytesIO()
+            headers={}
+            def send_response(self,code): pass
+            def send_header(self,k,v): calls.append((k,v))
+            def end_headers(self): pass
+        path=Path(self.temp.name)/'f.pdf'; path.write_bytes(b'%PDF-1.7\nx')
+        for name in ('wizardos-desktop-phone-v3-2026-11-05.pdf','Résumé '+'long-'*40+'.pdf'):
+            calls.clear()
+            from web import ViewHandler as H
+            H._blob(Fake(),Blob(path,'application/pdf',name,False))
+            disposition=dict(calls)['Content-Disposition']
+            self.assertTrue(disposition.startswith('attachment; filename="'),disposition)
+            quoted=disposition.split('filename="')[1].split('"')[0]
+            self.assertTrue(quoted.endswith('.pdf') and len(quoted)<=80,disposition)
+            self.assertEqual(dict(calls)['Content-Type'],'application/pdf')
+
     def test_machine_key_cannot_read_or_send_messages_without_owner_grant(self):
         bearer={'Authorization':'Bearer '+TOKEN}
         for method,path,body in [('GET','/api/dms',None),('GET','/api/contacts',None),('POST','/api/dms/abc/messages',{'text':'x'}),('GET','/api/unified/people',None),('POST','/api/unified/people/p1/send',{})]:
@@ -87,11 +154,11 @@ class ViewBoundary(unittest.TestCase):
         self.assertNotIn('abc',json.dumps(log))
     def test_only_owner_session_can_grant_and_grant_expires_to_off(self):
         bearer={'Authorization':'Bearer '+TOKEN}
-        self.assertEqual(self.request('POST','/api/view/agent-access',{'minutes':60},bearer)[0],403)
+        self.assertEqual(self.request('POST','/api/view/agent-access',{'mode':'read_only','minutes':60},bearer)[0],403)
         cookie,csrf=self.session()
-        self.assertEqual(self.request('POST','/api/view/agent-access',{'minutes':60},{'Cookie':cookie,'Origin':ORIGIN})[0],403)
+        self.assertEqual(self.request('POST','/api/view/agent-access',{'mode':'read_only','minutes':60},{'Cookie':cookie,'Origin':ORIGIN})[0],403)
         self.assertEqual(self.request('POST','/api/view/agent-access',{'minutes':99999},{'Cookie':cookie,'Origin':ORIGIN,'X-Messenger-CSRF':csrf})[0],400)
-        s,_,d=self.request('POST','/api/view/agent-access',{'minutes':60},{'Cookie':cookie,'Origin':ORIGIN,'X-Messenger-CSRF':csrf})
+        s,_,d=self.request('POST','/api/view/agent-access',{'mode':'read_only','minutes':60},{'Cookie':cookie,'Origin':ORIGIN,'X-Messenger-CSRF':csrf})
         self.assertEqual(s,200); self.assertTrue(d['result']['enabled'])
         self.assertNotEqual(self.request('GET','/api/dms',headers=bearer)[0],403)
         self.assertEqual(self.server.agent_access.recent()[0]['outcome'],'allowed')
@@ -142,9 +209,9 @@ class ViewBoundary(unittest.TestCase):
         self.assertEqual(self.request('GET','/api/status',headers={'Cookie':cookie,'Sec-Fetch-Site':'cross-site'})[0],403)
         for path in ['/../engine.py','/%2e%2e/engine.py','/engine.py']:
             self.assertNotEqual(self.request('GET',path)[0],200)
-    def test_gateway_html_bootstraps_cookie_without_exposing_token(self):
+    def test_gateway_html_never_mints_owner_cookie_or_exposes_token(self):
         s,h,b=self.request('GET','/',headers={'Authorization':'Bearer '+TOKEN})
-        self.assertEqual(s,200); self.assertIn('Set-Cookie',h); self.assertNotIn(TOKEN.encode(),b)
+        self.assertEqual(s,200); self.assertNotIn('Set-Cookie',h); self.assertNotIn(TOKEN.encode(),b)
     def test_resolve_contact_uses_same_boundary(self):
         cookie,csrf=self.session()
         s,_,d=self.request('POST','/api/resolve-contact',{'address':addresses.npub_encode(KEY)},{'Cookie':cookie,'Origin':ORIGIN,'X-Messenger-CSRF':csrf})
@@ -162,7 +229,7 @@ class ViewBoundary(unittest.TestCase):
         self.assertEqual(self.request('GET','/api/identity')[0],401)
     def test_existing_account_can_sign_in_without_install_ticket(self):
         password='test-fixture-passphrase-123'
-        self.assertEqual(self.request('POST','/api/setup',{'action':'create','vault_password':password},{'Authorization':'Bearer '+TOKEN})[0],200)
+        self.assertEqual(self.request('POST','/api/setup',{'action':'create','vault_password':password},self.owner_headers())[0],200)
         s,_,d=self.request('GET','/api/view/session')
         self.assertEqual(s,401); self.assertEqual(d['error']['code'],'session_unlock_required')
         self.assertEqual(self.request('POST','/api/view/unlock',{'vault_password':'wrong-fixture-passphrase'},{'Origin':ORIGIN})[0],401)
@@ -171,18 +238,18 @@ class ViewBoundary(unittest.TestCase):
     def test_signup_and_import_do_not_have_anonymous_bypasses(self):
         self.assertEqual(self.request('POST','/api/view/unlock',{'vault_password':'some-test-fixture-passphrase'},{'Origin':ORIGIN})[0],401)
         self.assertEqual(self.request('POST','/api/setup',{'action':'create','vault_password':'some-test-fixture-passphrase'},{'Origin':ORIGIN})[0],401)
-        self.assertEqual(self.request('POST','/api/setup',{'action':'import'},{'Authorization':'Bearer '+TOKEN})[0],400)
+        self.assertEqual(self.request('POST','/api/setup',{'action':'import'},self.owner_headers())[0],400)
     def test_owner_verifier_does_not_change_when_provider_is_unlocked(self):
         password='test-fixture-passphrase-123'
         self.server.auth.remember_password(password)
-        self.assertEqual(self.request('POST','/api/setup',{'action':'unlock','vault_password':'a-different-test-passphrase'},{'Authorization':'Bearer '+TOKEN})[0],401)
+        self.assertEqual(self.request('POST','/api/setup',{'action':'unlock','vault_password':'a-different-test-passphrase'},self.owner_headers())[0],401)
         self.server.auth.verify_password(password)
     def test_lock_with_password_never_records_a_verifier(self):
-        s,_,_=self.request('POST','/api/setup',{'action':'lock','vault_password':'chosen-but-never-provider-proved'},{'Authorization':'Bearer '+TOKEN})
+        s,_,_=self.request('POST','/api/setup',{'action':'lock','vault_password':'chosen-but-never-provider-proved'},self.owner_headers())
         self.assertEqual(s,200); self.assertIsNone(self.server.auth.credential)
         self.assertEqual(self.request('POST','/api/view/unlock',{'vault_password':'chosen-but-never-provider-proved'},{'Origin':ORIGIN})[0],401)
     def test_invalid_password_is_rejected_before_any_engine_side_effect(self):
-        s,_,d=self.request('POST','/api/setup',{'action':'create','vault_password':'line-one-passphrase\nline-two'},{'Authorization':'Bearer '+TOKEN})
+        s,_,d=self.request('POST','/api/setup',{'action':'create','vault_password':'line-one-passphrase\nline-two'},self.owner_headers())
         self.assertEqual(s,400); self.assertEqual(d['error']['code'],'invalid_vault_password')
         self.assertEqual(self.server.engine.calls,0); self.assertIsNone(self.server.auth.credential)
     def test_concurrent_initial_setup_records_only_the_proved_password(self):
@@ -191,7 +258,7 @@ class ViewBoundary(unittest.TestCase):
         self.server.engine.delay=delay
         results={}
         def setup(name,password):
-            results[name]=self.request('POST','/api/setup',{'action':'create','vault_password':password},{'Authorization':'Bearer '+TOKEN})[0]
+            results[name]=self.request('POST','/api/setup',{'action':'create','vault_password':password},self.owner_headers())[0]
         a=threading.Thread(target=setup,args=('a','proved-first-passphrase-123')); a.start(); started.wait(3)
         b=threading.Thread(target=setup,args=('b','unproved-second-passphrase')); b.start()
         gate.set(); a.join(5); b.join(5)
@@ -238,6 +305,18 @@ class PersistentBrowserAuth(unittest.TestCase):
             reloaded=BrowserAuth(path); reloaded.verify_password(password)
             self.assertEqual(reloaded.lookup(cookie)['csrf'],session['csrf'])
             self.assertEqual(path.stat().st_mode & 0o777,0o600)
+    def test_full_session_table_drops_the_oldest_instead_of_locking_the_owner_out(self):
+        auth=BrowserAuth(); first,_=auth.create()
+        for _ in range(300): newest,_=auth.create()
+        self.assertEqual(len(auth.sessions),256)
+        self.assertIsNone(auth.lookup(first)); self.assertIsNotNone(auth.lookup(newest))
+    def test_sessions_in_use_slide_forward(self):
+        import web
+        auth=BrowserAuth(); token,session=auth.create()
+        self.assertFalse(auth.renew(token))  # fresh: nothing to do
+        session['expires']=time.time()+3600
+        self.assertTrue(auth.renew(token)); self.assertGreater(auth.lookup(token)['expires'],time.time()+web.SESSION_SECONDS-60)
+        self.assertFalse(auth.renew('unknown'))
     def test_guessing_is_rate_limited(self):
         auth=BrowserAuth(); auth.remember_password('test-fixture-passphrase-123')
         for _ in range(6):

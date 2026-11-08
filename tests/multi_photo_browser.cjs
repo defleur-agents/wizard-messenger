@@ -1,15 +1,16 @@
-// Disposable preview only. Attach several photos at once; each sends as its own photo, caption on the first.
+// Disposable preview only. Attach several photos at once; one album request, caption once.
 const {chromium} = require('playwright');
 const fs = require('node:fs');
 const {execFileSync} = require('node:child_process');
 const assert = require('node:assert/strict');
+let diagnosticPage;
 (async () => {
   const base = process.env.PREVIEW_URL || 'https://localhost:19253/';
   assert.match(new URL(base).hostname, /^(localhost|127\.0\.0\.1)$/, 'preview only');
   const ev = process.env.EVIDENCE_DIR || './evidence'; fs.mkdirSync(ev, {recursive: true});
   const transcript = 'Miguel says: Let us think through the next step together. ' + 'This longer transcript wraps safely inside the voice-note bubble. '.repeat(3).trim();
   let transcribes = 0; const shares = [], inputs = []; let receipt = 'shared';
-  const browser = await chromium.launch({headless: true});
+  const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE});
   const ctx = await browser.newContext({viewport: {width: 390, height: 844}, deviceScaleFactor: 2, colorScheme: 'dark', ignoreHTTPSErrors: true, hasTouch: true, isMobile: true, timezoneId: 'UTC'});
   await ctx.exposeBinding('__transcribe', (_, data) => { transcribes++; inputs.push(data); return {text: transcript}; });
   await ctx.exposeBinding('__share', (_, data) => { shares.push(data); return receipt; });
@@ -36,15 +37,22 @@ s.add_message('$v2',a,'You',True,'',1792869960000,msgtype='m.audio',media={'voic
 `]);
   let mediaFetches = 0;
   await ctx.route(/api\/unified\/media\/%24v[12]/, route => {mediaFetches++; return route.fulfill({status: 200, contentType: 'audio/wav', body: wav});});
+  // Serve this checkout's view files so the shared preview container is not touched.
+  if (process.env.STATIC_DIR) await ctx.route(/\/(unified\.js|unified\.css)(\?|$)/, route => { const f = new URL(route.request().url()).pathname.split('/').pop(); return route.fulfill({status: 200, contentType: f.endsWith('.js') ? 'text/javascript' : 'text/css', body: fs.readFileSync(process.env.STATIC_DIR + '/' + f)}); });
+  if (process.env.SHELL_DIR) await ctx.route(/\/wizard-os-home\/core\/(app-client|composer-input|attach-chip)\.(js|css)(\?|$)/, route => { const f = new URL(route.request().url()).pathname.split('/').pop(); return route.fulfill({status: 200, contentType: f.endsWith('.css') ? 'text/css' : 'text/javascript', body: fs.readFileSync(process.env.SHELL_DIR + '/web/core/' + f)}); });
   const page = await ctx.newPage(), errors = []; page.on('pageerror', e => errors.push(e.message));
-  page.on('close', () => {});
+  diagnosticPage = page;
+  page.on('console', m => { if (m.type() === 'error') console.error('browser:', m.text()); });
   const ticket = JSON.parse(execFileSync('curl', ['-sf','-X','POST','-H','Authorization: Bearer ' + process.env.MESSENGER_API_TOKEN,'-H','Content-Type: application/json','-d','{"bootstrap":true}','http://127.0.0.1:19252/api/view/ticket'])).result.ticket;
   await page.goto(base + '#ticket=' + ticket); await page.waitForTimeout(2000);
+  await page.locator('#setup-form:visible, #inbox-tabs:visible').first().waitFor({timeout: 60000});
   if (!(await page.locator('#setup-form').isVisible())) await page.click('#inbox-tabs [data-tab="messenger"]');
   await page.locator('#confirm-passphrase').waitFor({state: 'visible', timeout: 30000});
   const pw = 'preview-only-passphrase-' + Date.now(); await page.fill('#passphrase', pw); await page.fill('#confirm-passphrase', pw); await page.click('#setup-submit');
   await page.locator('#inbox-tabs').waitFor({state: 'visible', timeout: 60000});
-  if (await page.locator('#sheet-layer:not([hidden])').count()) await page.click('#close-sheet');
+  // Address sheet opens after the asynchronous post-create snapshot, not at first ready paint.
+  await page.locator('#sheet-layer:not([hidden])').waitFor({state: 'visible', timeout: 30000});
+  await page.click('#close-sheet');
   await page.click('#inbox-tabs [data-tab="people"]');
   await page.locator('.u-person', {hasText: 'Miguel'}).click();
 
@@ -55,21 +63,29 @@ s.add_message('$v2',a,'You',True,'',1792869960000,msgtype='m.audio',media={'voic
   const input = page.locator('.u-compose-row input[type=file]');
   assert.equal(await input.getAttribute('multiple'), '', 'picker allows several photos');
   await input.setInputFiles(shots.map((bytes, i) => ({name: 'p' + i + '.png', mimeType: 'image/png', buffer: Buffer.from(bytes)})));
-  await page.locator('.u-attach-chip').nth(2).waitFor({timeout: 10000});
-  assert.equal(await page.locator('.u-attach-chip').count(), 3);
-  await page.locator('.u-attach-chip').nth(1).getByRole('button', {name: 'Remove photo'}).click();
-  assert.equal(await page.locator('.u-attach-chip').count(), 2, 'remove one photo keeps the others');
+  await page.locator('.u-attach-strip .ch-att').nth(2).waitFor({timeout: 10000});
+  assert.equal(await page.locator('.u-attach-strip .ch-att').count(), 3);
+  await page.locator('.u-attach-strip .ch-att').nth(1).getByRole('button', {name: 'Remove'}).click();
+  assert.equal(await page.locator('.u-attach-strip .ch-att').count(), 2, 'remove one photo keeps the others');
   await input.setInputFiles([{name: 'p3.png', mimeType: 'image/png', buffer: Buffer.from(shots[1])}]);
-  await page.locator('.u-attach-chip').nth(2).waitFor({timeout: 10000});
+  await page.locator('.u-attach-strip .ch-att').nth(2).waitFor({timeout: 10000});
   await page.locator('.u-composer textarea').fill('three photos');
   await page.screenshot({path: ev + '/multi-photo.png'});
   await page.locator('.u-send').click();
-  for (let i = 0; i < 50 && sends.length < 3; i++) await page.waitForTimeout(200);
-  assert.equal(uploads.length, 3, 'three uploads'); assert.equal(sends.length, 3, 'three sends');
-  assert.deepEqual(sends.map(s => s.text), ['three photos', '', ''], 'caption on the first photo only');
-  assert.deepEqual(sends.map(s => s.upload_id), ['u1', 'u2', 'u3']);
-  assert.equal(await page.locator('.u-attach-chip').count(), 0, 'tray cleared');
+  for (let i = 0; i < 50 && sends.length < 1; i++) await page.waitForTimeout(200);
+  assert.equal(uploads.length, 3, 'three uploads'); assert.equal(sends.length, 1, 'one album send');
+  assert.equal(sends[0].text, 'three photos', 'one caption');
+  assert.deepEqual(sends[0].upload_ids, ['u1', 'u2', 'u3']);
+  assert.equal(sends[0].upload_id, undefined);
+  assert.equal(await page.locator('.u-attach-strip .ch-att').count(), 0, 'tray cleared');
   assert.deepEqual(errors, []);
   fs.writeFileSync(ev + '/receipt.json', JSON.stringify({uploads, sends}, null, 1));
   console.log('pass multi_photo_browser'); await browser.close();
-})().catch(e => { console.error('FAIL', e.stack || e); process.exit(1); });
+})().catch(async e => {
+  console.error('FAIL', e.stack || e);
+  if (diagnosticPage) {
+    console.error('visible state:', await diagnosticPage.locator('body').innerText().catch(() => 'unavailable'));
+    await diagnosticPage.screenshot({path: (process.env.EVIDENCE_DIR || './evidence') + '/failure.png'}).catch(() => {});
+  }
+  process.exit(1);
+});

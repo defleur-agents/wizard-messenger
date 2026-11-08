@@ -1,5 +1,7 @@
 # Messenger 0.1.2-beta.1 — private test installation
 
+> **Historical instructions — 0.1.2-beta.1 only.** This document preserves the original private-beta procedure, including its access assumptions and local-image preload. It is not the current Messenger installation guide. Use [README.md](README.md) for the existing public Store listing and digest-pinned GHCR recipe; Alpha membership and a developer's computer are not required. Historical references to private source/assets do not describe their current visibility.
+
 Two-person encrypted text, dedicated identities, explicit invite acceptance, and encrypted history retained after restart. No root Wizard identity import. The box is the encryption endpoint; relays see traffic metadata. This is a beta, not a Signal security claim.
 
 ## Required access and software

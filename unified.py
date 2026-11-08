@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import hashlib
 import hmac
 import json
+import mimetypes
 import os
 from pathlib import Path
 import queue
@@ -21,10 +22,15 @@ import shutil
 import sqlite3
 import threading
 import time
+import unicodedata
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urlencode
 from urllib.request import Request, urlopen
 from engine import EngineError
+from readiness.search import SearchStore
+import catchup
+import history_cursor
+from group_features import MENTION_NETWORKS, MXID, member_labels, find_mentions, mention_content, incoming_mentions
 from typing import NoReturn
 
 
@@ -70,8 +76,126 @@ class Blob:
 # Served inline only for these; everything else (SVG, HTML, PDF...) is an attachment download.
 INLINE_MIME = {'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'audio/ogg', 'audio/mpeg', 'audio/mp4',
                'audio/webm', 'audio/aac', 'audio/x-m4a', 'video/mp4', 'video/webm', 'video/quicktime'}
+# Downloads (never shown inline) keep their real type so the phone saves report.pdf as a PDF, not report.bin.
+# Always served as an attachment inside a sandbox with nosniff; HTML, SVG and scripts stay octet-stream.
+DOWNLOAD_MIME = {'application/pdf', 'application/zip', 'audio/wav', 'text/plain', 'text/csv', 'application/json',
+                 'application/msword', 'application/vnd.ms-excel', 'application/vnd.ms-powerpoint',
+                 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                 'application/vnd.openxmlformats-officedocument.presentationml.presentation'}
+
+
+def download_mime(served, declared, name):
+    """The honest type for a non-inline download: sniffed PDF/wav bytes decide; names and declared types only refine zip or unknown bytes."""
+    if served in ('application/pdf', 'audio/wav'):
+        return served
+    OFFICE = 'application/vnd.openxmlformats-officedocument.'
+    candidates = [c for c in (declared, mimetypes.guess_type(name or '')[0]) if c in DOWNLOAD_MIME]
+    if served == 'application/zip':
+        return next((c for c in candidates if c == 'application/zip' or c.startswith(OFFICE)), served)
+    if served in DOWNLOAD_MIME:
+        return served
+    if served in (None, '', 'application/octet-stream') and candidates:
+        return candidates[0]
+    return 'application/octet-stream'
+
+
+MXC = re.compile(r'mxc://([A-Za-z0-9.:_-]+)/([A-Za-z0-9_-]+)')
+
+# Bridges tag ghost names with their network ("Ana (WA)"); the Inbox already shows the network's icon.
+NAME_SUFFIX = {'whatsapp': ' (WA)', 'twitter': ' (Twitter)', 'linkedin': ' (LinkedIn)'}
+
+
+def name_key(name):
+    """Comparable form of a person's name: accents, case, punctuation and emoji dropped."""
+    name = unicodedata.normalize('NFKD', name or '')
+    name = ''.join(c for c in name if not unicodedata.combining(c))
+    return ' '.join(re.sub(r'[^\w\s]', ' ', name.casefold()).split())
+
+
+def link_previews(content):
+    """Bridges attach the sender's own link preview (com.beeper.linkpreviews); keep up to two, image as mxc."""
+    out = []
+    for lp in (content.get('com.beeper.linkpreviews') or [])[:2]:
+        if not isinstance(lp, dict):
+            continue
+        url = lp.get('matched_url') or lp.get('og:url') or ''
+        if not isinstance(url, str) or not re.match(r'https?://', url):
+            continue
+        img = lp.get('og:image') or (lp.get('beeper:image:encryption') or {}).get('url')
+        item = {'url': url[:2000], 'title': str(lp.get('og:title') or '')[:300], 'desc': str(lp.get('og:description') or '')[:400],
+                'site': str(lp.get('og:site_name') or '')[:80]}
+        if isinstance(img, str) and MXC.fullmatch(img) and not lp.get('beeper:image:encryption'):
+            item.update(mxc=img, w=lp.get('og:image:width'), h=lp.get('og:image:height'))
+        if item['title'] or item['desc']:
+            out.append(item)
+    return {'links': out} if out else None
+
+
+def picture_tag(mxc):
+    return hashlib.sha256(mxc.encode()).hexdigest()[:12] if mxc else None
+
+
+def plain_name(network, label):
+    tag = NAME_SUFFIX.get(network)
+    if isinstance(label, str) and tag and label.endswith(tag) and len(label) > len(tag):
+        return label[:-len(tag)].rstrip()
+    return label
+
+
+MATRIX_NETWORKS = frozenset(('telegram', 'whatsapp', 'signal', 'slack', 'line', 'instagram', 'facebook', 'twitter', 'linkedin', 'gmessages', 'dots'))
 UPLOAD_MAX = 25 * 1024 * 1024
 MEDIA_CACHE_MAX = 300 * 1024 * 1024
+
+
+def webm_to_ogg(data):
+    """WebM Opus voice note (Safari, the Mac app) -> Ogg Opus, packet for packet, with mkvextract. Tolerates the
+    unknown sizes and cut-off tails Safari's recorder writes. Works in the /tmp tmpfs only."""
+    import subprocess, tempfile
+    with tempfile.TemporaryDirectory(prefix='voice-') as d:
+        src, out = os.path.join(d, 'in.webm'), os.path.join(d, 'out.ogg')
+        with open(src, 'wb') as f:
+            f.write(data)
+        try:
+            subprocess.run(['mkvextract', src, 'tracks', '0:' + out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=120, check=False)
+            with open(out, 'rb') as f:
+                ogg = f.read()
+        except FileNotFoundError:
+            fail('media_unsupported', 'This Messenger cannot prepare voice notes yet', 409)
+        except (subprocess.SubprocessError, OSError):
+            ogg = b''
+    if ogg[:4] != b'OggS' or b'OpusHead' not in ogg[:200]:
+        fail('invalid_upload', 'That voice note could not be read. Record it again.', 415)
+    return ogg
+
+
+def ogg_ms(data):
+    """Playable length of an Ogg Opus file in ms (last page granule minus pre-skip), or None."""
+    at = data.rfind(b'OggS')
+    head = data.find(b'OpusHead')
+    if at < 0 or head < 0 or len(data) < at + 14 or len(data) < head + 12:
+        return None
+    granule = int.from_bytes(data[at + 6:at + 14], 'little')
+    pre = int.from_bytes(data[head + 10:head + 12], 'little')
+    if granule >= 2 ** 62 or granule <= pre:
+        return None
+    return (granule - pre) // 48
+
+
+def wav_to_opus(data):
+    """PCM WAV voice note -> Ogg Opus (32 kbit/s speech, like Telegram's own) with opusenc. Pipes only."""
+    import subprocess
+    try:
+        out = subprocess.run(['opusenc', '--quiet', '--speech', '--bitrate', '32', '-', '-'], input=data,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120, check=True).stdout
+    except FileNotFoundError:
+        fail('media_unsupported', 'This Messenger cannot prepare voice notes yet', 409)
+    except (subprocess.SubprocessError, OSError):
+        fail('invalid_upload', 'That voice note could not be read. Record it again.', 415)
+    if out[:4] != b'OggS':
+        fail('invalid_upload', 'That voice note could not be read. Record it again.', 415)
+    return out
 
 
 def sniff(data):
@@ -80,10 +204,25 @@ def sniff(data):
     if data[:8] == b'\x89PNG\r\n\x1a\n': return 'image/png'
     if data[:6] in (b'GIF87a', b'GIF89a'): return 'image/gif'
     if data[:4] == b'RIFF' and data[8:12] == b'WEBP': return 'image/webp'
+    if data[:4] == b'RIFF' and data[8:12] == b'WAVE': return 'audio/wav'
     if data[:4] == b'OggS': return 'audio/ogg'
     if data[:4] == b'\x1a\x45\xdf\xa3': return 'audio/webm'
     if data[4:8] == b'ftyp': return 'audio/mp4' if data[8:11] in (b'M4A', b'mp4', b'iso') and b'M4A' in data[8:32] else 'video/mp4'
+    if data[:5] == b'%PDF-': return 'application/pdf'
+    if data[:4] in (b'PK\x03\x04', b'PK\x05\x06', b'PK\x07\x08'): return 'application/zip'
     return None
+
+
+def file_name(name):
+    # Any-file uploads keep a display name, never a path (James, 26 Oct 2026).
+    name = re.split(r'[/\\]', name if isinstance(name, str) else '')[-1]
+    name = ''.join(c for c in name if unicodedata.category(c) not in ('Cc', 'Cf', 'Cs'))
+    name = ' '.join(name.split()).lstrip(' .') or 'file'
+    suffix = Path(name).suffix
+    # Reserve a stem character even for a pathological extension over 118 chars.
+    ext = suffix[:119]
+    stem = name[:-len(suffix)] if suffix else name
+    return stem[:120 - len(ext)].rstrip() + ext
 
 
 MIGRATIONS = [
@@ -97,10 +236,37 @@ MIGRATIONS = [
     ('message', 'deleted', 'INTEGER NOT NULL DEFAULT 0'),
     ('message', 'client_id', 'TEXT'),
     ('message', 'failed', 'TEXT'),
+    ('message', 'album', 'TEXT'),
+    ('message', 'source_event', 'TEXT'),
+    ('message', 'mentions', "TEXT NOT NULL DEFAULT '[]'"),
+    ('message', 'mentioned', 'INTEGER NOT NULL DEFAULT 0'),
     ('identity', 'last_read_ts', 'INTEGER NOT NULL DEFAULT 0'),
     ('identity', 'peer_read_ts', 'INTEGER NOT NULL DEFAULT 0'),
     ('identity', 'seq', 'INTEGER NOT NULL DEFAULT 0'),
+    # 1 once the owner renamed the person: synced network names never overwrite it.
+    ('person', 'name_locked', 'INTEGER NOT NULL DEFAULT 0'),
+    # 1 = the owner moved this chat to Low priority: it leaves the Inbox, unread counts and notifications.
+    ('person', 'low_priority', 'INTEGER NOT NULL DEFAULT 0'),
+    # 1 = Medium priority: stays in the Inbox but never pings (no push, badge, Unread count or Wizard inbox feed).
+    # Medium and Low are exclusive; setting one clears the other.
+    ('person', 'medium_priority', 'INTEGER NOT NULL DEFAULT 0'),
 ]
+
+# Matches the bridges' backfill.unread_hours_threshold: older history is read.
+HISTORY_UNREAD_HOURS = 720
+OWN_SENDER = 'You'
+_PHONE = re.compile(r'\+?[\d\s().-]{5,}\Z')
+_RAW_ID = re.compile(r'(@[^\s:]+:\S+|[uUcCrR][0-9a-f]{32})\Z')
+
+
+def weak_label(label, own=()):
+    """Labels that must never replace a real name: generic fallbacks, phone
+    numbers, raw protocol IDs and the owner's own names."""
+    if not isinstance(label, str) or not label.strip():
+        return True
+    label = label.strip()
+    return (label in own or label.endswith(' conversation') or label in ('Messenger contact', 'Direct message')
+            or bool(_PHONE.fullmatch(label)) or bool(_RAW_ID.fullmatch(label)))
 
 
 class PeopleStore:
@@ -109,6 +275,7 @@ class PeopleStore:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.lock = threading.RLock()
         self.on_change = None
+        self.push_enabled = False
         self._conn = None
         with self.db() as db:
             db.executescript('''
@@ -118,14 +285,70 @@ class PeopleStore:
             CREATE TABLE IF NOT EXISTS message(id TEXT PRIMARY KEY, identity_id TEXT NOT NULL REFERENCES identity(id), sender TEXT NOT NULL, outgoing INTEGER NOT NULL, original TEXT NOT NULL, translated TEXT, translation_error TEXT, timestamp INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS room_label(identity_id TEXT NOT NULL REFERENCES identity(id), label TEXT NOT NULL, PRIMARY KEY(identity_id,label));
             CREATE TABLE IF NOT EXISTS translation(cache_key TEXT PRIMARY KEY, translated TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS push_intent(message TEXT PRIMARY KEY, created REAL NOT NULL, done INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS preview(id TEXT PRIMARY KEY, person_id TEXT NOT NULL, identity_id TEXT NOT NULL, original TEXT NOT NULL, translated TEXT NOT NULL, error TEXT, expires INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'preview', send_original INTEGER, event_id TEXT);
             ''')
         self.migrate()
+        self.search_index = SearchStore(self.path, connection=self._conn, lock=self.lock)
+        self.install_search()
         os.chmod(self.path, 0o600)
         with self.db() as db:
             self.seq = max(db.execute('SELECT COALESCE(MAX(seq),0) FROM message').fetchone()[0],
                            db.execute('SELECT COALESCE(MAX(seq),0) FROM identity').fetchone()[0])
+
+    def install_search(self):
+        # Same connection/transaction as history: edits, translations, tombstones and
+        # forget cannot leave a stale plaintext mirror after a crash. One owner per DB;
+        # network + immutable identity id keep merged people from collapsing threads.
+        with self.db() as db:
+            db.executescript('''
+            CREATE TRIGGER IF NOT EXISTS message_search_insert AFTER INSERT ON message BEGIN
+                INSERT INTO normalized_message(account,network,thread,message_id,timestamp,original,translated)
+                SELECT 'owner',i.network,i.id,new.id,new.timestamp,new.original,COALESCE(new.translated,'')
+                FROM identity i WHERE i.id=new.identity_id AND new.deleted=0;
+            END;
+            CREATE TRIGGER IF NOT EXISTS message_search_delete AFTER DELETE ON message BEGIN
+                DELETE FROM normalized_message WHERE account='owner' AND message_id=old.id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS message_search_update AFTER UPDATE ON message BEGIN
+                DELETE FROM normalized_message WHERE account='owner' AND message_id=old.id AND new.deleted!=0;
+                INSERT INTO normalized_message(account,network,thread,message_id,timestamp,original,translated)
+                SELECT 'owner',i.network,i.id,new.id,new.timestamp,new.original,COALESCE(new.translated,'')
+                FROM identity i WHERE i.id=new.identity_id AND new.deleted=0
+                ON CONFLICT(account,network,thread,message_id) DO UPDATE SET
+                timestamp=excluded.timestamp,original=excluded.original,translated=excluded.translated;
+            END;
+            ''')
+        self.rebuild_search()
+
+    def rebuild_search(self):
+        # Reconcile authoritative rows, including messages removed while upgrading.
+        with self.db() as db:
+            db.execute('''DELETE FROM normalized_message AS n WHERE n.account!='owner' OR NOT EXISTS
+                (SELECT 1 FROM message m JOIN identity i ON i.id=m.identity_id
+                 WHERE m.deleted=0 AND m.id=n.message_id AND i.network=n.network AND i.id=n.thread)''')
+            db.execute('''INSERT INTO normalized_message(account,network,thread,message_id,timestamp,original,translated)
+                SELECT 'owner',i.network,i.id,m.id,m.timestamp,m.original,COALESCE(m.translated,'')
+                FROM message m JOIN identity i ON i.id=m.identity_id WHERE m.deleted=0
+                ON CONFLICT(account,network,thread,message_id) DO UPDATE SET
+                timestamp=excluded.timestamp,original=excluded.original,translated=excluded.translated''')
+            db.execute("INSERT INTO message_fts(message_fts) VALUES('rebuild')")
+
+    def search(self, query, *, network=None, thread=None, limit=50, cursor=None):
+        # Account is server-derived, never an HTTP-supplied identifier.
+        if thread is not None:
+            with self.db() as db:
+                if not db.execute('SELECT 1 FROM identity WHERE id=? AND (? IS NULL OR network=?)',
+                                  (thread, network, network)).fetchone():
+                    fail('not_found', 'That conversation is no longer here', 404)
+        with self.db() as db:
+            result = self.search_index.search(account='owner', query=query, network=network,
+                                              thread=thread, limit=limit, cursor=cursor)
+            for message in result['messages']:
+                identity = db.execute('SELECT i.person_id,p.display_name FROM identity i JOIN person p ON p.id=i.person_id WHERE i.id=?', (message['thread'],)).fetchone()
+                message.update(person_id=identity[0], display_name=identity[1])
+        return result
 
     def migrate(self):
         with self.db() as db:
@@ -137,6 +360,23 @@ class PeopleStore:
                 shutil.copy2(self.path, self.path.with_name(self.path.name + '.pre-signal-%d.bak' % int(time.time())))
             for table, column, decl in missing:
                 db.execute('ALTER TABLE %s ADD COLUMN %s %s' % (table, column, decl))
+            if any(m[1] == 'name_locked' for m in missing):
+                # Earlier owner renames are the only way a single-channel person's name
+                # differs from all its channel labels: keep those names authoritative.
+                db.execute('UPDATE person SET name_locked=1 WHERE display_name NOT IN (SELECT label FROM identity WHERE person_id=person.id)')
+            # Idempotent: rooms the bridge reports as groups are groups, even if first filed as a person.
+            for room, meta in db.execute('SELECT room,json FROM room_meta').fetchall() if db.execute("SELECT 1 FROM sqlite_master WHERE name='room_meta'").fetchone() else []:
+                try:
+                    if json.loads(meta).get('kind') == 'group':
+                        db.execute("UPDATE identity SET kind='group' WHERE address=? AND kind!='group'", (room,))
+                except ValueError:
+                    pass
+            # Idempotent: drop network tags from synced names (owner renames are never touched).
+            for network, tag in NAME_SUFFIX.items():
+                n = len(tag)
+                db.execute('UPDATE person SET display_name=rtrim(substr(display_name,1,length(display_name)-?)) WHERE name_locked=0 AND length(display_name)>? AND substr(display_name,-?)=? '
+                           'AND id IN (SELECT person_id FROM identity WHERE network=?)', (n, n, n, tag, network))
+                db.execute('UPDATE identity SET label=rtrim(substr(label,1,length(label)-?)) WHERE network=? AND length(label)>? AND substr(label,-?)=?', (n, network, n, n, tag))
             if any(m[1] == 'last_read_ts' for m in missing):
                 # Existing chats start read: no wall of unread badges after the upgrade.
                 db.execute('UPDATE identity SET last_read_ts=(SELECT COALESCE(MAX(timestamp),0) FROM message WHERE identity_id=identity.id)')
@@ -144,11 +384,14 @@ class PeopleStore:
             CREATE TABLE IF NOT EXISTS reaction(event_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, sender TEXT NOT NULL, key TEXT NOT NULL, outgoing INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS room_meta(room TEXT PRIMARY KEY, json TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS redacted(event_id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS scoped_redaction(identity_id TEXT NOT NULL, event_id TEXT NOT NULL, PRIMARY KEY(identity_id,event_id));
+            CREATE TABLE IF NOT EXISTS label_catalog(name TEXT PRIMARY KEY COLLATE NOCASE, created INTEGER NOT NULL DEFAULT 0);
             CREATE INDEX IF NOT EXISTS message_identity_ts ON message(identity_id, timestamp);
             CREATE INDEX IF NOT EXISTS message_seq ON message(seq);
             CREATE INDEX IF NOT EXISTS identity_person ON identity(person_id);
             CREATE INDEX IF NOT EXISTS reaction_message ON reaction(message_id);
             ''')
+        self.seed_labels()
 
     @contextmanager
     def db(self):
@@ -183,22 +426,86 @@ class PeopleStore:
         with self.db() as db:
             db.execute('INSERT OR REPLACE INTO kv VALUES (?,?)', (key, value))
 
+    def own_names(self):
+        """Names the owner is known by on each network (private store, never logged)."""
+        names = set()
+        with self.db() as db:
+            for (value,) in db.execute("SELECT value FROM kv WHERE key LIKE 'own_names:%'"):
+                try:
+                    names.update(n for n in json.loads(value) if isinstance(n, str) and n.strip())
+                except ValueError:
+                    pass
+        return names
+
+    def remember_own_names(self, source, names):
+        names = sorted({n.strip() for n in names if isinstance(n, str) and n.strip()})
+        if names and self.get('own_names:' + source) != json.dumps(names, ensure_ascii=False):
+            self.put('own_names:' + source, json.dumps(names, ensure_ascii=False))
+            return True
+        return False
+
     def identity(self, network, address, label, kind='person'):
+        """Find or create a channel; a better synced name replaces a weak or stale one."""
+        label = plain_name(network, label)
         with self.db() as db:
             row = db.execute('SELECT * FROM identity WHERE network=? AND address=?', (network, address)).fetchone()
             if row:
-                return dict(row)
+                if kind == 'group' and row['kind'] != 'group':
+                    # A room first seen before its metadata arrived was filed as a person; the bridge now says group.
+                    db.execute('UPDATE identity SET kind=?,seq=? WHERE id=?', (kind, self.next_seq(), row['id']))
+                self.refresh_label(dict(row), label)
+                return dict(db.execute('SELECT * FROM identity WHERE id=?', (row['id'],)).fetchone())
             person_id, identity_id = secrets.token_hex(12), secrets.token_hex(12)
             db.execute('INSERT INTO person(id,display_name) VALUES (?,?)', (person_id, label))
             db.execute('INSERT INTO identity(id,person_id,network,address,label,kind,last_used,seq) VALUES (?,?,?,?,?,?,0,?)',
                        (identity_id, person_id, network, address, label, kind, self.next_seq()))
             return dict(db.execute('SELECT * FROM identity WHERE id=?', (identity_id,)).fetchone())
 
+    def refresh_label(self, identity, label):
+        label = plain_name(identity.get('network'), label)
+        own = self.own_names()
+        current = identity['label']
+        if not isinstance(label, str) or label == current or label in own:
+            return False
+        # A real name always wins; a generic fallback only replaces the owner's own
+        # name (a DM must be titled by the other participant, never by "me").
+        if weak_label(label, own) and not (current in own and identity['kind'] == 'person'):
+            return False
+        label = label.strip()[:160]
+        changed = False
+        with self.db() as db:
+            seq = self.next_seq()
+            db.execute('UPDATE identity SET label=?,seq=? WHERE id=?', (label, seq, identity['id']))
+            person = db.execute('SELECT display_name,name_locked FROM person WHERE id=?', (identity['person_id'],)).fetchone()
+            if person and not person['name_locked'] and (person['display_name'] == current or weak_label(person['display_name'], own)):
+                db.execute('UPDATE person SET display_name=? WHERE id=?', (label, identity['person_id']))
+                db.execute('UPDATE identity SET seq=? WHERE person_id=?', (seq, identity['person_id']))
+            changed = True
+        self.changed()
+        return changed
+
+    def mark_history_read(self, identity_id, timestamp):
+        """Historical lines older than the unread window never create unread badges."""
+        if timestamp < (time.time() - HISTORY_UNREAD_HOURS * 3600) * 1000:
+            with self.db() as db:
+                db.execute('UPDATE identity SET last_read_ts=MAX(last_read_ts,?) WHERE id=?', (timestamp, identity_id))
+
     def touch_identity(self, identity_id, **fields):
         with self.db() as db:
             sets = ''.join(',%s=MAX(%s,?)' % (k, k) for k in fields)
             db.execute('UPDATE identity SET seq=?' + sets + ' WHERE id=?', (self.next_seq(), *fields.values(), identity_id))
         self.changed()
+
+    def mark_unread(self, person_id):
+        """Owner's 'Mark as unread': the newest incoming message counts as unread again (this Messenger only)."""
+        with self.db() as db:
+            row = db.execute('SELECT i.id,m.timestamp FROM message m JOIN identity i ON i.id=m.identity_id '
+                             'WHERE i.person_id=? AND m.outgoing=0 AND m.deleted=0 ORDER BY m.timestamp DESC LIMIT 1', (person_id,)).fetchone()
+            if not row:
+                fail('invalid_input', 'Nothing to mark unread')
+            db.execute('UPDATE identity SET last_read_ts=?,seq=? WHERE id=?', (row[1] - 1, self.next_seq(), row[0]))
+        self.changed()
+        return {'ok': True}
 
     def forget(self, network, address):
         with self.db() as db:
@@ -208,10 +515,27 @@ class PeopleStore:
             db.execute('DELETE FROM reaction WHERE message_id IN (SELECT id FROM message WHERE identity_id=?)', (row[0],))
             db.execute('DELETE FROM message WHERE identity_id=?', (row[0],))
             db.execute('DELETE FROM room_label WHERE identity_id=?', (row[0],))
+            db.execute('DELETE FROM scoped_redaction WHERE identity_id=?', (row[0],))
             db.execute('DELETE FROM identity WHERE id=?', (row[0],))
             if not db.execute('SELECT 1 FROM identity WHERE person_id=?', (row[1],)).fetchone():
                 db.execute('DELETE FROM person WHERE id=?', (row[1],))
+                for table in ('catchup_grant', 'catchup_summary'):
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone():
+                        db.execute('DELETE FROM %s WHERE person_id=?' % table, (row[1],))
             return True
+
+    def status_identities(self, db):
+        """Identity ids of WhatsApp Status Broadcast chats (see is_status_chat); a cheap pre-filter, then the rule."""
+        out = set()
+        for r in db.execute("SELECT i.id,i.network,i.label,m.json FROM identity i LEFT JOIN room_meta m ON m.room=i.address "
+                            "WHERE i.network='whatsapp' AND (i.label=? OR m.json LIKE ?)", (STATUS_TITLE, '%' + STATUS_CHANNEL + '%')):
+            try:
+                meta = json.loads(r[3]) if r[3] else None
+            except ValueError:
+                meta = None
+            if is_status_chat(r[1], meta, r[2]):
+                out.add(r[0])
+        return out
 
     def person(self, person_id):
         with self.db() as db:
@@ -234,12 +558,17 @@ class PeopleStore:
             for r in db.execute('SELECT DISTINCT i.person_id,l.label FROM room_label l JOIN identity i ON i.id=l.identity_id ORDER BY l.label'):
                 labels.setdefault(r[0], []).append(r[1])
             last = {r['person_id']: r for r in db.execute(
-                'SELECT * FROM (SELECT m.original,m.outgoing,m.sender,m.timestamp,m.msgtype,m.deleted,m.media,i.person_id,'
+                'SELECT * FROM (SELECT m.original,m.outgoing,m.sender,m.timestamp,m.msgtype,m.deleted,m.media,i.person_id,m.identity_id,'
                 'ROW_NUMBER() OVER (PARTITION BY i.person_id ORDER BY m.timestamp DESC,m.id DESC) rn '
                 'FROM message m JOIN identity i ON i.id=m.identity_id WHERE i.kind=? AND m.deleted=0) WHERE rn=1', (kind,))}
             unread = dict(db.execute(
                 'SELECT i.person_id,COUNT(*) FROM message m JOIN identity i ON i.id=m.identity_id '
                 'WHERE i.kind=? AND m.outgoing=0 AND m.deleted=0 AND m.timestamp>i.last_read_ts GROUP BY i.person_id', (kind,)).fetchall())
+            mentions = dict(db.execute('SELECT i.person_id,COUNT(*) FROM message m JOIN identity i ON i.id=m.identity_id '
+                                       'WHERE i.kind=? AND m.outgoing=0 AND m.deleted=0 AND m.mentioned=1 AND m.timestamp>i.last_read_ts GROUP BY i.person_id', (kind,)))
+            pictures = self.room_pictures(db)
+            status = self.status_identities(db)
+            remote = self.room_accounts(db) if kind == 'person' else {}
         result = []
         for pid, ident in idents.items():
             if pid not in persons or (ids is not None and pid not in ids):
@@ -247,13 +576,26 @@ class PeopleStore:
             if chats and pid not in last:
                 continue
             p = dict(persons[pid], identities=ident, labels=labels.get(pid, []))
+            pic = next((pictures[i['address']] for i in ident if pictures.get(i['address'])), None)
+            p['avatar'] = picture_tag(pic)
+            if remote:
+                p['accounts'] = [a for i in ident for a in remote.get(i['address'], [])]
             if pid in last:
                 r = last[pid]
                 media = json.loads(r['media']) if r['media'] else {}
-                p['last'] = {'text': '' if r['deleted'] else r['original'][:140], 'outgoing': bool(r['outgoing']), 'sender': r['sender'], 'timestamp': r['timestamp']}
+                p['last'] = {'text': '' if r['deleted'] else r['original'][:140], 'outgoing': bool(r['outgoing']), 'sender': OWN_SENDER if r['outgoing'] else r['sender'], 'timestamp': r['timestamp']}
                 if r['msgtype'] != 'm.text' or r['deleted'] or media.get('voice'):
                     p['last'].update(msgtype=r['msgtype'], deleted=bool(r['deleted']), voice=bool(media.get('voice')))
+                    if media.get('gif') or (r['msgtype'] == 'm.image' and media.get('mime') == 'image/gif'):
+                        p['last']['gif'] = True
+                    if media.get('sticker'):
+                        p['last']['sticker'] = True
+                elif not r['deleted']:
+                    gone = unavailable_media(r['original'], r['timestamp'], r['identity_id'] in status)
+                    if gone:
+                        p['last'].update(text=gone[1][:140], unavailable=gone[0])
                 p['unread'] = unread.get(pid, 0)
+                p['unread_mentions'] = mentions.get(pid, 0)
                 p['last_read_ts'] = max(i['last_read_ts'] for i in ident)
                 p['peer_read_ts'] = max(i['peer_read_ts'] for i in ident)
             result.append(p)
@@ -263,10 +605,88 @@ class PeopleStore:
             result.sort(key=lambda p: p['display_name'].casefold())
         return result
 
+    @staticmethod
+    def room_accounts(db):
+        """The other person's account id per one-on-one room (their ghost's localpart), for Contacts."""
+        out = {}
+        for room, raw in db.execute("SELECT m.room,m.json FROM room_meta m JOIN identity i ON i.address=m.room WHERE i.kind='person'"):
+            try:
+                meta = json.loads(raw)
+            except ValueError:
+                continue
+            net, names = meta.get('network'), meta.get('names') or {}
+            if not net or not isinstance(names, dict):
+                continue
+            pre = '@' + net + '_'
+            ghosts = [(k, v) for k, v in names.items() if isinstance(k, str) and k.startswith(pre)]
+            if len(ghosts) > 1:  # the owner's own puppet can sit in the room too: prefer the one named like the chat
+                ghosts = [g for g in ghosts if plain_name(net, g[1]) == plain_name(net, meta.get('label') or '')] or ghosts[:1]
+            out[room] = [{'network': net, 'value': k[len(pre):].split(':')[0], 'label': plain_name(net, v or '')} for k, v in ghosts[:1]]
+        return out
+
+    @staticmethod
+    def room_pictures(db):
+        out = {}
+        for room, raw in db.execute("SELECT room,json FROM room_meta WHERE json LIKE '%\"avatar\": \"mxc%'"):
+            try:
+                pic = json.loads(raw).get('avatar')
+            except ValueError:
+                continue
+            if isinstance(pic, str) and MXC.fullmatch(pic):
+                out[room] = pic
+        return out
+
+    def picture(self, person_id, who=None):
+        """mxc of a chat's picture, or of one group member (by the display name the view shows)."""
+        person = self.person(person_id)
+        with self.db() as db:
+            for ident in person['identities']:
+                row = db.execute('SELECT json FROM room_meta WHERE room=?', (ident['address'],)).fetchone()
+                if not row:
+                    continue
+                meta = json.loads(row[0])
+                if who is None:
+                    pic = meta.get('avatar')
+                else:
+                    ids = [k for k, v in (meta.get('names') or {}).items() if k == who or v == who or plain_name(ident['network'], v) == who]
+                    pic = next(((meta.get('avatars') or {}).get(k) for k in ids if (meta.get('avatars') or {}).get(k)), None)
+                if isinstance(pic, str) and MXC.fullmatch(pic):
+                    return pic
+        return None
+
+    def members(self, identity):
+        if identity['kind'] != 'group':
+            return []
+        with self.db() as db:
+            row = db.execute('SELECT json FROM room_meta WHERE room=?', (identity['address'],)).fetchone()
+        meta = json.loads(row[0]) if row else {}
+        names = meta.get('names') or {}
+        joined = meta.get('joined') or []
+        return member_labels([{'id': ident, 'name': plain_name(identity['network'], name),
+                               'avatar': picture_tag((meta.get('avatars') or {}).get(ident)), 'identity_id': identity['id'],
+                               'native': identity['network'] in MENTION_NETWORKS}
+                              for ident, name in names.items() if ident in joined and isinstance(name, str) and name.strip()
+                              and MXID.fullmatch(ident) and ident != '@' + identity['network'] + 'bot:messenger.internal'])
+
+    def faces(self, person_id):
+        """Display name -> picture tag for a chat's members (group bubbles show the sender's face)."""
+        out = {}
+        with self.db() as db:
+            for ident in self.person(person_id)['identities']:
+                row = db.execute('SELECT json FROM room_meta WHERE room=?', (ident['address'],)).fetchone()
+                if not row:
+                    continue
+                meta = json.loads(row[0])
+                for mxid, pic in (meta.get('avatars') or {}).items():
+                    name = (meta.get('names') or {}).get(mxid)
+                    if name and isinstance(pic, str) and MXC.fullmatch(pic):
+                        out[plain_name(ident['network'], name)] = picture_tag(pic)
+        return out
+
     def update(self, person_id, payload):
         self.person(person_id)
         with self.db() as db:
-            for key in ('display_name', 'language', 'preferred_identity', 'muted'):
+            for key in ('display_name', 'language', 'preferred_identity', 'muted', 'low_priority', 'medium_priority'):
                 if key not in payload:
                     continue
                 value = payload[key]
@@ -274,19 +694,73 @@ class PeopleStore:
                     if value and not db.execute('SELECT 1 FROM identity WHERE id=? AND person_id=?', (value, person_id)).fetchone():
                         fail('invalid_identity', 'Choose an identity belonging to this person')
                     value = value or None
-                elif key == 'muted':
+                elif key in ('muted', 'low_priority', 'medium_priority'):
                     if not isinstance(value, bool):
-                        fail('invalid_input', 'muted is true or false')
+                        fail('invalid_input', key + ' is true or false')
                     value = int(value)
+                    if key == 'low_priority' and value and payload.get('medium_priority') is True:
+                        fail('invalid_input', 'A chat is either Medium or Low priority')
+                    # One priority at a time: Medium clears Low and Low clears Medium.
+                    if value and key in ('low_priority', 'medium_priority'):
+                        other = 'medium_priority' if key == 'low_priority' else 'low_priority'
+                        db.execute('UPDATE person SET ' + other + '=0 WHERE id=?', (person_id,))
                 elif key == 'language':
                     if value not in ('', 'en', 'th', 'ja', 'zh', 'es', 'fr', 'de'):
                         fail('invalid_language', 'Choose a supported language')
                 else:
                     value = text(value, 160)
+                    # An owner rename is final; synced contact names stop applying.
+                    db.execute('UPDATE person SET name_locked=1 WHERE id=?', (person_id,))
                 db.execute('UPDATE person SET ' + key + '=? WHERE id=?', (value, person_id))
             db.execute('UPDATE identity SET seq=? WHERE person_id=?', (self.next_seq(), person_id))
         self.changed()
         return self.person(person_id)
+
+    def merge_suggestions(self):
+        """Pairs of one-on-one chats on different networks that look like the same person. Never applied
+        automatically: the owner merges or dismisses each one."""
+        try:
+            dismissed = set(json.loads(self.get('merge_dismissed') or '[]'))
+        except ValueError:
+            dismissed = set()
+        own = {name_key(n) for n in self.own_names()}
+        people = [p for p in self.people('person', chats=False) if p['identities']]
+        by_key = {}
+        for p in people:
+            key = name_key(p['display_name'])
+            if len(key) < 3 or key in own or weak_label(p['display_name'], self.own_names()):
+                continue
+            by_key.setdefault(key, []).append(p)
+        out = []
+        for key, group in by_key.items():
+            if len(group) < 2:
+                continue
+            nets = [set(i['network'] for i in p['identities']) for p in group]
+            # Same network twice is usually two different people with one name: only suggest across networks.
+            pick, seen = [], set()
+            for p, n in sorted(zip(group, nets), key=lambda x: -len(x[1])):
+                if not (n & seen):
+                    pick.append(p); seen |= n
+            ids = sorted(p['id'] for p in pick)
+            if len(pick) < 2 or '|'.join(ids) in dismissed:
+                continue
+            out.append({'id': '|'.join(ids), 'name': pick[0]['display_name'],
+                        'people': [{'id': p['id'], 'display_name': p['display_name'], 'avatar': p.get('avatar'),
+                                    'networks': sorted(set(i['network'] for i in p['identities'])),
+                                    'last': p.get('last')} for p in pick]})
+        return {'suggestions': sorted(out, key=lambda s: s['name'].casefold())}
+
+    def dismiss_merge(self, suggestion_id):
+        ids = sorted(text(x, 24) for x in str(suggestion_id or '').split('|') if x)
+        if len(ids) < 2:
+            fail('invalid_input', 'Choose a suggestion')
+        try:
+            dismissed = json.loads(self.get('merge_dismissed') or '[]')
+        except ValueError:
+            dismissed = []
+        dismissed = (dismissed + ['|'.join(ids)])[-2000:]
+        self.put('merge_dismissed', json.dumps(dismissed))
+        return {'dismissed': True}
 
     def merge(self, target, source):
         if target == source:
@@ -313,31 +787,166 @@ class PeopleStore:
         self.changed()
         return self.person(new)
 
-    def labels(self, identity_id, labels):
-        if not isinstance(labels, list) or len(labels) > 20:
-            fail('invalid_input', 'Use at most 20 labels')
-        labels = sorted({text(x, 64) for x in labels})
+    # ---------- labels (the owner's own groups of chats; James calls them groups) ----------
+    # A label is a name in label_catalog (so it exists while empty) plus room_label rows that put chats in it.
+    # Chats of every network and kind carry labels; a merged person carries them on every identity.
+    LABEL_MAX, CATALOG_MAX, CHAT_LABELS_MAX = 64, 200, 20
+    # Labels created once for the owner on upgrade (kv flag): a deleted seed never comes back.
+    SEED_LABELS = ('WizardOS',)
+
+    def label_name(self, value):
+        if not isinstance(value, str):
+            fail('invalid_input', 'Please enter a label name')
+        value = ' '.join(value.split())
+        if not value or len(value) > self.LABEL_MAX or any(ord(c) < 32 for c in value):
+            fail('invalid_input', 'Label names are 1 to %d characters' % self.LABEL_MAX)
+        return value
+
+    def seed_labels(self):
         with self.db() as db:
-            if not db.execute("SELECT 1 FROM identity WHERE id=? AND kind='group'", (identity_id,)).fetchone():
-                fail('not_found', 'Group not found', 404)
-            db.execute('DELETE FROM room_label WHERE identity_id=?', (identity_id,))
-            db.executemany('INSERT INTO room_label VALUES (?,?)', [(identity_id, l) for l in labels])
-        return {'labels': labels}
+            # Labels already on chats join the catalogue (idempotent); the table starts empty only on first upgrade.
+            db.execute('INSERT OR IGNORE INTO label_catalog(name,created) SELECT DISTINCT label,? FROM room_label ORDER BY label', (int(time.time()),))
+            if not db.execute("SELECT 1 FROM kv WHERE key='label_seed_v1'").fetchone():
+                db.executemany('INSERT OR IGNORE INTO label_catalog(name,created) VALUES (?,?)', [(n, int(time.time())) for n in self.SEED_LABELS])
+                db.execute("INSERT OR REPLACE INTO kv VALUES ('label_seed_v1','1')")
+            row = db.execute("SELECT value FROM kv WHERE key='labels_rev'").fetchone()
+        self.labels_rev = int(row[0]) if row and row[0].isdigit() else 0
+        with self.db() as db:
+            n = db.execute('SELECT COUNT(*) FROM label_catalog').fetchone()[0]
+        print('messenger: label catalogue ready, %d label(s)' % n, flush=True)
+
+    def label_catalog(self):
+        with self.db() as db:
+            rows = db.execute('SELECT c.name, (SELECT COUNT(DISTINCT i.person_id) FROM room_label l JOIN identity i ON i.id=l.identity_id '
+                              'WHERE l.label=c.name COLLATE NOCASE) FROM label_catalog c ORDER BY c.name COLLATE NOCASE').fetchall()
+        return {'labels': [{'name': r[0], 'chats': r[1]} for r in rows], 'rev': self.labels_rev}
+
+    def _labels_changed(self, db, identity_ids=()):
+        # Chats whose labels changed are re-sent to every open view; a rev bump tells views to refetch the catalogue.
+        seq = self.next_seq()
+        self.labels_rev += 1
+        db.execute("INSERT OR REPLACE INTO kv VALUES ('labels_rev',?)", (str(self.labels_rev),))
+        for ident in identity_ids:
+            db.execute('UPDATE identity SET seq=? WHERE id=?', (seq, ident))
+
+    def _canonical(self, db, name):
+        row = db.execute('SELECT name FROM label_catalog WHERE name=?', (name,)).fetchone()
+        return row[0] if row else None
+
+    def create_label(self, name):
+        name = self.label_name(name)
+        with self.db() as db:
+            found = self._canonical(db, name)
+            if not found:
+                if db.execute('SELECT COUNT(*) FROM label_catalog').fetchone()[0] >= self.CATALOG_MAX:
+                    fail('invalid_input', 'Use at most %d labels' % self.CATALOG_MAX)
+                db.execute('INSERT INTO label_catalog(name,created) VALUES (?,?)', (name, int(time.time())))
+                self._labels_changed(db)
+        self.changed()
+        return dict(self.label_catalog(), label=found or name)
+
+    def rename_label(self, old, new):
+        old, new = self.label_name(old), self.label_name(new)
+        with self.db() as db:
+            current = self._canonical(db, old)
+            if not current:
+                fail('not_found', 'Label not found', 404)
+            target = self._canonical(db, new)
+            ids = [r[0] for r in db.execute('SELECT identity_id FROM room_label WHERE label=?', (current,))]
+            if target and target.lower() != current.lower():
+                # Renaming onto another existing label merges the two.
+                db.execute('INSERT OR IGNORE INTO room_label(identity_id,label) SELECT identity_id,? FROM room_label WHERE label=?', (target, current))
+                db.execute('DELETE FROM room_label WHERE label=?', (current,))
+                db.execute('DELETE FROM label_catalog WHERE name=?', (current,))
+            else:
+                db.execute('UPDATE label_catalog SET name=? WHERE name=?', (new, current))
+                db.execute('UPDATE room_label SET label=? WHERE label=?', (new, current))
+            self._labels_changed(db, ids)
+        self.changed()
+        return dict(self.label_catalog(), label=target if target and target.lower() != current.lower() else new)
+
+    def delete_label(self, name):
+        name = self.label_name(name)
+        with self.db() as db:
+            current = self._canonical(db, name)
+            if not current:
+                fail('not_found', 'Label not found', 404)
+            ids = [r[0] for r in db.execute('SELECT identity_id FROM room_label WHERE label=?', (current,))]
+            db.execute('DELETE FROM room_label WHERE label=?', (current,))
+            db.execute('DELETE FROM label_catalog WHERE name=?', (current,))
+            self._labels_changed(db, ids)
+        self.changed()
+        return self.label_catalog()
+
+    def _set_labels(self, identity_ids, labels):
+        if not isinstance(labels, list) or len(labels) > self.CHAT_LABELS_MAX:
+            fail('invalid_input', 'Use at most %d labels' % self.CHAT_LABELS_MAX)
+        names = {}
+        for x in labels:
+            n = self.label_name(x); names.setdefault(n.lower(), n)
+        with self.db() as db:
+            chosen = []
+            for n in sorted(names.values()):
+                found = self._canonical(db, n)
+                if not found:
+                    if db.execute('SELECT COUNT(*) FROM label_catalog').fetchone()[0] >= self.CATALOG_MAX:
+                        fail('invalid_input', 'Use at most %d labels' % self.CATALOG_MAX)
+                    db.execute('INSERT INTO label_catalog(name,created) VALUES (?,?)', (n, int(time.time()))); found = n
+                chosen.append(found)
+            chosen = sorted(set(chosen))
+            for ident in identity_ids:
+                db.execute('DELETE FROM room_label WHERE identity_id=?', (ident,))
+                db.executemany('INSERT INTO room_label VALUES (?,?)', [(ident, l) for l in chosen])
+            self._labels_changed(db, identity_ids)
+        self.changed()
+        # `labels` stays the chat's own list (what the older labels route returned); the catalogue rides along.
+        full = self.label_catalog()
+        return {'labels': chosen, 'catalog': full['labels'], 'rev': full['rev']}
+
+    def labels(self, identity_id, labels):
+        # Compatibility route (POST groups/<identity>/labels): one chat room, any kind.
+        with self.db() as db:
+            found = db.execute('SELECT 1 FROM identity WHERE id=?', (identity_id,)).fetchone()
+        if not found:
+            fail('not_found', 'Chat not found', 404)
+        return self._set_labels([identity_id], labels)
+
+    def person_labels(self, person_id, labels):
+        # A person or group in the Inbox: a merged person carries the labels on every one of its chats.
+        with self.db() as db:
+            ids = [r[0] for r in db.execute('SELECT id FROM identity WHERE person_id=?', (person_id,))]
+        if not ids:
+            fail('not_found', 'Chat not found', 404)
+        return self._set_labels(ids, labels)
 
     def add_message(self, event_id, identity, sender, outgoing, original, timestamp, translated=None,
-                    msgtype='m.text', media=None, reply_to=None, client_id=None):
+                    msgtype='m.text', media=None, reply_to=None, client_id=None, album=None, source_event=None, push_live=False, mentions=None, mentioned=False):
         """Insert once; a later sighting with richer media upgrades a label-only row in place."""
         media_json = json.dumps(media, ensure_ascii=False) if media else None
         with self.db() as db:
+            if db.execute('SELECT 1 FROM redacted WHERE event_id=? UNION ALL SELECT 1 FROM scoped_redaction WHERE identity_id=? AND event_id=?',
+                          (event_id, identity['id'], event_id)).fetchone():
+                return False  # Late history/sync must not resurrect a redaction.
             seq = self.next_seq()
-            cur = db.execute('INSERT OR IGNORE INTO message(id,identity_id,sender,outgoing,original,translated,timestamp,seq,msgtype,media,reply_to,client_id) '
-                             'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-                             (event_id, identity['id'], sender, int(outgoing), original, translated, timestamp, seq, msgtype, media_json, reply_to, client_id))
+            cur = db.execute('INSERT OR IGNORE INTO message(id,identity_id,sender,outgoing,original,translated,timestamp,seq,msgtype,media,reply_to,client_id,album,source_event) '
+                             'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                             (event_id, identity['id'], sender, int(outgoing), original, translated, timestamp, seq, msgtype, media_json, reply_to, client_id, album, source_event))
             inserted = cur.rowcount == 1
+            if mentions is not None:
+                db.execute('UPDATE message SET mentions=?,mentioned=? WHERE id=?', (json.dumps(mentions), int(mentioned), event_id))
+            # Muted, Medium and Low priority chats never notify (the person may have been merged since: join on the identity).
+            quiet = db.execute('SELECT 1 FROM identity i JOIN person p ON p.id=i.person_id WHERE i.id=? AND (p.muted=1 OR p.low_priority=1 OR p.medium_priority=1)',
+                               (identity['id'],)).fetchone()
+            if inserted and not outgoing and push_live and self.push_enabled and not quiet:
+                db.execute('INSERT OR IGNORE INTO push_intent(message,created) VALUES(?,?)',
+                           (event_id if event_id.startswith('messenger:') else 'matrix:' + event_id, time.time()))
             if not inserted and msgtype != 'm.text':
                 cur = db.execute("UPDATE message SET msgtype=?,media=?,original=?,reply_to=COALESCE(reply_to,?),seq=? WHERE id=? AND (msgtype='m.text' OR media IS NULL)",
                                  (msgtype, media_json, original, reply_to, seq, event_id))
                 inserted = cur.rowcount == 1
+            if album and not inserted:
+                db.execute('UPDATE message SET album=COALESCE(album,?),source_event=COALESCE(source_event,?),client_id=COALESCE(client_id,?),seq=? WHERE id=? AND (album IS NULL OR (client_id IS NULL AND ? IS NOT NULL))',
+                           (album, source_event, client_id, seq, event_id, client_id))
             if not outgoing:
                 db.execute('UPDATE identity SET last_used=MAX(last_used,?) WHERE id=?', (timestamp, identity['id']))
             else:
@@ -347,13 +956,17 @@ class PeopleStore:
             self.changed()
         return inserted
 
-    def claim_own(self, ghost):
-        """Lines the owner wrote in the Telegram app were stored as incoming; mark them outgoing, chats read up to them."""
+    def claim_own(self, ghost, network=None):
+        """Lines the owner wrote in a network's own app arrive from their ghost and were stored
+        as incoming; mark them outgoing (that network only), chats read up to them."""
+        if network is None:
+            match = re.match(r'@([a-z]+)_', ghost)
+            network = match.group(1) if match else 'telegram'
         with self.db() as db:
             rooms = [(r[0], json.loads(r[1]).get('names', {}).get(ghost)) for r in db.execute('SELECT room,json FROM room_meta')]
             changed = 0
             for room, name in rooms:
-                row = db.execute("SELECT id FROM identity WHERE network='telegram' AND address=?", (room,)).fetchone()
+                row = db.execute('SELECT id FROM identity WHERE network=? AND address=?', (network, room)).fetchone()
                 if not row:
                     continue
                 senders = [ghost] + ([name] if name else [])
@@ -372,7 +985,7 @@ class PeopleStore:
 
     def message(self, message_id):
         with self.db() as db:
-            row = db.execute('SELECT m.*,i.network,i.address,i.label,i.kind,i.person_id FROM message m JOIN identity i ON m.identity_id=i.id WHERE m.id=?', (message_id,)).fetchone()
+            row = db.execute('SELECT m.rowid AS timeline_order,m.*,i.network,i.address,i.label,i.kind,i.person_id FROM message m JOIN identity i ON m.identity_id=i.id WHERE m.id=?', (message_id,)).fetchone()
         if not row:
             fail('not_found', 'That message is no longer here', 404)
         return dict(row)
@@ -397,6 +1010,16 @@ class PeopleStore:
             db.execute('INSERT OR IGNORE INTO reaction VALUES (?,?,?,?,?)', (event_id, message_id, sender, key, int(outgoing)))
         return self.bump(message_id)
 
+    def redact_scoped(self, identity_id, event_id):
+        with self.db() as db:
+            db.execute('INSERT OR IGNORE INTO scoped_redaction VALUES (?,?)', (identity_id, event_id))
+            row = db.execute('SELECT identity_id FROM message WHERE id=? UNION ALL '
+                             'SELECT m.identity_id FROM reaction r JOIN message m ON m.id=r.message_id WHERE r.event_id=?',
+                             (event_id, event_id)).fetchone()
+            if row and row[0] == identity_id:
+                return self.redact(event_id)
+        return False
+
     def redact(self, event_id):
         """A redaction removes a reaction or blanks a message ("This message was deleted")."""
         with self.db() as db:
@@ -405,7 +1028,15 @@ class PeopleStore:
             if row:
                 db.execute('DELETE FROM reaction WHERE event_id=?', (event_id,))
                 return self.bump(row[0])
-        return self.bump(event_id, ",deleted=1,original='',translated=NULL,media=NULL,transcript=NULL")
+        with self.db() as db:
+            targets = list(db.execute('SELECT id,album,media FROM message WHERE id=? OR source_event=?', (event_id, event_id)))
+        for target, album, raw_media in targets:
+            # Deletion clears content/URIs, but explicit non-content ordinals must
+            # survive so delayed Signal albums do not reorder their remaining tiles.
+            media = json.loads(raw_media) if raw_media else {}
+            ordinal = {key: media[key] for key in ('album_index', 'album_count') if key in media} if (album or '').startswith('signal:') else {}
+            self.bump(target, ",deleted=1,original='',translated=NULL,media=?,transcript=NULL", (json.dumps(ordinal) if ordinal else None,))
+        return bool(targets)
 
     def decorate(self, rows):
         """Public message rows: media without mxc URIs, aggregated reactions, reply excerpts."""
@@ -416,27 +1047,69 @@ class PeopleStore:
         replies = list({r['reply_to'] for r in rows if r.get('reply_to')})
         with self.db() as db:
             reacts = {}
+            identity_meta = {}
+            by_id = {row['id']: row for row in rows}
             for i in range(0, len(ids), 500):
                 chunk = ids[i:i + 500]
-                for r in db.execute('SELECT message_id,key,outgoing FROM reaction WHERE message_id IN (%s) ORDER BY rowid' % ','.join('?' * len(chunk)), chunk):
+                for r in db.execute('SELECT message_id,key,outgoing,sender FROM reaction WHERE message_id IN (%s) ORDER BY rowid' % ','.join('?' * len(chunk)), chunk):
                     agg = reacts.setdefault(r[0], {})
                     entry = agg.setdefault(r[1], {'key': r[1], 'count': 0, 'mine': False})
                     entry['count'] += 1
                     entry['mine'] = entry['mine'] or bool(r[2])
+                    iid = by_id[r[0]]['identity_id']
+                    if iid not in identity_meta:
+                        ident = db.execute('SELECT network,address FROM identity WHERE id=?', (iid,)).fetchone()
+                        raw = db.execute('SELECT json FROM room_meta WHERE room=?', (ident['address'],)).fetchone()
+                        identity_meta[iid] = (ident['network'], json.loads(raw[0]) if raw else {})
+                    network, meta = identity_meta[iid]
+                    # Never infer a display name from a count or another member.
+                    name = OWN_SENDER if r[2] else (meta.get('names') or {}).get(r[3])
+                    entry.setdefault('reactors', [])
+                    if name and (r[2] or MXID.fullmatch(r[3])):
+                        reactor = {'id': r[3], 'name': OWN_SENDER if r[2] else plain_name(network, name), 'mine': bool(r[2]),
+                                   'avatar': picture_tag((meta.get('avatars') or {}).get(r[3]))}
+                        if not any(u['id'] == reactor['id'] for u in entry['reactors']):
+                            entry['reactors'].append(reactor)
             quoted = {}
+            status = self.status_identities(db)
             if replies:
-                for r in db.execute('SELECT id,sender,outgoing,original,msgtype,deleted,media FROM message WHERE id IN (%s)' % ','.join('?' * len(replies)), replies):
+                for r in db.execute('SELECT id,sender,outgoing,original,msgtype,deleted,media,timestamp,identity_id FROM message WHERE id IN (%s)' % ','.join('?' * len(replies)), replies):
                     media = json.loads(r['media']) if r['media'] else {}
-                    quoted[r['id']] = {'id': r['id'], 'sender': r['sender'], 'outgoing': bool(r['outgoing']), 'text': '' if r['deleted'] else r['original'][:200],
-                                       'msgtype': r['msgtype'], 'voice': bool(media.get('voice')), 'deleted': bool(r['deleted'])}
+                    text = '' if r['deleted'] else r['original'][:200]
+                    gone = r['msgtype'] == 'm.text' and unavailable_media(r['original'], r['timestamp'], r['identity_id'] in status)
+                    if gone:
+                        text = unavailable_label(gone[0]) + (' · ' + gone[1][:160] if gone[1] else '')
+                    quoted[r['id']] = {'id': r['id'], 'sender': OWN_SENDER if r['outgoing'] else r['sender'], 'outgoing': bool(r['outgoing']), 'text': text,
+                                       'msgtype': r['msgtype'], 'voice': bool(media.get('voice')), 'gif': bool(media.get('gif')), 'deleted': bool(r['deleted'])}
         for r in rows:
+            r['mentions'] = json.loads(r.get('mentions') or '[]') if not r.get('deleted') else []
+            r['mentioned'] = bool(r.get('mentioned')) and not r.get('deleted')
             r['outgoing'] = bool(r['outgoing'])
+            if r['outgoing']:
+                # Never surface the owner's own network name/ghost as a sender.
+                r['sender'] = OWN_SENDER
             r['edited'], r['deleted'] = bool(r.get('edited')), bool(r.get('deleted'))
             media = json.loads(r['media']) if r.get('media') else None
-            if media:
-                r['media'] = {k: v for k, v in media.items() if k in ('mime', 'size', 'w', 'h', 'duration', 'filename', 'waveform', 'voice')}
+            if media and media.get('mentions'):
+                if not r['mentions']:
+                    r['mentions'] = [{k: v for k, v in x.items() if k in ('text', 'me', 'net', 'acc', 'id', 'name', 'start', 'end')} for x in media['mentions'] if isinstance(x, dict)]
+            if media and media.get('links'):
+                r['links'] = [{k: v for k, v in l.items() if k in ('url', 'title', 'desc', 'site', 'w', 'h')} | {'image': bool(l.get('mxc'))} for l in media['links']]
+            if media and media.get('links') and not media.get('mxc'):
+                r['media'] = None
+            elif media and (r.get('msgtype') != 'm.text' or media.get('mxc') or media.get('marmot')):
+                r['media'] = {k: v for k, v in media.items() if k in ('mime', 'size', 'w', 'h', 'duration', 'filename', 'waveform', 'voice', 'gif', 'sticker', 'album_index', 'album_count')}
                 r['media']['thumb'] = bool(media.get('thumb')) or (media.get('mime', '').startswith('image/'))
+            else:
+                r['media'] = None
+            if r.get('msgtype') == 'm.text' and not r['deleted']:
+                gone = unavailable_media(r.get('original'), r.get('timestamp'), r.get('identity_id') in status)
+                if gone:
+                    # Media the bridge could not deliver: the view shows a quiet placeholder plus any caption.
+                    r['unavailable'], r['original'], r['translated'] = gone[0], gone[1], None
             r['reactions'] = list(reacts.get(r['id'], {}).values())
+            for reaction in r['reactions']:
+                reaction['identities_complete'] = len(reaction.get('reactors', [])) == reaction['count']
             if r.get('reply_to'):
                 r['reply'] = quoted.get(r['reply_to'])
             r.pop('address', None)
@@ -444,15 +1117,27 @@ class PeopleStore:
 
     def messages(self, person_id, before=None, limit=2000):
         self.person(person_id)
+        where, args = '', [person_id]
+        if isinstance(before, str):
+            try:
+                stamp, message_id = history_cursor.decode(before, person_id)
+            except ValueError:
+                fail('invalid_cursor', 'Invalid message cursor')
+            where = ' AND (m.timestamp,m.id)<(?,?)'
+            args.extend((stamp, message_id))
+        elif before is not None:
+            # Legacy explicit timestamp cutoffs remain supported, not used for paging.
+            where = ' AND m.timestamp<?'
+            args.append(before)
         with self.db() as db:
-            rows = db.execute('SELECT * FROM (SELECT m.*,i.network,i.label,i.kind,i.person_id FROM message m JOIN identity i ON m.identity_id=i.id '
-                              'WHERE i.person_id=? AND (? IS NULL OR m.timestamp<?) ORDER BY m.timestamp DESC,m.id DESC LIMIT ?) ORDER BY timestamp,id',
-                              (person_id, before, before, limit)).fetchall()
+            rows = db.execute('SELECT * FROM (SELECT m.rowid AS timeline_order,m.*,i.network,i.label,i.kind,i.person_id FROM message m JOIN identity i ON m.identity_id=i.id '
+                              'WHERE i.person_id=?' + where + ' ORDER BY m.timestamp DESC,m.id DESC LIMIT ?) ORDER BY timestamp,timeline_order',
+                              (*args, limit)).fetchall()
         return self.decorate(rows)
 
     def since(self, seq, limit=400):
         with self.db() as db:
-            rows = db.execute('SELECT m.*,i.network,i.label,i.kind,i.person_id FROM message m JOIN identity i ON m.identity_id=i.id '
+            rows = db.execute('SELECT m.rowid AS timeline_order,m.*,i.network,i.label,i.kind,i.person_id FROM message m JOIN identity i ON m.identity_id=i.id '
                               'WHERE m.seq>? ORDER BY m.seq LIMIT ?', (seq, limit)).fetchall()
             touched = {r[0] for r in db.execute('SELECT person_id FROM identity WHERE seq>?', (seq,))}
         return self.decorate(rows), touched | {r['person_id'] for r in rows}
@@ -522,6 +1207,10 @@ def message_parts(event):
     reply_to = (relates.get('m.in_reply_to') or {}).get('event_id')
     if event.get('type') == 'm.sticker':
         info = content.get('info') or {}
+        if str(info.get('mimetype', '')).startswith('video/') and content.get('url'):
+            # A Telegram video sticker (webm) plays like the bridge's animated stickers do.
+            return 'm.video', '', {k: v for k, v in {'mxc': content.get('url'), 'mime': info.get('mimetype'), 'w': info.get('w'), 'h': info.get('h'),
+                                   'size': info.get('size'), 'thumb': info.get('thumbnail_url') or None, 'sticker': True}.items() if v is not None}, reply_to
         return 'm.sticker', '', {'mxc': content.get('url'), 'mime': info.get('mimetype', 'image/webp'), 'w': info.get('w'), 'h': info.get('h'),
                                  'size': info.get('size'), 'thumb': (info.get('thumbnail_url') or None), 'alt': content.get('body', '')}, reply_to
     if event.get('type') != 'm.room.message':
@@ -532,7 +1221,7 @@ def message_parts(event):
     if reply_to:
         body = REPLY_FALLBACK.sub('', body, count=1)
     if kind in ('m.text', 'm.notice'):
-        return 'm.text', body, None, reply_to
+        return 'm.text', body, link_previews(content), reply_to
     if kind == 'm.emote':
         return 'm.text', '* ' + body, None, reply_to
     if kind == 'm.location':
@@ -553,10 +1242,137 @@ def message_parts(event):
             step = max(1, len(wave) / 48)
             top = max(max(wave), 1)
             media['waveform'] = [int(100 * wave[int(i * step)] / top) for i in range(min(48, len(wave)))]
+        if kind == 'm.video':
+            # Bridged GIFs (WhatsApp/Telegram) and Telegram animated stickers arrive as short looping videos.
+            if info.get('fi.mau.bridged_sticker') or info.get('fi.mau.telegram.animated_sticker'):
+                media['sticker'] = True
+            elif info.get('fi.mau.gif') or info.get('fi.mau.telegram.gif') or (info.get('fi.mau.loop') and info.get('fi.mau.no_audio')):
+                media['gif'] = True
+        if kind == 'm.image' and (previews := link_previews(content)):
+            media.update(previews)
         if not media['mxc']:
             return 'm.text', '[' + MEDIA_LABELS[kind] + ']' + (' ' + caption if caption else ''), None, reply_to
-        return kind, caption, {k: v for k, v in media.items() if v not in (None, '')}, reply_to
+        return kind, caption, {k: v for k, v in media.items() if v is not None and v != '' and v is not False}, reply_to
     return None
+
+
+# Bridge lines that stand in for media the bridge could not deliver. WhatsApp only keeps old media on the
+# sender's phone for a while: once it is gone the bridge says so in a notice (and keeps any caption after a
+# blank line). They are not messages, so the view shows a quiet placeholder instead of the bridge's sentence.
+UNAVAILABLE = re.compile(r'\AFailed to bridge (photo|image|gif|voice message|video attachment|video|file attachment|file|sticker|'
+                         r'audio attachment|audio|media)\b[^\n]*(?:\n\n(.*))?\Z', re.S)
+UNAVAILABLE_KIND = {'photo': 'photo', 'image': 'photo', 'gif': 'gif', 'voice message': 'voice', 'video attachment': 'video', 'video': 'video',
+                    'file attachment': 'file', 'file': 'file', 'sticker': 'sticker', 'audio attachment': 'audio', 'audio': 'audio', 'media': 'media'}
+UNAVAILABLE_LABELS = {'photo': '📷 Photo', 'gif': 'GIF', 'voice': '🎤 Voice message', 'video': '🎬 Video', 'file': '📎 File',
+                      'sticker': 'Sticker', 'audio': '🎵 Audio', 'media': '📎 Media'}
+WAITING_PREFIX = 'Decrypting message from WhatsApp failed'
+# WhatsApp re-sends an undecryptable message within moments when the sender's phone is online; the bridge then edits
+# the notice into the real message. Past this age it is not coming: say so instead of "waiting" forever.
+WAITING_MAX_MS = 3600 * 1000
+
+
+def unavailable_media(original, stamp=None, status=False):
+    """('photo'|'video'|..., caption) for a bridge's "Failed to bridge ..." line, ('waiting', '') for a WhatsApp
+    message the bridge is still waiting to decrypt ('undecryptable' once it is older than WAITING_MAX_MS, when the
+    message time is given), else None. In the WhatsApp Status Broadcast chat (status=True) that decrypt notice is
+    ('status', ''): the bridge almost never receives status posts, so it is not "still sending" anything."""
+    if not isinstance(original, str) or not original.startswith(('Failed to bridge ', WAITING_PREFIX)):
+        return None
+    if original.startswith(WAITING_PREFIX):
+        if status:
+            return 'status', ''
+        old = isinstance(stamp, (int, float)) and stamp > 0 and stamp < time.time() * 1000 - WAITING_MAX_MS
+        return ('undecryptable' if old else 'waiting'), ''
+    match = UNAVAILABLE.match(original)
+    if not match:
+        return None
+    return UNAVAILABLE_KIND[match.group(1)], (match.group(2) or '').strip()
+
+
+def unavailable_label(kind):
+    if kind == 'waiting':
+        return '⏳ Waiting for this message'
+    if kind == 'undecryptable':
+        return "🔒 Message couldn't be decrypted"
+    if kind == 'status':
+        return STATUS_LABEL
+    return UNAVAILABLE_LABELS.get(kind, '📎 Media') + ' not available'
+
+
+# WhatsApp's status posts arrive in one bridge room per account: the portal for the jid status@broadcast. The
+# bridge info (m.bridge channel.id) names it; rooms cached before that id was kept fall back to the bridge's title.
+STATUS_CHANNEL = 'status@broadcast'
+STATUS_TITLE = 'WhatsApp Status Broadcast'
+STATUS_LABEL = '🟢 Status update'
+
+
+def is_status_chat(network, meta=None, label=None):
+    """True for the WhatsApp Status Broadcast chat. Prefers the bridge's portal id; the title only without one."""
+    if network != 'whatsapp':
+        return False
+    meta = meta if isinstance(meta, dict) else {}
+    if isinstance(meta.get('channel_id'), str) and meta['channel_id']:
+        return meta['channel_id'] == STATUS_CHANNEL
+    return (label or meta.get('label')) == STATUS_TITLE
+
+
+def media_label(msgtype, media):
+    """Short chat-list label for a media message (same words as snippet() in static/unified.js)."""
+    media = media if isinstance(media, dict) else {}
+    if media.get('voice'):
+        return '🎤 Voice message'
+    if media.get('sticker'):
+        return 'Sticker'
+    if media.get('gif') or (msgtype == 'm.image' and media.get('mime') == 'image/gif'):
+        return 'GIF'
+    return {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.audio': '🎵 Audio', 'm.file': '📎 File',
+            'm.sticker': 'Sticker', 'm.location': '📍 Location'}.get(msgtype)
+
+
+# Mentions arrive as Matrix pills in formatted_body; the plain body carries the bridge ghost's display name,
+# e.g. "+31 6 1234 5678 (WA)". Messenger swaps in the best name it knows and remembers where each one is.
+PILL = re.compile(r'<a\s+href="https://matrix\.to/#/([^"?]+)(?:\?[^"]*)?"\s*>(.*?)</a>', re.S | re.I)
+TAG = re.compile(r'<[^>]+>')
+
+
+def mention_pills(content):
+    """[(user_id, text shown in body)] for each user pill in an HTML message, in order."""
+    if not isinstance(content, dict):
+        return []
+    html_body = content.get('formatted_body')
+    if not isinstance(html_body, str) or '/#/' not in html_body:
+        return []
+    import html as _html
+    out = []
+    for target, label in PILL.findall(html_body):
+        user = unquote(target)
+        if not user.startswith('@') or ':' not in user:
+            continue  # room/event links are not mentions
+        text = _html.unescape(TAG.sub('', label)).strip()
+        if text:
+            out.append((user, text))
+    return out[:20]
+
+
+def substitute_mentions(body, pills, resolve):
+    """Replace each pill's text in `body` with "@<best name>". `resolve(user_id, text)` -> (name, extra dict).
+    Returns (body, [{'text': '@Name', ...extra}])."""
+    mentions, at, out = [], 0, []
+    for user, text in pills:
+        i = body.find(text, at)
+        if i < 0:
+            continue
+        start = i - 1 if i > 0 and body[i - 1] == '@' else i
+        name, extra = resolve(user, text)
+        shown = text if text.startswith('@') and not extra.get('me') else '@' + name
+        out.append(body[at:start])
+        out.append(shown)
+        at = i + len(text)
+        mentions.append(dict(extra, text=shown))
+    if not mentions:
+        return body, []
+    out.append(body[at:])
+    return ''.join(out), mentions
 
 
 class UnifiedInbox:
@@ -568,6 +1384,7 @@ class UnifiedInbox:
         self.store = PeopleStore(self.root / 'people.sqlite3')
         self.engine = engine
         self.translator = Translator(self.store, self.root)
+        self.catchup = catchup.CatchUpService(self.store, self.catchup_complete, fail, self.store.own_names)
         self.lock = threading.RLock()
         self.sync_lock = threading.Lock()
         self.warm_queue = queue.Queue(maxsize=200)
@@ -691,10 +1508,10 @@ class UnifiedInbox:
         except (OSError, ValueError, KeyError):
             return False
 
-    def provision(self, path, method='GET', body=None):
+    def provision(self, path, method='GET', body=None, query=None, timeout=65):
         if not self.telegram_configured():
             fail('telegram_not_configured', 'Telegram not configured. Supply TELEGRAM_API_ID and TELEGRAM_API_HASH at installation.', 409)
-        return http(self.bridge, '/_matrix/provision/v3' + path + '?' + urlencode({'user_id': self.owner}), method, body, self.keys()['provisioning'], 65)
+        return http(self.bridge, '/_matrix/provision/v3' + path + '?' + urlencode({**(query or {}), 'user_id': self.owner}), method, body, self.keys()['provisioning'], timeout)
 
     # A Telegram login waits on the owner leaving the app to read a code, so the current
     # step lives here (shape only, never typed values) and the view resumes it on return.
@@ -715,6 +1532,114 @@ class UnifiedInbox:
             self._pending_login = None
         return result
 
+    # ---------- My QR codes: the owner's own contact links, shown as scannable codes ----------
+    # Every connected account becomes a code automatically; the owner only adds extras or hides one.
+    QR_NETWORKS = ('telegram', 'whatsapp', 'signal', 'messenger', 'instagram', 'x', 'linkedin', 'line', 'wechat', 'facebook', 'email', 'phone', 'link')
+
+    @staticmethod
+    def qr_key(code):
+        return '%s:%s' % (code.get('network'), re.sub(r'\s+', '', str(code.get('value') or '')).lower().lstrip('@+'))
+
+    def own_profiles(self):
+        """[(network, login dict)] for the bridges connected here; overridden where bridges exist."""
+        try:
+            return [('telegram', login) for login in self.telegram_status().get('logins') or []]
+        except Exception:  # unreachable: the saved list still shows
+            return []
+
+    def connected_codes(self):
+        """(codes, owner name) derived from connected accounts. Read-only, cached briefly."""
+        cached = getattr(self, '_qr_cache', None)
+        if cached and time.time() - cached[0] < 120:
+            return cached[1], cached[2]
+        codes, names = [], []
+        def add(network, value, source):
+            value = (value or '').strip() if isinstance(value, str) else ''
+            if value and len(value) <= 300:
+                codes.append({'network': network, 'value': value, 'label': '', 'auto': True, 'source': source})
+        phone = lambda v: v if isinstance(v, str) and re.fullmatch(r'\+?\d[\d\s-]{5,20}', v.strip()) else ''
+        user = lambda v, pat=r'[A-Za-z0-9_.]{2,64}': v.strip().lstrip('@') if isinstance(v, str) and re.fullmatch(pat, v.strip().lstrip('@')) else ''
+        for network, login in self.own_profiles():
+            if not isinstance(login, dict):
+                continue
+            state = (login.get('state') or {}).get('state_event', login.get('state_event')) if isinstance(login.get('state'), dict) else login.get('state_event')
+            if state not in (None, 'CONNECTED'):
+                continue
+            prof = login.get('profile') if isinstance(login.get('profile'), dict) else {}
+            if isinstance(prof.get('name'), str) and prof['name'].strip():
+                names.append(prof['name'].strip())
+            login_id = str(login.get('id') or '')
+            if network == 'telegram':
+                add('telegram', user(prof.get('username'), r'[A-Za-z][A-Za-z0-9_]{3,31}') or phone(prof.get('phone')), network)
+            elif network == 'whatsapp':
+                add('whatsapp', phone(prof.get('phone')) or ('+' + login_id if re.fullmatch(r'\d{6,15}', login_id) else ''), network)
+            elif network == 'signal':
+                add('signal', phone(prof.get('phone')), network)
+            elif network == 'instagram':
+                add('instagram', user(prof.get('username')), network)
+            elif network == 'twitter':
+                add('x', user(prof.get('username'), r'[A-Za-z0-9_]{1,15}'), network)
+            elif network == 'facebook':
+                add('facebook', user(prof.get('username')), network)
+            elif network == 'linkedin':
+                add('linkedin', user(prof.get('username'), r'[A-Za-z0-9-]{3,100}'), network)
+            elif network == 'gmessages':
+                add('phone', phone(prof.get('phone')), network)
+        try:
+            ident = (self.engine.identity() or {}).get('identity') or {}
+            add('messenger', ident.get('npub') or '', 'messenger')
+            if ident.get('display_name'):
+                names.insert(0, ident['display_name'])
+        except Exception:
+            pass
+        seen, unique = set(), []
+        for c in codes:
+            if self.qr_key(c) not in seen:
+                seen.add(self.qr_key(c)); unique.append(c)
+        name = names[0] if names else ''
+        self._qr_cache = (time.time(), unique, name)
+        return unique, name
+
+    def qr_codes(self):
+        auto, name = self.connected_codes()
+        try:
+            hidden = set(json.loads(self.store.get('my_qr_hidden') or '[]'))
+        except ValueError:
+            hidden = set()
+        try:
+            saved = json.loads(self.store.get('my_qr_codes') or '[]')
+        except ValueError:
+            saved = []
+        keys = {self.qr_key(c) for c in auto}
+        extras = [c for c in saved if isinstance(c, dict) and self.qr_key(c) not in keys]
+        shown = [c for c in auto if self.qr_key(c) not in hidden]
+        return {'codes': shown + extras, 'connected': auto, 'hidden': sorted(hidden & keys), 'extras': extras,
+                'name': name, 'saved': bool(saved)}
+
+    def save_qr_codes(self, payload):
+        codes = payload.get('codes')
+        if not isinstance(codes, list) or len(codes) > 24:
+            fail('invalid_codes', 'Invalid QR code list')
+        clean, connected = [], {self.qr_key(c) for c in self.connected_codes()[0]}
+        for item in codes:
+            if not isinstance(item, dict) or item.get('network') not in self.QR_NETWORKS:
+                fail('invalid_codes', 'Unknown network')
+            if item.get('auto') or self.qr_key(item) in connected:
+                continue  # connected accounts are never stored; they follow the account
+            value, label = item.get('value'), item.get('label') or ''
+            if not isinstance(value, str) or not value.strip() or len(value) > 1024:
+                fail('invalid_codes', 'Each code needs a username, number or link')
+            if not isinstance(label, str) or len(label) > 80:
+                fail('invalid_codes', 'Labels are up to 80 characters')
+            clean.append({'network': item['network'], 'value': value.strip(), 'label': label.strip()})
+        hidden = payload.get('hidden')
+        if hidden is not None:
+            if not isinstance(hidden, list) or len(hidden) > 50 or not all(isinstance(h, str) and len(h) < 400 for h in hidden):
+                fail('invalid_codes', 'Invalid hidden list')
+            self.store.put('my_qr_hidden', json.dumps(sorted(set(hidden))))
+        self.store.put('my_qr_codes', json.dumps(clean))
+        return self.qr_codes()
+
     def telegram_status(self):
         if not self.telegram_configured():
             return {'state': 'not_configured', 'message': 'Telegram not configured', 'logins': [], 'flows': []}
@@ -725,7 +1650,7 @@ class UnifiedInbox:
             return {'state': 'unavailable', 'message': error.message, 'logins': [], 'flows': []}
 
     # ---------- Matrix ingest ----------
-    META_TYPES = ('m.room.member', 'm.room.name', 'm.bridge', 'uk.half-shot.bridge', 'm.room.create')
+    META_TYPES = ('m.room.member', 'm.room.name', 'm.room.avatar', 'm.bridge', 'uk.half-shot.bridge', 'm.room.create')
 
     def room_meta(self, room, data):
         """Room kind/label/member names, cached; full state is fetched only for new rooms or state changes."""
@@ -735,27 +1660,31 @@ class UnifiedInbox:
                 row = db.execute('SELECT json FROM room_meta WHERE room=?', (room,)).fetchone()
             meta = json.loads(row[0]) if row else None
         events = (data.get('state', {}).get('events') or []) + [e for e in data.get('timeline', {}).get('events', []) if 'state_key' in e]
-        if meta is not None and not any(e.get('type') in self.META_TYPES for e in events):
+        if meta is not None and 'network' in meta and not any(e.get('type') in self.META_TYPES for e in events):
             self.rooms[room] = meta
             return meta
         state = self.mx(self.room(room) + '/state')
         info = next((e['content'] for e in state if e['type'] in ('m.bridge', 'uk.half-shot.bridge')), None)
-        meta = {'telegram': bool(info and info.get('protocol', {}).get('id') == 'telegram')}
-        if meta['telegram']:
+        from connectors import room_network
+        network = room_network(state)
+        meta = {'network': network, 'telegram': network == 'telegram'}
+        if network:
             channel = info.get('channel', {})
-            members = [e for e in state if e['type'] == 'm.room.member' and e.get('content', {}).get('membership') == 'join' and e.get('state_key') not in (self.owner, '@telegrambot:messenger.internal')]
+            members = [e for e in state if e['type'] == 'm.room.member' and e.get('content', {}).get('membership') == 'join' and e.get('state_key') not in (self.owner, '@' + network + 'bot:messenger.internal') and not self.is_me(e.get('state_key'))]
             # bridgev2 emits room_type in bridge info; fallback counts real participants.
-            room_type = info.get('com.beeper.room_type.v2') or channel.get('fi.mau.telegram.type') or info.get('com.beeper.room_type')
+            room_type = info.get('com.beeper.room_type.v2') or channel.get('fi.mau.' + network + '.type') or info.get('com.beeper.room_type')
             meta['space'] = any(e['type'] == 'm.room.create' and e.get('content', {}).get('type') == 'm.space' for e in state)
             meta['kind'] = 'person' if room_type in ('dm', 'private') or (room_type is None and len(members) == 1) else 'group'
-            meta['label'] = next((e['content'].get('name') for e in state if e['type'] == 'm.room.name'), None) or channel.get('displayname') or 'Telegram conversation'
+            meta['label'] = next((e['content'].get('name') for e in state if e['type'] == 'm.room.name'), None) or channel.get('displayname') or network.title() + ' conversation'
             meta['names'] = {e.get('state_key'): (e.get('content') or {}).get('displayname') for e in state if e['type'] == 'm.room.member' and (e.get('content') or {}).get('displayname')}
+            if network == 'whatsapp' and isinstance(channel.get('id'), str):
+                meta['channel_id'] = channel['id']  # the portal jid: tells the Status Broadcast chat apart
         with self.store.db() as db:
             db.execute('INSERT OR REPLACE INTO room_meta VALUES (?,?)', (room, json.dumps(meta, ensure_ascii=False)))
         self.rooms[room] = meta
         return meta
 
-    def ingest(self, identity, meta, event):
+    def ingest(self, identity, meta, event, *, live=False):
         etype, content = event.get('type'), event.get('content') or {}
         sender = event.get('sender', '')
         outgoing = self.is_me(sender)
@@ -763,20 +1692,24 @@ class UnifiedInbox:
         if etype == 'm.room.redaction':
             target = event.get('redacts') or content.get('redacts')
             if target:
-                self.store.redact(target)
+                self.store.redact_scoped(identity['id'], target)
             return
         if etype == 'm.reaction' and relates.get('rel_type') == 'm.annotation' and isinstance(relates.get('key'), str):
-            self.store.react(event['event_id'], relates.get('event_id', ''), sender, relates['key'][:32], outgoing)
+            with self.store.db() as db:
+                target = db.execute('SELECT 1 FROM message WHERE id=? AND identity_id=?', (relates.get('event_id', ''), identity['id'])).fetchone()
+                redacted = db.execute('SELECT 1 FROM scoped_redaction WHERE identity_id=? AND event_id=?', (identity['id'], event['event_id'])).fetchone()
+                if target and not redacted:
+                    self.store.react(event['event_id'], relates.get('event_id', ''), sender, relates['key'][:32], outgoing)
             return
         if etype == 'm.room.message' and relates.get('rel_type') == 'm.replace':
-            new = content.get('m.new_content') or {}
-            if isinstance(new.get('body'), str) and new.get('msgtype') in ('m.text', 'm.notice', 'm.emote'):
+            if self.apply_edit(identity, meta, sender, outgoing, relates.get('event_id'), content.get('m.new_content')):
                 with self.store.db() as db:
-                    ok = db.execute('SELECT 1 FROM message WHERE id=? AND (sender=? OR (outgoing=1 AND ?))', (relates.get('event_id'), meta.get('names', {}).get(sender) or sender, outgoing)).fetchone()
-                if ok:
-                    self.store.bump(relates.get('event_id'), ',original=?,translated=NULL,translation_error=NULL,edited=1', (new['body'],))
+                    row = db.execute('SELECT original,media FROM message WHERE id=?', (relates.get('event_id'),)).fetchone()
+                spans, owner_mentioned = incoming_mentions(content.get('m.new_content') or {}, row['original'], self.is_me)
+                spans = (json.loads(row['media']) if row['media'] else {}).get('mentions') or spans
+                self.store.bump(relates.get('event_id'), ',mentions=?,mentioned=?', (json.dumps(spans), int(owner_mentioned)))
             return
-        if sender.startswith('@telegrambot:'):
+        if sender == '@' + identity['network'] + 'bot:messenger.internal':
             # Bridge error notices are not chat lines: mark our newest recent outgoing message as failed.
             if content.get('msgtype') == 'm.notice':
                 stamp = event.get('origin_server_ts', 0)
@@ -784,17 +1717,243 @@ class UnifiedInbox:
                     row = db.execute('SELECT id FROM message WHERE identity_id=? AND outgoing=1 AND timestamp BETWEEN ? AND ? ORDER BY timestamp DESC LIMIT 1',
                                      (identity['id'], stamp - 120000, stamp + 5000)).fetchone()
                 if row:
-                    self.store.bump(row[0], ',failed=?', ('Telegram did not accept this message',))
+                    self.store.bump(row[0], ',failed=?', (identity['network'].title() + ' did not accept this message',))
             return
         parts = message_parts(event)
         if parts is None:
             return
         msgtype, body, media, reply_to = parts
+        if msgtype != 'm.location':
+            body, media = self.with_mentions(identity, meta, content, body, media)
+        mentions, mentioned = incoming_mentions(content, body, self.is_me)
+        if media and media.get('mentions'):
+            mentions = media['mentions']
+        if content.get('org.wizard.gallery') is not None and msgtype == 'm.image':
+            try:
+                self.store_gallery(event['event_id'], identity, meta.get('names', {}).get(sender) or sender, outgoing, content, event.get('origin_server_ts', 0), reply_to=reply_to)
+                return
+            except (EngineError, TypeError, AttributeError):
+                pass  # A malformed optional extension must not stall the room's sync.
+
+        grouped = content.get('fi.mau.telegram.grouped_id')
+        album = 'telegram:' + str(grouped) if identity['network'] == 'telegram' and isinstance(grouped, (str, int)) and str(grouped) else None
+        group = content.get('org.wizard.signal.album')
+        media_mxc = media.get('mxc') if isinstance(media, dict) else None
+        if (identity['network'] == 'signal' and msgtype == 'm.image' and isinstance(media, dict)
+                and isinstance(media_mxc, str) and MXC.fullmatch(media_mxc)
+                and isinstance(group, dict) and isinstance(group.get('id'), str) and 0 < len(group['id']) <= 200
+                and type(group.get('index')) is int and type(group.get('count')) is int
+                and 2 <= group['count'] <= 100 and 0 <= group['index'] < group['count']):
+            album = 'signal:' + group['id']
+            filename = content.get('filename') or content.get('body')
+            media = dict(media, album_index=group['index'], album_count=group['count'])
+            if isinstance(filename, str):
+                media['filename'] = filename[:200]
         self.store.add_message(event['event_id'], identity, meta.get('names', {}).get(sender) or sender, outgoing, body,
-                               event.get('origin_server_ts', 0), msgtype=msgtype, media=media, reply_to=reply_to)
+                               event.get('origin_server_ts', 0), msgtype=msgtype, media=media, reply_to=reply_to, album=album, push_live=live, mentions=mentions, mentioned=mentioned)
         self.warm_voice(event['event_id'], msgtype, outgoing, media, event.get('origin_server_ts', 0))
 
     WARM_DAYS = 3
+    EDIT_TEXT = ('m.text', 'm.notice', 'm.emote')
+    EDIT_MEDIA = ('m.image', 'm.video', 'm.audio', 'm.file')
+
+    def apply_edit(self, identity, meta, sender, outgoing, target, new):
+        """Apply an m.replace from the same sender. Text edits change the words. A media edit turns the row into
+        that media: WhatsApp messages that fail to decrypt first arrive as a "Decrypting message from WhatsApp
+        failed…" notice and the bridge later edits it into the real message, very often a photo or GIF."""
+        if not isinstance(new, dict) or not isinstance(target, str):
+            return False
+        names = meta.get('names') or {}
+        with self.store.db() as db:
+            row = db.execute('SELECT msgtype,media,original,sender,outgoing FROM message WHERE id=? AND identity_id=? AND deleted=0',
+                             (target, identity['id'])).fetchone()
+        if not row or not self.same_author(identity, target, row, sender, outgoing, names):
+            return False
+        kind = new.get('msgtype')
+        dump = lambda m: json.dumps(m, ensure_ascii=False) if m else None
+        # A bridge placeholder turning into the real message (or into "media expired") is not an owner-visible edit.
+        quiet = bool(unavailable_media(row['original'])) or (isinstance(new.get('body'), str) and bool(unavailable_media(new['body'])))
+        if kind in self.EDIT_MEDIA:
+            parts = message_parts({'type': 'm.room.message', 'content': new})
+            if parts and parts[2] and parts[2].get('mxc'):
+                msgtype, body, media, _ = parts
+                body, media = self.with_mentions(identity, meta, new, body, media)
+                old = json.loads(row['media']) if row['media'] else {}
+                edited = ',edited=1' if not quiet and row['msgtype'] == msgtype and old.get('mxc') == media.get('mxc') and body != row['original'] else ''
+                return self.store.bump(target, ',msgtype=?,media=?,original=?,translated=NULL,translation_error=NULL' + edited, (msgtype, dump(media), body))
+        if not isinstance(new.get('body'), str) or kind not in self.EDIT_TEXT:
+            return False
+        body = ('* ' if kind == 'm.emote' else '') + REPLY_FALLBACK.sub('', new['body'], count=1)
+        flag = '' if quiet else ',edited=1'
+        if row['msgtype'] == 'm.text' or unavailable_media(body):
+            body, media = self.with_mentions(identity, meta, new, body, link_previews(new) if kind != 'm.emote' else None)
+            return self.store.bump(target, ",msgtype='m.text',original=?,media=?,translated=NULL,translation_error=NULL" + flag, (body, dump(media)))
+        # A caption edit on a photo/video keeps the media.
+        old = json.loads(row['media']) if row['media'] else {}
+        old.pop('mentions', None)
+        body, media = self.with_mentions(identity, meta, new, body, old)
+        return self.store.bump(target, ',original=?,media=?,translated=NULL,translation_error=NULL' + flag, (body, dump(media)))
+
+    def same_author(self, identity, target, row, sender, outgoing, names):
+        """Only the author may edit a message. Rows store the sender's display name at the time, and bridges rename
+        ghosts later (WhatsApp's "Name (WA)" becomes "Name", contact names change), so a stored-name mismatch is
+        settled by the original event's sender mxid, never by a looser name match."""
+        if outgoing and row['outgoing']:
+            return True
+        if row['outgoing'] or not isinstance(sender, str) or not sender:
+            return False
+        if row['sender'] == sender:
+            return True
+        # Fast path: the stored name is this sender's current name and nobody else in the room wears it.
+        if row['sender'] == names.get(sender) and sum(1 for v in names.values() if v == row['sender']) == 1:
+            return True
+        try:
+            event = self.mx(self.room(identity['address']) + '/event/' + quote(target, safe=''))
+        except (EngineError, KeyError, TypeError):
+            return False
+        return isinstance(event, dict) and event.get('sender') == sender
+
+    # ---------- mentions ----------
+    def with_mentions(self, identity, meta, content, body, media):
+        """Swap bridge ghost names in @mentions for the best name Messenger knows; keep where they are."""
+        if not body or not isinstance(content, dict):
+            return body, media
+        try:
+            pills = mention_pills(content)
+            names = meta.get('names') or {}
+            listed = (content.get('m.mentions') or {}).get('user_ids') if isinstance(content.get('m.mentions'), dict) else None
+            seen = {u for u, _ in pills}
+            for user in listed if isinstance(listed, list) else []:
+                label = names.get(user) if isinstance(user, str) else None
+                if user not in seen and isinstance(label, str) and label and label in body:
+                    pills.append((user, label))
+            if not pills:
+                return body, media
+            pills.sort(key=lambda p: body.find(p[1]) if body.find(p[1]) >= 0 else len(body))
+            def resolve(user, text):
+                name, extra = self.mention_name(identity, meta, user, text)
+                return name, dict(extra, id=user)
+            new_body, mentions = substitute_mentions(body, pills, resolve)
+            at = 0
+            for mention in mentions:
+                start = new_body.index(mention['text'], at)
+                at = start + len(mention['text'])
+                mention.update(name=mention['text'].lstrip('@'), start=len(new_body[:start].encode('utf-16-le')) // 2,
+                               end=len(new_body[:at].encode('utf-16-le')) // 2)
+        except Exception:
+            return body, media  # a malformed optional extension never stalls a room's sync
+        if not mentions:
+            return body, media
+        return new_body, dict(media or {}, mentions=mentions)
+
+    def own_display_name(self, network):
+        for key in ('own_names:' + network, None):
+            if key:
+                try:
+                    names = json.loads(self.store.get(key) or '[]')
+                except ValueError:
+                    names = []
+            else:
+                names = sorted(self.store.own_names())
+            good = [plain_name(network, n) for n in names if isinstance(n, str) and not weak_label(plain_name(network, n))]
+            if good:
+                return good[0]
+        return OWN_SENDER
+
+    def ghost_names(self):
+        """(network, account) -> the name of the owner's one-to-one chat with that account, when it is a real name."""
+        cached = getattr(self, '_ghost_names', None)
+        if cached and time.time() - cached[0] < 120:
+            return cached[1]
+        out = {}
+        with self.store.db() as db:
+            accounts = PeopleStore.room_accounts(db)
+            for room, name in db.execute("SELECT i.address,p.display_name FROM identity i JOIN person p ON p.id=i.person_id WHERE i.kind='person'"):
+                for acc in accounts.get(room, []):
+                    if not weak_label(name):
+                        out.setdefault((acc['network'], acc['value']), name)
+        self._ghost_names = (time.time(), out)
+        return out
+
+    def mention_name(self, identity, meta, user, text):
+        network = identity['network']
+        if user == self.owner or self.is_me(user):
+            return self.own_display_name(network), {'me': True}
+        names = meta.get('names') or {}
+        name = plain_name(network, names.get(user) if isinstance(names.get(user), str) and names.get(user) else text.lstrip('@'))
+        name = plain_name(network, name)
+        prefix = '@' + network + '_'
+        account = user[len(prefix):].split(':')[0] if user.startswith(prefix) else None
+        if weak_label(name) and account:
+            name = self.ghost_names().get((network, account)) or name
+        return (name or text).strip(), ({'net': network, 'acc': account} if account else {})
+
+    # ---------- one-time repairs of rows stored by older releases ----------
+    REPAIR_BATCH = 40
+
+    def repair_rows(self):
+        """Small batches per sync pass, each kind once (kv marker): never blocks live delivery."""
+        for name, fn in (('repair_waiting_v2', self.repair_waiting), ('repair_reparse_v1', self.repair_reparse)):
+            if self.store.get(name):
+                continue
+            try:
+                if fn():
+                    self.store.put(name, '1')
+            except Exception as error:  # retried on the next pass
+                print('row repair %s: %s' % (name, type(error).__name__), flush=True)
+
+    def _repair_candidates(self, where, args=()):
+        tried = self.__dict__.setdefault('_repair_tried', set())
+        with self.store.db() as db:
+            rows = [dict(r) for r in db.execute(
+                'SELECT m.id,m.msgtype,m.media,m.original,i.id AS identity_id,i.network,i.address,i.person_id FROM message m JOIN identity i ON i.id=m.identity_id '
+                "WHERE m.deleted=0 AND m.id LIKE '$%' AND i.network!='messenger' AND " + where, args)]
+        todo = [r for r in rows if r['id'] not in tried]
+        return todo[:self.REPAIR_BATCH], len(todo) <= self.REPAIR_BATCH, tried
+
+    def repair_waiting(self):
+        """Rows stuck on "Decrypting message from WhatsApp failed": apply the bridge's latest edit (often a photo)."""
+        rows, last, tried = self._repair_candidates('m.original LIKE ?', (WAITING_PREFIX + '%',))
+        for r in rows:
+            tried.add(r['id'])
+            path = '/_matrix/client/v1/rooms/%s/relations/%s/m.replace?limit=20' % (quote(r['address'], safe=''), quote(r['id'], safe=''))
+            chunk = http(self.matrix, path, 'GET', None, self.matrix_token(), 15).get('chunk') or []
+            edits = sorted((e for e in chunk if isinstance(e, dict) and isinstance((e.get('content') or {}).get('m.new_content'), dict)),
+                           key=lambda e: e.get('origin_server_ts', 0))
+            if not edits:
+                continue
+            ev = edits[-1]
+            meta = self.room_meta(r['address'], {})
+            identity = {'id': r['identity_id'], 'network': r['network'], 'address': r['address'], 'person_id': r['person_id']}
+            self.apply_edit(identity, meta, ev.get('sender', ''), self.is_me(ev.get('sender', '')), r['id'], ev['content']['m.new_content'])
+        return last
+
+    def repair_reparse(self):
+        """Re-read the original event of rows an older release stored without the GIF/sticker flag or with a
+        bridge ghost name (" (WA)") in place of a mention, and store them the way ingest does now."""
+        rows, last, tried = self._repair_candidates(
+            "m.edited=0 AND ((m.msgtype='m.video' AND m.media NOT LIKE '%\"gif\"%' AND m.media NOT LIKE '%\"sticker\"%') OR "
+            "(m.original LIKE '% (WA)%' OR m.original LIKE '% (Twitter)%' OR m.original LIKE '% (LinkedIn)%'))")
+        for r in rows:
+            tried.add(r['id'])
+            try:
+                event = self.mx(self.room(r['address']) + '/event/' + quote(r['id'], safe=''))
+            except EngineError:
+                continue
+            parts = message_parts(event)
+            if not parts or parts[0] != r['msgtype']:
+                continue
+            msgtype, body, media, _ = parts
+            if unavailable_media(body):
+                continue  # the row shows what the bridge's later edit said, not this placeholder
+            meta = self.room_meta(r['address'], {})
+            identity = {'id': r['identity_id'], 'network': r['network'], 'address': r['address'], 'person_id': r['person_id']}
+            if msgtype != 'm.location':
+                body, media = self.with_mentions(identity, meta, event.get('content') or {}, body, media)
+            new_media = json.dumps(media, ensure_ascii=False) if media else None
+            if (body, new_media) != (r['original'], r['media']):
+                self.store.bump(r['id'], ',original=?,media=?' + (',translated=NULL' if body != r['original'] else ''), (body, new_media))
+        return last
 
     def warm_voice(self, message_id, msgtype, outgoing, media, stamp):
         if msgtype != 'm.audio' or outgoing or not media or not media.get('mxc'):
@@ -825,7 +1984,7 @@ class UnifiedInbox:
                                 continue
                             if self.is_me(user):
                                 self.store.touch_identity(identity['id'], last_read_ts=row[0])
-                            elif user != '@telegrambot:messenger.internal':
+                            elif user != '@' + identity['network'] + 'bot:messenger.internal':
                                 self.store.touch_identity(identity['id'], peer_read_ts=row[0])
 
     def is_me(self, user):
@@ -849,6 +2008,9 @@ class UnifiedInbox:
                 self.store.claim_own(ghost)
                 self.store.put('own_fixed:' + ghost, '1')
 
+    def trusted_inviter(self, sender):
+        return sender.endswith(':messenger.internal') and sender.startswith(('@telegram_', '@telegrambot:'))
+
     def sync(self, timeout_ms=0):
         if not self.sync_lock.acquire(blocking=False):
             return {'state': 'syncing'}
@@ -862,22 +2024,22 @@ class UnifiedInbox:
             for room, invited in result.get('rooms', {}).get('invite', {}).items():
                 events = invited.get('invite_state', {}).get('events', [])
                 # Never auto-join arbitrary invitations: bridge bot/ghost namespace only.
-                if any(e.get('type') == 'm.room.member' and e.get('state_key') == self.owner and e.get('sender', '').startswith(('@telegram_', '@telegrambot:')) for e in events):
+                if any(e.get('type') == 'm.room.member' and e.get('state_key') == self.owner and self.trusted_inviter(e.get('sender', '')) for e in events):
                     self.mx('/join/' + quote(room, safe=''), 'POST', {})
             for room in result.get('rooms', {}).get('leave', {}):
                 # A bridged chat that was removed (e.g. on disconnect) leaves no stale card behind.
-                if self.store.forget('telegram', room):
+                if any([self.store.forget(network, room) for network in MATRIX_NETWORKS]):
                     self.store.next_seq()
                     self.notify()
             for room, data in result.get('rooms', {}).get('join', {}).items():
                 if data.get('timeline', {}).get('limited'):
                     self.store.put('history_gap:' + room, 'Earlier history may be incomplete')
                 meta = self.room_meta(room, data)
-                if not meta.get('telegram') or meta.get('space'):
+                if not (meta.get('network') or meta.get('telegram')) or meta.get('space'):
                     continue
-                identity = self.store.identity('telegram', room, meta['label'], meta['kind'])
+                identity = self.store.identity(meta.get('network') or 'telegram', room, meta['label'], meta['kind'])
                 for event in data.get('timeline', {}).get('events', []):
-                    self.ingest(identity, meta, event)
+                    self.ingest(identity, meta, event, live=bool(since))
                 self.ephemeral(identity, data.get('ephemeral', {}).get('events', []))
             self.store.put('sync_token', result['next_batch'])
             self.store.put('sync_error', '')
@@ -892,7 +2054,7 @@ class UnifiedInbox:
         """Rows stored before media support carry only "[Photo] caption"; re-read recent room history once
         and upgrade those rows in place so the pictures appear a moment after the thread opens."""
         room = identity['address']
-        if room in self.backfilled or identity['network'] != 'telegram':
+        if room in self.backfilled or identity['network'] not in MATRIX_NETWORKS:
             return
         self.backfilled.add(room)
 
@@ -923,11 +2085,18 @@ class UnifiedInbox:
         mine = {own.get(k) for k in ('account_id', 'member_id', 'npub')} - {None}
         for dm in self.engine.dms()['dms']:
             peer = next((m for m in dm.get('members', []) if not mine.intersection(m.get(k) for k in ('account_id', 'member_id', 'npub'))), {})
-            label = peer.get('display_name') or dm.get('name') or 'Messenger contact'
+            # The group name is chosen by whoever created the DM (often the recipient's
+            # name, i.e. the owner's): it is only a fallback, and never the owner's own name.
+            own_names = self.store.own_names() | {own.get('display_name')} - {None, ''}
+            label = next((n for n in (peer.get('display_name'), dm.get('name')) if not weak_label(n, own_names)), 'Messenger contact')
             identity = self.store.identity('messenger', dm['group_id'], label)
-            self.import_marmot(identity, 50)
+            self.import_marmot(identity, 50, live=True)
 
-    def import_marmot(self, identity, limit=200):
+    def import_marmot(self, identity, limit=200, *, live=False):
+        watermark_key = 'push_marmot_watermark:' + identity['id']
+        prior = self.store.get(watermark_key)
+        watermark = int(prior) if prior else 0
+        newest = watermark
         for m in self.engine.messages(identity['address'], limit).get('messages', []):
             stamp = m.get('created_at', 0)
             if isinstance(stamp, str):
@@ -935,11 +2104,25 @@ class UnifiedInbox:
                 stamp = datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp() * 1000
             elif stamp < 1000000000000:
                 stamp *= 1000
-            self.store.add_message('messenger:' + m['message_id'], identity, m.get('author', ''), m.get('direction') == 'sent', m.get('text', ''), int(stamp))
+            newest = max(newest, int(stamp))
+            if m.get('attachments'):
+                self.store_marmot(m['message_id'], identity, m.get('author', ''), m.get('direction') == 'sent', m.get('text', ''), int(stamp), m['attachments'],
+                                  push_live=live and bool(prior) and int(stamp) >= watermark and m.get('direction') == 'received')
+                continue
+            self.store.add_message('messenger:' + m['message_id'], identity, m.get('author', ''), m.get('direction') == 'sent', m.get('text', ''), int(stamp),
+                                   push_live=live and bool(prior) and int(stamp) >= watermark and m.get('direction') == 'received')
+        if live:
+            self.store.put(watermark_key, str(newest))
 
     # ---------- reading ----------
     def timeline(self, person_id, before=None, limit=2000):
         person = self.store.person(person_id)
+        try:
+            person['faces'] = self.store.faces(person_id)
+            person['avatar'] = picture_tag(self.store.picture(person_id))
+        except Exception:
+            person['faces'] = {}
+        person['members'] = [m for identity in person['identities'] for m in self.store.members(identity) if not self.is_me(m['id'])]
         if before is None:
             for identity in person['identities']:
                 if identity['network'] == 'messenger':
@@ -966,9 +2149,20 @@ class UnifiedInbox:
                 self.backfill_media(next(i for i in person['identities'] if i['id'] == message['identity_id']))
         gaps = [self.store.get('history_gap:' + i['address']) for i in person['identities']]
         typing = self.typing.get(person_id)
-        return {'person': person, 'messages': messages, 'has_more': has_more, 'translating': pending, 'seq': self.store.seq,
+        return {'person': person, 'messages': messages, 'has_more': has_more,
+                'next_cursor': history_cursor.encode(person_id, messages[0]['timestamp'], messages[0]['id']) if has_more else None,
+                'translating': pending, 'seq': self.store.seq,
                 'typing': typing['names'] if typing and typing['until'] > time.time() else [],
                 'history_warning': next((g for g in gaps if g), None)}
+
+    def catchup_complete(self, model, system, user):
+        """One Catch me up model call through the private worker that holds the Tinfoil key. Nothing else is reachable."""
+        secret = json.loads((self.root / 'secrets.json').read_text())['translation_token']
+        result = http(os.environ.get('TRANSLATION_URL', 'http://translation:8766'), '/complete', 'POST', {'model': model, 'system': system, 'user': user}, secret, 185)
+        out = result.get('text')
+        if not isinstance(out, str) or not out.strip():
+            raise ValueError('empty')
+        return out
 
     def translate_one(self, message_id, original):
         translated, error = self.translator.translate(original, 'en')
@@ -996,9 +2190,9 @@ class UnifiedInbox:
             finally:
                 self.waiters -= 1
         if since > self.store.seq:
-            return {'seq': self.store.seq, 'reset': True}
+            return {'seq': self.store.seq, 'reset': True, 'labels_rev': self.store.labels_rev}
         if self.store.seq <= since:
-            return {'seq': since, 'people': [], 'messages': {}, 'typing': {}}
+            return {'seq': since, 'people': [], 'messages': {}, 'typing': {}, 'labels_rev': self.store.labels_rev}
         target = self.store.seq  # read before the query: a concurrent write is re-sent, never skipped
         rows, touched = self.store.since(since)
         seq = max([since] + [r['seq'] for r in rows]) if len(rows) >= 400 else target
@@ -1008,7 +2202,7 @@ class UnifiedInbox:
         people = self.store.people('person', True, touched) + self.store.people('group', True, touched)
         now = time.time()
         typing = {pid: t['names'] for pid, t in self.typing.items() if pid in touched and t['until'] > now}
-        return {'seq': seq, 'people': people, 'removed': sorted(set(touched) - {p['id'] for p in people}), 'messages': grouped, 'typing': typing}
+        return {'seq': seq, 'people': people, 'removed': sorted(set(touched) - {p['id'] for p in people}), 'messages': grouped, 'typing': typing, 'labels_rev': self.store.labels_rev}
 
     def translate_message(self, message_id):
         """Owner tapped Translate under one incoming message: one model call, cached."""
@@ -1032,6 +2226,10 @@ class UnifiedInbox:
             fail('invalid_identity', 'Choose this person’s channel')
         original = text(payload.get('text'))
         translated, error = self.translator.translate(original, person['language']) if person['language'] and person['language'] != 'en' else (original, None)
+        identity = next(i for i in person['identities'] if i['id'] == identity_id)
+        members = self.store.members(identity)
+        if {m['id'] for m in find_mentions(original, members)} != {m['id'] for m in find_mentions(translated or '', members)}:
+            error = 'Translation changed a mention. Choose Send original to tag the intended person.'
         preview_id = secrets.token_hex(16)
         with self.store.db() as db:
             db.execute('INSERT INTO preview(id,person_id,identity_id,original,translated,error,expires) VALUES (?,?,?,?,?,?,?)', (preview_id, person_id, identity_id, original, translated, error, int(time.time()) + 900))
@@ -1058,11 +2256,12 @@ class UnifiedInbox:
                     fail('request_id_conflict', 'A retry must preserve the confirmed text.', 409)
                 db.execute("UPDATE preview SET status='sending',send_original=? WHERE id=?", (int(send_original), p['id']))
             body = p['original'] if send_original else p['translated']
+            mentions = find_mentions(body, self.store.members(identity))
             reply_to = self.reply_target(identity, payload.get('reply_to'))
             # Stable transaction ID makes even ambiguous Matrix retries idempotent.
             delivery = 'sent'
-            if identity['network'] == 'telegram':
-                content = {'msgtype': 'm.text', 'body': body}
+            if identity['network'] in MATRIX_NETWORKS:
+                content = dict({'msgtype': 'm.text', 'body': body}, **mention_content(body, mentions))
                 if reply_to:
                     content['m.relates_to'] = {'m.in_reply_to': {'event_id': reply_to}}
                 result = self.mx(self.room(identity['address']) + '/send/m.room.message/' + p['id'], 'PUT', content)
@@ -1072,7 +2271,7 @@ class UnifiedInbox:
                 event = 'messenger:' + result['message_ids'][0]
                 delivery = 'sent' if result['published'] else 'queued'
             self.store.add_message(event, identity, self.owner, True, body, int(time.time() * 1000), p['original'] if body != p['original'] else None,
-                                   reply_to=reply_to, client_id=payload.get('client_id'))
+                                   reply_to=reply_to, client_id=payload.get('client_id'), mentions=mentions)
             with self.store.db() as db:
                 db.execute('UPDATE preview SET status=?,event_id=? WHERE id=?', (delivery, event, p['id']))
                 # A sync may have received our event before the confirm receipt.
@@ -1081,7 +2280,7 @@ class UnifiedInbox:
 
     def row(self, message_id):
         with self.store.db() as db:
-            rows = db.execute('SELECT m.*,i.network,i.label,i.kind,i.person_id FROM message m JOIN identity i ON m.identity_id=i.id WHERE m.id=?', (message_id,)).fetchall()
+            rows = db.execute('SELECT m.rowid AS timeline_order,m.*,i.network,i.label,i.kind,i.person_id FROM message m JOIN identity i ON m.identity_id=i.id WHERE m.id=?', (message_id,)).fetchall()
         rows = self.store.decorate(rows)
         return rows[0] if rows else None
 
@@ -1091,7 +2290,7 @@ class UnifiedInbox:
         message = self.store.message(text(reply_to, 300))
         if message['identity_id'] != identity['id']:
             fail('invalid_reply', 'Reply to a message in this chat')
-        return message['id']
+        return message.get('source_event') or message['id']
 
     def channel(self, person_id, identity_id=None):
         person = self.store.person(person_id)
@@ -1102,6 +2301,11 @@ class UnifiedInbox:
         return person, identity
 
     def send(self, person_id, payload):
+        # Serialize duplicate taps, including the local rows after the Matrix receipt.
+        with self.lock:
+            return self._send(person_id, payload)
+
+    def _send(self, person_id, payload):
         """One-call send for chats that need no translation review; the client id is the Matrix
         transaction id, so a retried tap can never produce a second message."""
         if payload.get('preview_id'):
@@ -1110,12 +2314,33 @@ class UnifiedInbox:
         if not isinstance(client_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,64}', client_id):
             fail('invalid_client_id', 'Missing message id')
         with self.store.db() as db:
-            done = db.execute('SELECT id FROM message WHERE client_id=?', (client_id,)).fetchone()
+            done = db.execute('SELECT m.id FROM message m JOIN identity i ON i.id=m.identity_id WHERE m.client_id=? AND i.person_id=?', (client_id, person_id)).fetchone()
         if done:
-            return {'state': 'sent', 'event_id': done[0], 'message': self.row(done[0])}
+            rows = self.album_rows(done[0])
+            with self.store.db() as db:
+                caption = db.execute('SELECT id FROM message WHERE client_id=? AND identity_id=(SELECT identity_id FROM message WHERE id=?)', (client_id + '.caption', done[0])).fetchone()
+            if caption:
+                rows.append(self.row(caption[0]))
+            return {'state': 'sent', 'event_id': done[0], 'message': self.row(done[0]), 'messages': rows}
         person, identity = self.channel(person_id, payload.get('identity_id'))
-        upload = self.uploads.get(payload.get('upload_id')) if payload.get('upload_id') else None
-        if payload.get('upload_id') and (not upload or upload['person_id'] != person_id):
+        upload_ids = payload.get('upload_ids')
+        gallery = None
+        if upload_ids is not None:
+            if (not isinstance(upload_ids, list) or not 2 <= len(upload_ids) <= 10
+                    or not all(isinstance(x, str) for x in upload_ids) or len(set(upload_ids)) != len(upload_ids)
+                    or payload.get('upload_id')):
+                fail('invalid_album', 'Choose between 2 and 10 different photos')
+            gallery = [self.uploads.get(x) for x in upload_ids]
+            if any(not u or u['person_id'] != person_id or u['expires'] <= time.time() for u in gallery):
+                fail('upload_expired', 'Attach the photos again', 409)
+            if any(u['kind'] != 'image' or u['mime'] not in ('image/jpeg', 'image/png', 'image/webp') for u in gallery):
+                fail('invalid_album', 'Albums contain still photos only')
+        if payload.get('pick') is not None:
+            if identity['network'] != 'telegram' or upload_ids is not None or payload.get('upload_id') or payload.get('text'):
+                fail('pick_unsupported', 'Stickers and GIFs from Telegram can be sent in Telegram chats', 409)
+            return self.send_pick(identity, payload.get('pick'), client_id, self.reply_target(identity, payload.get('reply_to')))
+        upload = gallery[0] if gallery else self.uploads.get(payload.get('upload_id')) if payload.get('upload_id') else None
+        if payload.get('upload_id') and (not upload or upload['person_id'] != person_id or upload['expires'] <= time.time()):
             fail('upload_expired', 'Attach the file again', 409)
         body = payload.get('text') or ''
         if body:
@@ -1124,37 +2349,152 @@ class UnifiedInbox:
             fail('invalid_input', 'Please enter valid text')
         if body and not upload and person['language'] and person['language'] != 'en':
             fail('review_required', 'This chat translates before sending', 409)
+        mentions = find_mentions(body, self.store.members(identity))
         reply_to = self.reply_target(identity, payload.get('reply_to'))
-        if identity['network'] != 'telegram':
+        if identity['network'] not in MATRIX_NETWORKS:
             if upload:
-                fail('media_unsupported', 'Photos and voice notes are not available on Messenger yet', 409)
+                if any(u['kind'] == 'voice' for u in (gallery or [upload])):
+                    fail('media_unsupported', 'Voice notes are not available in Wizard chats yet', 409)
+                meta = payload.get('media') if isinstance(payload.get('media'), list) else [payload.get('media')]
+                event, state = self.send_marmot_media(identity, gallery or [upload], body, client_id, meta)
+                for key in (upload_ids or [payload.get('upload_id')]):
+                    self.drop_upload(key)
+                return {'state': state, 'event_id': event, 'message': self.row(event), 'messages': self.album_rows(event)}
             result = self.engine.send(identity['address'], {'text': body, 'request_id': client_id[:64]})
             event = 'messenger:' + result['message_ids'][0]
             self.store.add_message(event, identity, self.owner, True, body, int(time.time() * 1000), client_id=client_id)
             return {'state': 'sent' if result['published'] else 'queued', 'event_id': event, 'message': self.row(event)}
         msgtype, media = 'm.text', None
+        if any(not u.get('mxc') for u in (gallery or ([upload] if upload else []))):
+            fail('upload_expired', 'Attach the file again', 409)
         if upload:
-            msgtype, content, media = self.media_content(upload, body, payload)
+            msgtype, content, media = self.media_content(upload, body, {} if gallery else payload)
         else:
             content = {'msgtype': 'm.text', 'body': body}
+        if gallery:
+            metadata = payload.get('media') if isinstance(payload.get('media'), list) else []
+            items = [self.media_content(u, body if i == 0 else '', {'media': metadata[i] if i < len(metadata) else {}})[1]
+                     for i, u in enumerate(gallery)]
+            content = dict(items[0], **{'org.wizard.gallery': items})
+        if msgtype != 'm.file':
+            content.update(mention_content(body, mentions))
+        if gallery:
+            content['org.wizard.gallery'][0].update(mention_content(body, mentions))
         if reply_to:
             content['m.relates_to'] = {'m.in_reply_to': {'event_id': reply_to}}
         started = time.time()
         result = self.mx(self.room(identity['address']) + '/send/m.room.message/' + client_id, 'PUT', content)
         self.timing('send', started)
         event = result['event_id']
+        if msgtype == 'm.file':
+            # Bridges use m.file body as the filename; text follows separately (James, 26 Oct 2026).
+            # Keep the handle until BOTH receipts; deterministic transactions make partial retries safe.
+            caption_id = client_id + '.caption'
+            caption = self.mx(self.room(identity['address']) + '/send/m.room.message/' + caption_id, 'PUT',
+                              dict({'msgtype': 'm.text', 'body': body}, **mention_content(body, mentions))) if body else None
+            stamp = int(time.time() * 1000)
+            with self.store.db() as db:
+                if not db.in_transaction:
+                    db.execute('BEGIN')
+                self.store.add_message(event, identity, self.owner, True, '', stamp,
+                                       msgtype=msgtype, media=media, reply_to=reply_to, client_id=client_id)
+                if caption:
+                    self.store.add_message(caption['event_id'], identity, self.owner, True, body, stamp + 1, client_id=caption_id, mentions=mentions)
+                # Sync may have inserted either event before the send receipts.
+                for key, txn in [(event, client_id)] + ([(caption['event_id'], caption_id)] if caption else []):
+                    db.execute('UPDATE message SET client_id=COALESCE(client_id,?) WHERE id=?', (txn, key))
+            self.drop_upload(payload.get('upload_id'))
+            rows = [self.row(event)] + ([self.row(caption['event_id'])] if caption else [])
+            return {'state': 'sent', 'event_id': event, 'message': rows[0], 'messages': rows}
+        if gallery:
+            self.store_gallery(event, identity, self.owner, True, content, int(time.time() * 1000), reply_to=reply_to, client_id=client_id)
+            for key in upload_ids:
+                self.drop_upload(key)
+            return {'state': 'sent', 'event_id': event, 'message': self.row(event), 'messages': self.album_rows(event)}
         self.store.add_message(event, identity, self.owner, True, body if upload is None else (body or ''), int(time.time() * 1000),
-                               msgtype=msgtype, media=media, reply_to=reply_to, client_id=client_id)
+                               msgtype=msgtype, media=media, reply_to=reply_to, client_id=client_id, mentions=mentions)
         if upload:
-            self.uploads.pop(payload.get('upload_id'), None)
+            self.drop_upload(payload.get('upload_id'))
         return {'state': 'sent', 'event_id': event, 'message': self.row(event)}
+
+    def send_pick(self, identity, key, client_id, reply_to):
+        kind, content = self.pick_content(key)
+        if reply_to:
+            content['m.relates_to'] = {'m.in_reply_to': {'event_id': reply_to}}
+        started = time.time()
+        result = self.mx(self.room(identity['address']) + '/send/' + kind + '/' + client_id, 'PUT', content)
+        self.timing('send', started)
+        event = result['event_id']
+        msgtype, caption, media, _ = message_parts({'type': kind, 'content': content})
+        self.store.add_message(event, identity, self.owner, True, '', int(time.time() * 1000),
+                               msgtype=msgtype, media=media, reply_to=reply_to, client_id=client_id)
+        return {'state': 'sent', 'event_id': event, 'message': self.row(event)}
+
+    def album_rows(self, message_id):
+        message = self.store.message(message_id)
+        if not message.get('album'):
+            return [self.row(message_id)]
+        with self.store.db() as db:
+            timeline = list(db.execute('SELECT id,album,sender,outgoing,msgtype FROM message WHERE identity_id=? ORDER BY timestamp,rowid',
+                                       (message['identity_id'],)))
+        # Match the renderer's adjacent, photo-only scope. Never act on a same-ID
+        # marker across a text boundary or on the other direction of a conversation.
+        at = next(i for i, row in enumerate(timeline) if row['id'] == message_id)
+        def same(row):
+            return (row['album'] == message['album'] and row['sender'] == message['sender']
+                    and row['outgoing'] == message['outgoing'] and row['msgtype'] == 'm.image')
+        if message['msgtype'] != 'm.image':
+            return [self.row(message_id)]
+        lo, hi = at, at + 1
+        while lo and same(timeline[lo - 1]):
+            lo -= 1
+        while hi < len(timeline) and same(timeline[hi]):
+            hi += 1
+        rows = [self.row(row['id']) for row in timeline[lo:hi]]
+        if message['network'] == 'signal' and all('album_index' in (r.get('media') or {}) for r in rows):
+            rows.sort(key=lambda r: r['media']['album_index'])
+        return rows
+
+    def store_gallery(self, event_id, identity, sender, outgoing, content, stamp, reply_to=None, client_id=None):
+        # All N items (including item zero) are in the extension. Stable per-photo rows
+        # reuse media proxy/viewer/forwarding; source_event is the one transport event.
+        items = content.get('org.wizard.gallery')
+        if not isinstance(items, list) or not 2 <= len(items) <= 10:
+            fail('invalid_album', 'Invalid photo album')
+        with self.store.db() as db:
+            # Explicit BEGIN makes the store's nested db() calls join one transaction.
+            if not db.in_transaction:
+                db.execute('BEGIN')
+            for i, item in enumerate(items):
+                if not isinstance(item, dict) or not isinstance(item.get('url'), str):
+                    fail('invalid_album', 'Invalid photo album')
+                parts = message_parts({'type': 'm.room.message', 'content': dict(item, msgtype='m.image')})
+                if not parts:
+                    fail('invalid_album', 'Invalid photo album')
+                _, caption, media, _ = parts
+                self.store.add_message(event_id if i == 0 else event_id + '#photo:%02d' % i, identity, sender, outgoing,
+                                       caption if i == 0 else '', stamp, msgtype='m.image', media=media,
+                                       reply_to=reply_to if i == 0 else None, client_id=client_id if i == 0 else None,
+                                       album='matrix:' + event_id, source_event=event_id)
 
     def media_content(self, upload, caption, payload):
         info = {'mimetype': upload['mime'], 'size': upload['size']}
+        if upload['kind'] == 'file':
+            media = {k: upload[k] for k in ('mxc', 'mime', 'size', 'filename')}
+            content = {'msgtype': 'm.file', 'body': upload['filename'], 'filename': upload['filename'], 'url': upload['mxc'], 'info': info}
+            return 'm.file', content, media
         meta = payload.get('media') if isinstance(payload.get('media'), dict) else {}
         for key in ('w', 'h', 'duration'):
             if isinstance(meta.get(key), int) and 0 < meta[key] < 10 ** 8:
                 info[key] = meta[key]
+        real = upload.get('ms')
+        if upload['kind'] == 'voice' and real:
+            # Never send a clipped voice note (Miguel, 3 Nov 2026: a 2-minute note reached James as 7 seconds).
+            said = info.get('duration')
+            if said and said - real > 3000 and real < said * 0.9:
+                fail('voice_clipped', 'Only %d:%02d of %d:%02d was recorded, so it was not sent. Record again.'
+                     % (real // 60000, real // 1000 % 60, said // 60000, said // 1000 % 60), 422)
+            info['duration'] = real
         media = {'mxc': upload['mxc'], 'mime': upload['mime'], 'size': upload['size'], 'w': info.get('w'), 'h': info.get('h'), 'duration': info.get('duration')}
         if upload['kind'] == 'voice':
             wave = [int(x) for x in (meta.get('waveform') or []) if isinstance(x, (int, float))][:128]
@@ -1171,40 +2511,279 @@ class UnifiedInbox:
         content = {'msgtype': 'm.image', 'body': caption or upload['filename'], 'filename': upload['filename'], 'url': upload['mxc'], 'info': info}
         return 'm.image', content, {k: v for k, v in media.items() if v is not None}
 
-    def upload(self, person_id, kind, data):
-        """Owner upload (already size-capped by the view server) → Synapse media repo. Returns an opaque id."""
-        if kind not in ('image', 'voice'):
-            fail('invalid_upload', 'Choose a photo or a voice note')
-        _, identity = self.channel(person_id)
-        if identity['network'] != 'telegram':
-            fail('media_unsupported', 'Photos and voice notes are not available on Messenger yet', 409)
+    def upload(self, person_id, kind, data, name=''):
+        """Owner upload → Synapse media repo. Returns an opaque, person-bound id."""
+        if kind not in ('image', 'voice', 'file'):
+            fail('invalid_upload', 'Choose a photo, voice note or file')
+        person, identity = self.channel(person_id)
+        # A merged chat can reply on either side, so keep what each side needs: a Synapse copy for the
+        # bridges, a private local copy for Wizard chats (encrypted and sent to Blossom only at send time).
+        bridged = any(i['network'] in MATRIX_NETWORKS for i in person['identities'])
+        marmot = any(i['network'] == 'messenger' for i in person['identities'])
+        if not bridged and not marmot:
+            fail('media_unsupported', 'Photos, voice notes and files are not available on Messenger yet', 409)
+        if kind == 'voice' and not bridged:
+            fail('media_unsupported', 'Voice notes are not available in Wizard chats yet', 409)
+        if not 0 < len(data) <= UPLOAD_MAX:
+            fail('too_large', 'Files up to 25 MB can be sent', 413)
         mime = sniff(data)
-        if kind == 'voice' and mime == 'video/mp4':
-            mime = 'audio/mp4'  # Safari records voice into an mp4 container
-        ok = {'image': ('image/jpeg', 'image/png', 'image/gif', 'image/webp'), 'voice': ('audio/ogg', 'audio/webm', 'audio/mp4')}[kind]
-        if mime not in ok:
-            fail('invalid_upload', 'That file type is not supported here', 415)
-        ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'audio/ogg': 'ogg', 'audio/webm': 'webm', 'audio/mp4': 'm4a'}[mime]
-        filename = ('voice-message.' if kind == 'voice' else 'photo.') + ext
-        started = time.time()
+        if kind == 'file':
+            # Original names stay in the message, not the upload URL (James, 26 Oct 2026).
+            mime, filename = mime or 'application/octet-stream', file_name(name)
+        else:
+            if kind == 'voice' and mime == 'video/mp4':
+                mime = 'audio/mp4'  # Safari records voice into an mp4 container
+            ok = {'image': ('image/jpeg', 'image/png', 'image/gif', 'image/webp'), 'voice': ('audio/ogg', 'audio/webm', 'audio/mp4', 'audio/wav')}[kind]
+            if mime not in ok:
+                fail('invalid_upload', 'That file type is not supported here', 415)
+            if kind == 'voice' and mime == 'audio/wav':
+                # Browsers without WebCodecs (Safari before 26, the Mac app) record plain PCM; Telegram wants Ogg Opus.
+                data, mime = wav_to_opus(data), 'audio/ogg'
+            if kind == 'voice' and mime == 'audio/webm':
+                # Safari's WebM is not rewrapped in the browser without WebCodecs: Telegram wants Ogg Opus.
+                data, mime = webm_to_ogg(data), 'audio/ogg'
+            ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'audio/ogg': 'ogg', 'audio/webm': 'webm', 'audio/mp4': 'm4a'}[mime]
+            filename = ('voice-message.' if kind == 'voice' else 'photo.') + ext
+        mxc = path = None
+        if bridged:
+            started = time.time()
+            mxc = self.matrix_upload(data, 'attachment' if kind == 'file' else filename, mime)['content_uri']
+            self.timing('upload', started)
+        upload_id = secrets.token_hex(16)
+        now = time.time()
+        self.prune_uploads(now)
+        if marmot:
+            # wnd names the attachment after the file, so the file keeps its display name inside a per-upload folder.
+            folder = self.outbox() / upload_id
+            folder.mkdir(mode=0o700)
+            path = folder / filename
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, 'wb') as out:
+                out.write(data)
+            path = str(path)
+        self.uploads[upload_id] = {'mxc': mxc, 'path': path, 'mime': mime, 'size': len(data), 'kind': kind, 'filename': filename, 'person_id': person_id, 'expires': now + 3600,
+                                   'ms': ogg_ms(data) if kind == 'voice' and mime == 'audio/ogg' else None}
+        result = {'upload_id': upload_id, 'mime': mime, 'size': len(data)}
+        if kind == 'file':
+            result['name'] = filename
+        return result
+
+    def outbox(self):
+        folder = self.root / 'marmot-outbox'
+        folder.mkdir(mode=0o700, exist_ok=True)
+        return folder
+
+    def prune_uploads(self, now=None):
+        now = now or time.time()
+        self.uploads = {k: v for k, v in self.uploads.items() if v['expires'] > now}
+        folder = self.root / 'marmot-outbox'
+        if folder.exists():
+            for entry in folder.iterdir():
+                if entry.name not in self.uploads:
+                    shutil.rmtree(entry, ignore_errors=True)
+
+    def drop_upload(self, upload_id):
+        upload = self.uploads.pop(upload_id, None)
+        if upload and upload.get('path'):
+            shutil.rmtree(Path(upload['path']).parent, ignore_errors=True)
+
+    def send_marmot_media(self, identity, uploads, body, client_id, meta):
+        """Wizard-to-Wizard photos and files: one encrypted kind-9 message (MIP-04 imeta per file)."""
+        if any(not u.get('path') for u in uploads):
+            fail('upload_expired', 'Attach the file again', 409)
+        request_id = ('media-' + client_id).ljust(16, '0')[:64]
+        result = self.engine.send_media(identity['address'], {'paths': [u['path'] for u in uploads], 'text': body or None, 'request_id': request_id})
+        mid = result['message_ids'][0]
+        attachments = result.get('attachments') or []
+        items = []
+        for i, u in enumerate(uploads):
+            sent = attachments[i] if i < len(attachments) else {}
+            item = {'sha256': sent.get('sha256'), 'mime': u['mime'], 'filename': u['filename'], 'size': u['size'], 'image': u['kind'] == 'image'}
+            m = meta[i] if i < len(meta) and isinstance(meta[i], dict) else {}
+            for key in ('w', 'h'):
+                if isinstance(m.get(key), int) and 0 < m[key] < 10 ** 8:
+                    item[key] = m[key]
+            items.append(item)
+        stamp = int(time.time() * 1000)
+        self.store_marmot(mid, identity, self.owner, True, body, stamp, items, client_id=client_id)
+        return 'messenger:' + mid, ('sent' if result.get('published') else 'queued')
+
+    def store_marmot(self, mid, identity, sender, outgoing, body, stamp, items, client_id=None, push_live=False):
+        """One row per attachment, the same ids whether the send receipt or the mirror sees it first."""
+        event = 'messenger:' + mid
+        album = 'marmot:' + mid if len(items) > 1 else None
+        with self.store.db() as db:
+            if not db.in_transaction:
+                db.execute('BEGIN')
+            for i, item in enumerate(items):
+                mime = item.get('mime') or 'application/octet-stream'
+                photo = mime in ('image/jpeg', 'image/png', 'image/gif', 'image/webp') and item.get('image', True)
+                media = {'marmot': {'group': identity['address'], 'sha256': item.get('sha256')}, 'mime': mime,
+                         'filename': item.get('filename') or ('photo' if photo else 'file')}
+                for key in ('size', 'w', 'h'):
+                    if item.get(key):
+                        media[key] = item[key]
+                self.store.add_message(event if i == 0 else event + '#photo:%02d' % i, identity, sender, outgoing, body if i == 0 else '', stamp,
+                                       msgtype='m.image' if photo else 'm.file', media=media, client_id=client_id if i == 0 else None,
+                                       album=album, source_event=event if album else None, push_live=push_live and i == 0)
+        return event
+
+    def marmot_media(self, message, media, kind):
+        ref = media['marmot']
+        group, digest = ref.get('group'), ref.get('sha256') or ''
+        if group != message['address'] or not re.fullmatch(r'[0-9a-f]{64}', digest):
+            fail('not_found', 'No media on that message', 404)
+        if kind == 'thumb' and not (media.get('mime') or '').startswith('image/'):
+            fail('not_found', 'No preview for that message', 404)
+        cache = self.root / 'media-cache'
+        cache.mkdir(mode=0o700, exist_ok=True)
+        key = hashlib.sha256(('marmot|%s|%s' % (group, digest)).encode()).hexdigest()
+        path, meta_path = cache / key, cache / (key + '.type')
+        if not path.exists():
+            started = time.time()
+            tmp = cache / (key + '.part-' + secrets.token_hex(4))
+            try:
+                self.engine.media_download(group, digest, str(tmp))
+                with tmp.open('rb') as f:
+                    if hashlib.sha256(f.read()).hexdigest() != digest:
+                        fail('upstream_unavailable', 'Could not load that media. Try again.', 503)
+                    f.seek(0)
+                    sniffed = sniff(f.read(64))
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
+            # Never trust the sender's declared type for inline display: only sniffed bytes decide.
+            meta_path.write_text(sniffed or 'application/octet-stream')
+            os.replace(tmp, path)
+            self.timing('media', started)
+            self.evict(cache)
+        else:
+            os.utime(path)
+        served = meta_path.read_text().strip() if meta_path.exists() else 'application/octet-stream'
+        name = media.get('filename') or 'media'
+        return Blob(path, served if served in INLINE_MIME else download_mime(served, media.get('mime'), name), name, served in INLINE_MIME)
+
+    # ---------- composer pickers: the owner's own Telegram stickers and GIFs ----------
+    # The Telegram bridge (plumbing/telegram-bridge/pickers.patch) lists recent/favourite stickers, installed packs,
+    # saved GIFs and @gif search results with previews on the private homeserver. mxc URIs stay on the box: the view
+    # gets opaque pick ids and a media proxy. Picking prepares the whole file once; sending is the normal send call.
+    PICKS_MAX = 5000
+
+    @staticmethod
+    def short(value, n):
+        """Bridge-supplied label, clipped; empty is fine."""
+        return value.strip()[:n] if isinstance(value, str) else ''
+
+    def picker_items(self, items, kind):
+        picks = self.__dict__.setdefault('picks', {})
+        if len(picks) > self.PICKS_MAX:
+            picks.clear()
+        out = []
+        for raw in items or []:
+            if not isinstance(raw, dict) or not re.fullmatch(r'-?[0-9]{1,20}', str(raw.get('id', ''))):
+                continue
+            doc = str(raw['id'])
+            key = kind + '-' + ('n' + doc[1:] if doc.startswith('-') else doc)
+            thumb = raw.get('thumb') if MXC.fullmatch(raw.get('thumb') or '') else None
+            old = picks.get(key) or {}
+            picks[key] = {**old, 'kind': kind, 'doc': str(raw['id']), 'thumb': thumb, 'thumb_mime': self.short(raw.get('thumb_mime') or 'image/webp', 80),
+                          'emoji': self.short(raw.get('emoji') or '', 40), 'mime': self.short(raw.get('mime') or '', 80)}
+            item = {'id': key, 'emoji': picks[key]['emoji'], 'thumb': bool(thumb), 'mime': picks[key]['mime']}
+            for k in ('w', 'h', 'duration'):
+                if isinstance(raw.get(k), int) and 0 < raw[k] < 10 ** 8:
+                    item[k] = raw[k]
+            out.append(item)
+        return out
+
+    def picker(self, suffix, q):
+        if suffix == ['stickers']:
+            r = self.provision('/wizard/stickers', timeout=55)
+            packs = [{'id': self.short(p.get('short_name'), 80), 'title': self.short(p.get('title') or p.get('short_name'), 80), 'count': p.get('count') if isinstance(p.get('count'), int) else 0}
+                     for p in (r.get('packs') or []) if isinstance(p, dict) and re.fullmatch(r'[A-Za-z0-9_]{1,80}', str(p.get('short_name', '')))]
+            return {'recent': self.picker_items(r.get('recent'), 'sticker'), 'favorites': self.picker_items(r.get('favorites'), 'sticker'), 'packs': packs}
+        if len(suffix) == 2 and suffix[0] == 'stickers':
+            if not re.fullmatch(r'[A-Za-z0-9_]{1,80}', suffix[1]):
+                fail('not_found', 'No such sticker pack', 404)
+            r = self.provision('/wizard/stickers/' + suffix[1], timeout=55)
+            return {'id': suffix[1], 'title': self.short(r.get('title') or suffix[1], 80), 'stickers': self.picker_items(r.get('stickers'), 'sticker')}
+        if suffix == ['gifs']:
+            query = {'q': (q('q', '') or '')[:120].strip()}
+            if q('offset'):
+                query['offset'] = q('offset')[:64]
+            r = self.provision('/wizard/gifs', query=query, timeout=55)
+            return {'items': self.picker_items(r.get('items'), 'gif'), 'next': self.short(r.get('next_offset') or '', 64)}
+        if len(suffix) == 2 and suffix[0] == 'media':
+            pick = self.__dict__.get('picks', {}).get(suffix[1])
+            if not pick:
+                fail('not_found', 'Pick it again', 404)
+            if q('kind') == 'full':
+                ready = self.picker_prepare(suffix[1])
+                return self.media_blob(ready['url'], ready['info'].get('mimetype') or 'application/octet-stream', pick['kind'])
+            if not pick['thumb']:
+                fail('not_found', 'No preview', 404)
+            return self.media_blob(pick['thumb'], pick['thumb_mime'], 'preview')
+        fail('not_found', 'No such picker route', 404)
+
+    def picker_prepare(self, key):
+        pick = self.__dict__.get('picks', {}).get(key)
+        if not pick:
+            fail('pick_expired', 'Pick it again', 409)
+        if not pick.get('ready'):
+            r = self.provision('/wizard/prepare/%s/%s' % (pick['kind'], pick['doc']), timeout=55)
+            info = r.get('info') if isinstance(r.get('info'), dict) else {}
+            if not MXC.fullmatch(r.get('url') or ''):
+                fail('upstream_unavailable', 'Telegram did not send that ' + pick['kind'] + '. Try again.', 503)
+            keep = ('mimetype', 'w', 'h', 'size', 'duration', 'thumbnail_url', 'thumbnail_info', 'fi.mau.bridged_sticker', 'fi.mau.gif')
+            info = {k: v for k, v in info.items() if k in keep}
+            if info.get('thumbnail_url') and not MXC.fullmatch(info['thumbnail_url']):
+                info.pop('thumbnail_url', None); info.pop('thumbnail_info', None)
+            pick['ready'] = {'url': r['url'], 'info': info, 'emoji': self.short(r.get('emoji') or pick.get('emoji') or '', 40)}
+        return pick['ready']
+
+    def pick_content(self, key):
+        """(event type, content) for a picked sticker or GIF."""
+        pick = self.__dict__.get('picks', {}).get(key) if isinstance(key, str) else None
+        if not pick:
+            fail('pick_expired', 'Pick it again', 409)
+        ready = self.picker_prepare(key)
+        info = dict(ready['info'])
+        if pick['kind'] == 'sticker':
+            # fi.mau.bridged_sticker lets the bridge forward the original Telegram sticker (no reupload).
+            return 'm.sticker', {'body': ready['emoji'] or 'Sticker', 'url': ready['url'], 'info': info}
+        info.update({'fi.mau.gif': True, 'fi.mau.loop': True, 'fi.mau.autoplay': True, 'fi.mau.hide_controls': True, 'fi.mau.no_audio': True})
+        name = 'gif.' + {'video/mp4': 'mp4', 'video/webm': 'webm', 'image/gif': 'gif'}.get(info.get('mimetype'), 'mp4')
+        msgtype = 'm.image' if info.get('mimetype') == 'image/gif' else 'm.video'
+        return 'm.room.message', {'msgtype': msgtype, 'body': name, 'filename': name, 'url': ready['url'], 'info': info}
+
+    def matrix_upload(self, data, filename, mime):
         req = Request(self.matrix.rstrip('/') + '/_matrix/media/v3/upload?' + urlencode({'filename': filename}), data=data, method='POST',
                       headers={'Authorization': 'Bearer ' + self.matrix_token(), 'Content-Type': mime})
         try:
             with urlopen(req, timeout=60) as response:
-                mxc = json.load(response)['content_uri']
+                return json.load(response)
         except (HTTPError, URLError, OSError, ValueError, KeyError):
             fail('upstream_unavailable', 'Upload failed. Please try again.', 503)
-        self.timing('upload', started)
-        upload_id = secrets.token_hex(16)
-        now = time.time()
-        self.uploads = {k: v for k, v in self.uploads.items() if v['expires'] > now}
-        self.uploads[upload_id] = {'mxc': mxc, 'mime': mime, 'size': len(data), 'kind': kind, 'filename': filename, 'person_id': person_id, 'expires': now + 3600}
-        return {'upload_id': upload_id, 'mime': mime, 'size': len(data)}
+
+    def picture_blob(self, person_id, who=None):
+        mxc = self.store.picture(person_id, who)
+        if not mxc:
+            fail('not_found', 'No picture', 404)
+        return self.media_blob(mxc, 'image/jpeg', 'avatar', size=160)
 
     def media(self, message_id, kind):
         """Proxy a message's media from the private homeserver; mxc URIs and tokens never leave the box."""
         message = self.store.message(message_id)
         media = json.loads(message['media']) if message.get('media') else None
+        if media and kind and kind.startswith('link') and media.get('links'):
+            try:
+                pick = media['links'][int(kind[4:] or 0)]
+            except (ValueError, IndexError):
+                fail('not_found', 'No link preview', 404)
+            if not pick.get('mxc'):
+                fail('not_found', 'No link preview', 404)
+            return self.media_blob(pick['mxc'], 'image/jpeg', 'preview', thumb=True)
+        if media and media.get('marmot') and message['network'] == 'messenger':
+            return self.marmot_media(message, media, kind)
         if not media or not media.get('mxc'):
             fail('not_found', 'No media on that message', 404)
         thumb = kind == 'thumb'
@@ -1212,18 +2791,27 @@ class UnifiedInbox:
         if thumb and not (media.get('thumb') or mime.startswith('image/')):
             fail('not_found', 'No preview for that message', 404)
         mxc = (media.get('thumb') if thumb and media.get('thumb') else media['mxc'])
+        if not re.fullmatch(r'mxc://([A-Za-z0-9.:_-]+)/([A-Za-z0-9_-]+)', mxc or ''):
+            fail('not_found', 'No media on that message', 404)
+        if thumb and not media.get('thumb') and mime == 'image/gif' and (media.get('size') or 0) <= 12 * 1024 * 1024:
+            # The homeserver's thumbnailer turns an animated GIF into a still picture: send the GIF itself.
+            return self.media_blob(mxc, mime, media.get('filename') or 'media')
+        return self.media_blob(mxc, mime, media.get('filename') or 'media', thumb=thumb and not media.get('thumb'), raw_thumb=thumb)
+
+    def media_blob(self, mxc, mime, name, *, thumb=False, raw_thumb=False, size=800):
         match = re.fullmatch(r'mxc://([A-Za-z0-9.:_-]+)/([A-Za-z0-9_-]+)', mxc or '')
         if not match:
-            fail('not_found', 'No media on that message', 404)
+            fail('not_found', 'No media', 404)
+        thumb = thumb or size != 800
         cache = self.root / 'media-cache'
         cache.mkdir(mode=0o700, exist_ok=True)
-        key = hashlib.sha256((mxc + '|' + ('thumb' if thumb else 'full')).encode()).hexdigest()
+        key = hashlib.sha256((mxc + '|' + (('thumb%d' % size if size != 800 else 'thumb') if (thumb or raw_thumb) else 'full')).encode()).hexdigest()
         path = cache / key
         meta_path = cache / (key + '.type')
         if not path.exists():
             server, media_id = match.groups()
-            if thumb and not media.get('thumb'):
-                url = '/_matrix/client/v1/media/thumbnail/%s/%s?%s' % (server, media_id, urlencode({'width': 800, 'height': 800, 'method': 'scale', 'animated': 'true'}))
+            if thumb:
+                url = '/_matrix/client/v1/media/thumbnail/%s/%s?%s' % (server, media_id, urlencode({'width': size, 'height': size, 'method': 'scale' if size == 800 else 'crop', 'animated': 'true'}))
             else:
                 url = '/_matrix/client/v1/media/download/%s/%s' % (server, media_id)
             started = time.time()
@@ -1260,8 +2848,7 @@ class UnifiedInbox:
             served = 'video/webm'
         if served == 'audio/mp4' and mime.startswith('video/'):
             served = 'video/mp4'
-        name = media.get('filename') or ('media')
-        return Blob(path, served if served in INLINE_MIME else 'application/octet-stream', name, served in INLINE_MIME)
+        return Blob(path, served if served in INLINE_MIME else download_mime(served, mime, name), name, served in INLINE_MIME)
 
     def evict(self, cache):
         files = [(p.stat().st_atime, p.stat().st_size, p) for p in cache.iterdir() if p.is_file() and not p.name.endswith('.type')]
@@ -1275,10 +2862,12 @@ class UnifiedInbox:
 
     def react(self, message_id, payload):
         message = self.store.message(message_id)
+        message_id = message.get('source_event') or message_id
+        message = self.store.message(message_id)
         key = payload.get('key')
         if not isinstance(key, str) or not key or len(key) > 32:
             fail('invalid_input', 'Choose a reaction')
-        if message['network'] != 'telegram':
+        if message['network'] not in MATRIX_NETWORKS:
             fail('unsupported', 'Reactions are not available on Messenger yet', 409)
         room = self.room(message['address'])
         with self.store.db() as db:
@@ -1297,23 +2886,27 @@ class UnifiedInbox:
     def edit(self, message_id, payload):
         message = self.store.message(message_id)
         new = text(payload.get('text'))
-        if not message['outgoing'] or message['deleted'] or message['network'] != 'telegram' or message['msgtype'] != 'm.text':
+        if not message['outgoing'] or message['deleted'] or message['network'] not in MATRIX_NETWORKS or message['msgtype'] != 'm.text':
             fail('not_editable', 'Only your own text messages can be edited', 409)
+        mentions = find_mentions(new, self.store.members(message))
         self.mx(self.room(message['address']) + '/send/m.room.message/' + secrets.token_hex(12), 'PUT',
-                {'msgtype': 'm.text', 'body': '* ' + new, 'm.new_content': {'msgtype': 'm.text', 'body': new},
+                {'msgtype': 'm.text', 'body': '* ' + new, 'm.new_content': dict({'msgtype': 'm.text', 'body': new}, **mention_content(new, mentions)),
                  'm.relates_to': {'rel_type': 'm.replace', 'event_id': message_id}})
-        self.store.bump(message_id, ',original=?,translated=NULL,edited=1', (new,))
+        self.store.bump(message_id, ',original=?,translated=NULL,edited=1,mentions=?', (new, json.dumps(mentions)))
         return {'message': self.row(message_id)}
 
     def delete(self, message_id, payload):
         message = self.store.message(message_id)
         everyone = payload.get('everyone') is True
-        if everyone:
-            if not message['outgoing'] or message['network'] != 'telegram':
-                fail('not_deletable', 'Only your own messages can be deleted for everyone', 409)
-            self.mx(self.room(message['address']) + '/redact/' + quote(message_id, safe='') + '/' + secrets.token_hex(8), 'PUT', {})
-        self.store.redact(message_id)
-        return {'message': self.row(message_id)}
+        rows = self.album_rows(message_id)
+        if everyone and (not message['outgoing'] or message['network'] not in MATRIX_NETWORKS):
+            fail('not_deletable', 'Only your own messages can be deleted for everyone', 409)
+        targets = list(dict.fromkeys(self.store.message(r['id']).get('source_event') or r['id'] for r in rows))
+        for target in targets:
+            if everyone:
+                self.mx(self.room(message['address']) + '/redact/' + quote(target, safe='') + '/' + secrets.token_hex(8), 'PUT', {})
+            self.store.redact(target)
+        return {'message': self.row(message_id), 'messages': [self.row(r['id']) for r in rows]}
 
     def read(self, person_id, payload):
         person = self.store.person(person_id)
@@ -1327,8 +2920,8 @@ class UnifiedInbox:
             if not row or row[1] <= identity['last_read_ts']:
                 continue
             self.store.touch_identity(identity['id'], last_read_ts=row[1])
-            if identity['network'] == 'telegram':
-                event_id = row[0]
+            if identity['network'] in MATRIX_NETWORKS:
+                event_id = self.store.message(row[0]).get('source_event') or row[0]
 
                 def receipt(address=identity['address'], event_id=event_id):
                     try:
@@ -1340,7 +2933,7 @@ class UnifiedInbox:
 
     def set_typing(self, person_id, payload):
         _, identity = self.channel(person_id)
-        if identity['network'] == 'telegram':
+        if identity['network'] in MATRIX_NETWORKS:
             on = payload.get('typing') is True
             self.mx(self.room(identity['address']) + '/typing/' + quote(self.owner, safe=''), 'PUT', {'typing': on, 'timeout': 6000} if on else {'typing': False})
         return {'ok': True}
@@ -1371,24 +2964,51 @@ class UnifiedInbox:
         if suffix in (['people'], ['groups']) and method == 'GET':
             kind = 'group' if suffix[0] == 'groups' else 'person'
             return {suffix[0]: self.store.people(kind), 'seq': self.store.seq}
+        if suffix == ['search'] and method == 'GET':
+            if set(query) - {'q', 'network', 'thread', 'limit', 'cursor'} or any(len(v) != 1 for v in query.values()):
+                fail('invalid_search', 'Invalid search scope')
+            try:
+                return self.store.search(q('q', ''), network=q('network'), thread=q('thread'),
+                                         limit=int(q('limit', '50')), cursor=q('cursor'))
+            except ValueError:
+                fail('invalid_search', 'Invalid search query or cursor')
+        if suffix == ['merge-suggestions'] and method == 'GET':
+            return self.store.merge_suggestions()
+        if suffix == ['merge-suggestions', 'dismiss'] and method == 'POST':
+            return self.store.dismiss_merge(payload.get('id'))
         if suffix == ['directory'] and method == 'GET':
             return {'people': self.store.people('person', chats=False), 'groups': self.store.people('group', chats=False)}
+        if suffix and suffix[0] == 'picker' and method == 'GET':
+            return self.picker(suffix[1:], q)
         if len(suffix) == 2 and suffix[0] == 'media' and method == 'GET':
-            return self.media(text(suffix[1], 300), 'thumb' if q('kind') == 'thumb' else 'full')
+            return self.media(text(suffix[1], 300), q('kind') if q('kind') in ('thumb', 'link0', 'link1') else 'full')
+        if len(suffix) >= 3 and suffix[0] == 'people' and suffix[2] == 'catch-up':
+            # Owner session only: no agent capability maps to these routes (permissions.capability_for -> None).
+            pid = suffix[1]
+            if len(suffix) == 3 and method == 'GET': return self.catchup.status(pid)
+            if len(suffix) == 3 and method == 'POST':
+                since = payload.get('since')
+                return {'job': self.catchup.start(pid, since if type(since) is int else None)}
+            if suffix[3:] == ['grant'] and method == 'POST': return self.catchup.grant(pid, payload.get('mode'))
+            if suffix[3:] == ['revoke'] and method == 'POST': return self.catchup.revoke(pid, payload.get('clear') is True)
+        if suffix == ['catch-up', 'settings'] and method == 'GET': return self.catchup.settings()
+        if suffix == ['catch-up', 'settings'] and method == 'POST': return self.catchup.set_model(payload.get('model'))
         if len(suffix) >= 2 and suffix[0] == 'people':
             person_id = suffix[1]
             if len(suffix) == 2:
                 if method == 'GET':
                     try:
-                        before = int(q('before')) if q('before') else None
+                        before = q('cursor') or (int(q('before')) if q('before') else None)
                         limit = max(1, min(int(q('limit', '2000')), 2000))
                     except ValueError:
                         fail('invalid_cursor', 'Invalid message query')
                     return self.timeline(person_id, before, limit)
                 if method == 'POST':
                     return self.store.update(person_id, payload)
+            if len(suffix) == 3 and method == 'GET' and suffix[2] == 'avatar':
+                return self.picture_blob(person_id, q('who') or None)
             if len(suffix) == 3 and method == 'PUT' and suffix[2] == 'upload':
-                return self.upload(person_id, q('kind', 'image'), raw or b'')
+                return self.upload(person_id, q('kind', 'image'), raw or b'', q('name', ''))
             if len(suffix) == 3 and method == 'POST':
                 action = suffix[2]
                 if action == 'merge': return self.store.merge(person_id, text(payload.get('source_id'), 24))
@@ -1396,6 +3016,8 @@ class UnifiedInbox:
                 if action == 'preview': return self.preview(person_id, payload)
                 if action == 'send': return self.send(person_id, payload)
                 if action == 'read': return self.read(person_id, payload)
+                if action == 'unread': return self.store.mark_unread(person_id)
+                if action == 'labels': return self.store.person_labels(person_id, payload.get('labels'))
                 if action == 'typing': return self.set_typing(person_id, payload)
         if len(suffix) == 3 and suffix[0] == 'messages' and method == 'POST':
             message_id = text(suffix[1], 300)
@@ -1406,6 +3028,13 @@ class UnifiedInbox:
             if suffix[2] == 'delete': return self.delete(message_id, payload)
         if len(suffix) == 3 and suffix[0] == 'groups' and suffix[2] == 'labels' and method == 'POST':
             return self.store.labels(suffix[1], payload.get('labels'))
+        # Labels: owner-only (no agent capability maps to these routes).
+        if suffix == ['labels'] and method == 'GET': return self.store.label_catalog()
+        if suffix == ['labels'] and method == 'POST': return self.store.create_label(payload.get('name'))
+        if suffix == ['labels', 'rename'] and method == 'POST': return self.store.rename_label(payload.get('from'), payload.get('to'))
+        if suffix == ['labels', 'delete'] and method == 'POST': return self.store.delete_label(payload.get('name'))
+        if suffix == ['qr-codes'] and method == 'GET': return self.qr_codes()
+        if suffix == ['qr-codes'] and method == 'POST': return self.save_qr_codes(payload)
         if suffix == ['telegram', 'status'] and method == 'GET': return self.telegram_status()
         if suffix == ['telegram', 'start'] and method == 'POST':
             flow = payload.get('flow')

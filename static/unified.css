@@ -1,7 +1,15 @@
 /* Chats and Groups: Signal-style list, thread, composer and sheets. Tokens come from app.css. */
 html[data-inbox-tab] #messenger { display: flex; flex-direction: column; }
 html[data-inbox-tab=people] #gate, html[data-inbox-tab=groups] #gate, html[data-inbox-tab=people] #workspace, html[data-inbox-tab=groups] #workspace { display: none !important; }
-html[data-inbox-tab=messenger] #workspace { flex: 1; min-height: 0; }
+/* Unsent voice uses the normal composer lane, never a live-recording panel. */
+.u-unsent-voice { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:0.75rem; color:var(--muted); }
+.u-unsent-voice button { color:var(--accent); background:transparent; border:0; padding:6px; cursor:pointer; }
+/* A native private thread is a detail route, never a second inbox/tab. */
+html[data-private-view] #workspace { display: flex !important; flex: 1; min-height: 0; }
+html[data-private-view] #workspace .list-pane { display: none !important; }
+html[data-private-view] #detail { display: block !important; flex: 1; min-width: 0; }
+html[data-private-view] #chat-back { display: inline-flex !important; }
+html[data-private-view] #gate { display: none !important; }
 #inbox-tabs[hidden], #unified-inbox[hidden] { display: none !important; }
 
 /* Bottom tab bar, hidden inside a conversation like Signal. */
@@ -13,7 +21,7 @@ html[data-in-chat] #inbox-tabs, html[data-inbox-tab=messenger] #messenger:has(.w
 #inbox-tabs button[aria-selected=true] { color: var(--ink); }
 #inbox-tabs button { position: relative; }
 #inbox-tabs .tab-badge { position: absolute; top: 0; left: calc(50% + 6px); min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent); color: var(--on-accent, #fff); font: 600 11px/18px system-ui, sans-serif; text-align: center; pointer-events: none; box-shadow: 0 0 0 2px var(--bg); }
-#inbox-tabs button[aria-selected=true] svg { background: var(--accent-soft); color: #9dbbff; }
+#inbox-tabs button[aria-selected=true] svg { background: var(--accent-soft); color: var(--link); }
 
 #unified-inbox { order: 1; position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; max-width: 760px; margin: 0 auto; overflow: hidden; }
 #unified-inbox > .error { margin: 0 18px 8px; flex-shrink: 0; }
@@ -38,6 +46,16 @@ html[data-in-chat] #inbox-tabs, html[data-inbox-tab=messenger] #messenger:has(.w
 .tone-4 { background: #a35a2a; } .tone-5 { background: #3f7d4e; } .tone-6 { background: #2f6db0; } .tone-7 { background: #8a4f9e; }
 .tone-8 { background: #23866a; } .tone-9 { background: #b0543f; } .tone-10 { background: #5a5fa8; } .tone-11 { background: #7f6a24; }
 
+/* Album tiles share the existing bubble, viewer, and selection surface. */
+.u-message.has-album { width: 304px; max-width: 100%; padding: 3px 3px 6px; }
+.u-album { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 3px; overflow: hidden; border-radius: 15px 15px 5px 5px; background: var(--wz-surface, var(--surface)); }
+.u-album .u-media { width: 100%; height: 132px; min-width: 0; margin: 0; padding: 0; border-radius: 0; overflow: hidden; aspect-ratio: auto; }
+.u-album .u-media img { display: block; width: 100%; height: 100%; min-height: 0; max-height: none; object-fit: cover; border-radius: 0; }
+.u-album.n-3 .u-media:first-child { grid-row: span 2; height: 267px; }
+.u-album.n-5 .u-media:last-child, .u-album.n-7 .u-media:last-child, .u-album.n-9 .u-media:last-child { grid-column: span 2; }
+.u-message.has-album > .u-text { padding: 7px 8px 0; }
+.u-message.has-album > footer { padding: 0 8px; }
+.u-message.has-album > .u-sender { margin: 4px 8px; }
 /* Chat list */
 .u-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 96px; }
 .u-person { display: flex; align-items: center; gap: 14px; width: 100%; min-height: 72px; padding: 10px 18px; text-align: left; border-radius: 0; color: var(--ink); }
@@ -52,7 +70,7 @@ html[data-in-chat] #inbox-tabs, html[data-inbox-tab=messenger] #messenger:has(.w
 .u-empty { color: var(--ink-3); text-align: center; line-height: 1.6; margin: 56px auto; max-width: 300px; padding: 0 18px; }
 .u-chips { display: flex; gap: 8px; padding: 2px 18px 10px; overflow-x: auto; flex-shrink: 0; scrollbar-width: none; }
 .u-chip { min-height: 34px; padding: 0 14px; border-radius: 17px; background: var(--raised); color: var(--ink-2); font-size: 14px; white-space: nowrap; }
-.u-chip[aria-pressed=true] { background: var(--accent-soft); color: #9dbbff; }
+.u-chip[aria-pressed=true] { background: var(--accent-soft); color: var(--link); }
 .u-fab { position: absolute; right: 18px; bottom: 18px; width: 56px; height: 56px; border-radius: 18px; background: var(--raised-2); color: var(--ink); box-shadow: 0 6px 20px rgba(0,0,0,.45); z-index: 2; }
 .u-fab:not(:disabled):hover, .u-fab:not(:disabled):active { background: #3b3b41; }
 
@@ -66,12 +84,12 @@ html[data-in-chat] #inbox-tabs, html[data-inbox-tab=messenger] #messenger:has(.w
 .u-message.joined-next:not(.outgoing) { border-bottom-left-radius: 5px; } .u-message.joined-prev:not(.outgoing) { border-top-left-radius: 5px; }
 .u-message.outgoing.joined-next { border-bottom-right-radius: 5px; } .u-message.outgoing.joined-prev { border-top-right-radius: 5px; }
 .u-message p { margin: 0; font-size: 15px; line-height: 1.4; white-space: pre-wrap; }
-.u-message .u-sender { font-size: 13px; font-weight: 600; color: #9dbbff; margin-bottom: 2px; }
+.u-message .u-sender { font-size: 13px; font-weight: 600; color: var(--link); margin-bottom: 2px; }
 .u-message .u-original, .u-original { font-size: 13px; color: var(--ink-2); margin-top: 6px; line-height: 1.45; white-space: pre-wrap; }
 .u-message.outgoing .u-original { color: rgba(255,255,255,.75); }
 .u-message footer { display: flex; justify-content: flex-end; gap: 6px; margin-top: 2px; font-size: 11px; color: var(--ink-3); }
 .u-message.outgoing footer { color: rgba(255,255,255,.72); }
-.u-message .u-translate { display: block; background: none; padding: 0; margin-top: 4px; min-height: 0; min-width: 0; border-radius: 0; font-size: 13px; color: #9dbbff; }
+.u-message .u-translate { display: block; background: none; padding: 0; margin-top: 4px; min-height: 0; min-width: 0; border-radius: 0; font-size: 13px; color: var(--link); }
 .u-message .u-translate:hover { background: none; text-decoration: underline; }
 
 /* Composer */
@@ -79,14 +97,14 @@ html[data-in-chat] #inbox-tabs, html[data-inbox-tab=messenger] #messenger:has(.w
 .u-channel { align-self: flex-start; width: auto; max-width: 100%; min-height: 32px; padding: 4px 30px 4px 12px; border-radius: 16px; font-size: 13px; color: var(--ink-2); }
 .u-compose-row { display: flex; align-items: flex-end; gap: 8px; }
 .u-compose-row textarea { flex: 1; resize: none; min-height: 44px; max-height: 140px; line-height: 20px; padding: 12px 18px; border-radius: 22px; overflow-y: auto; }
-.u-send { flex: 0 0 44px; background: var(--accent); color: #fff; }
+.u-send { flex: 0 0 44px; background: var(--accent); color: var(--on-accent); }
 .u-send svg { width: 20px; height: 20px; margin-left: -1px; }
 .u-send:not(:disabled):hover, .u-send:not(:disabled):active { background: var(--accent-press); }
 .u-send:disabled { background: var(--raised); color: var(--ink-3); opacity: 1; }
 
 /* Sheets: always solid, never text over text */
 .u-overlay { position: absolute; inset: 0; z-index: 80; background: rgba(0,0,0,.82); display: flex; align-items: flex-end; justify-content: center; animation: sheet-in 140ms var(--ease); }
-.u-sheet { background: var(--surface); color: var(--ink); border-radius: 20px 20px 0 0; padding: 8px 20px max(24px,env(safe-area-inset-bottom)); max-height: 92%; overflow: auto; width: 100%; max-width: 480px; animation: sheet-up 200ms var(--ease); }
+.u-sheet { background: linear-gradient(var(--panel-tint), var(--panel-tint)) var(--panel-solid); color: var(--ink); border-radius: 20px 20px 0 0; padding: 8px 20px max(24px,env(safe-area-inset-bottom)); max-height: 92%; overflow: auto; width: 100%; max-width: 480px; animation: sheet-up 200ms var(--ease); }
 .u-sheet.tall { height: 92%; display: flex; flex-direction: column; }
 .u-sheet header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 0 -8px 6px 0; }
 .u-sheet h2 { font-size: 20px; margin: 0; }
@@ -103,10 +121,16 @@ html[data-in-chat] #inbox-tabs, html[data-inbox-tab=messenger] #messenger:has(.w
 .u-status.on::before { background: var(--ok); } .u-status.warn::before { background: var(--warn); }
 .u-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
 .u-pair button { min-height: 48px; padding: 0 8px; }
-.u-log { margin-top: 14px; font-size: 13px; color: var(--ink-2); }
-.u-log summary { cursor: pointer; padding: 8px 0; }
 .u-access-log { list-style: none; padding: 0; margin: 4px 0 0; font-size: 12px; color: var(--ink-3); max-height: 180px; overflow: auto; }
 .u-access-log li { padding: 3px 0; } .u-access-log li.blocked { color: var(--err); }
+/* Agents (Settings) and agent drafts waiting in a chat */
+.u-agent-name { font-weight: 600; margin: 0; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.u-agent-drafts { padding: 8px 12px 0; display: grid; gap: 8px; }
+.u-agent-drafts[hidden] { display: none; }
+.u-agent-draft { border: 1px dashed var(--accent); background: var(--accent-soft); border-radius: 14px; padding: 10px 12px; }
+.u-agent-draft-who { margin: 0 0 4px; font-size: 12px; color: var(--ink-2); }
+.u-agent-draft-text { margin: 0 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 9em; overflow: auto; }
+.u-agent-draft .u-pair { grid-template-columns: 1fr 1fr 1.3fr; margin-top: 0; }
 .u-hero { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; padding: 4px 0 6px; }
 .u-hero strong { font-size: 20px; font-weight: 600; margin-top: 6px; overflow-wrap: anywhere; }
 .u-hero span:last-child { font-size: 13px; color: var(--ink-3); }
@@ -135,13 +159,13 @@ button { touch-action: manipulation; }
 .u-muted-mark { width: 14px; height: 14px; margin-left: 6px; vertical-align: -2px; opacity: .6; }
 .u-chat-bottom { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .u-chat-bottom .u-snippet { flex: 1; min-width: 0; }
-.u-snippet.typing { color: #9dbbff; font-style: italic; }
+.u-snippet.typing { color: var(--link); font-style: italic; }
 .u-person.unread .u-chat-top strong { font-weight: 700; }
-.u-person.unread .u-when { color: #9dbbff; }
+.u-person.unread .u-when { color: var(--link); }
 .u-person.unread .u-snippet { color: var(--ink); }
-.u-badge { flex-shrink: 0; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; display: grid; place-items: center; font-variant-numeric: tabular-nums; }
+.u-badge { flex-shrink: 0; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 600; display: grid; place-items: center; font-variant-numeric: tabular-nums; }
 .u-ticks { flex-shrink: 0; font-size: 12px; color: var(--ink-3); letter-spacing: -2px; }
-.u-ticks.read { color: #9dbbff; }
+.u-ticks.read { color: var(--link); }
 .u-when, .u-message footer, .u-dur, .u-rec-time { font-variant-numeric: tabular-nums; }
 /* skeletons instead of "Loading…" */
 .u-skeleton { padding: 4px 0; }
@@ -158,15 +182,15 @@ button { touch-action: manipulation; }
 .u-timeline { flex: 1; padding: 0 10px 10px; }
 .u-spacer { flex: 1 0 auto; }
 .u-older { align-self: center; color: var(--ink-3); font-size: 12px; margin: 12px 0; overflow-anchor: none; }
-.u-day { position: sticky; top: 8px; z-index: 1; overflow-anchor: none; background: rgba(27,27,30,.94); }
+.u-day { position: sticky; top: 8px; z-index: 1; overflow-anchor: none; background: linear-gradient(var(--panel-tint), var(--panel-tint)) var(--panel-solid); }
 .u-row { display: flex; flex-direction: column; align-items: flex-start; margin-top: 10px; transition: transform .12s; touch-action: pan-y; }
 .u-row.outgoing { align-items: flex-end; }
 .u-row.pos-mid, .u-row.pos-last { margin-top: 2px; }
-.u-row.arm .u-message { box-shadow: -4px 0 0 #9dbbff; }
+.u-row.arm .u-message { box-shadow: -4px 0 0 var(--link); }
 .u-row.flash .u-message { animation: u-flash 1.2s; }
 @keyframes u-flash { 30% { filter: brightness(1.6); } }
 .u-row.lifted .u-message { filter: brightness(1.25); }
-.u-message { margin-top: 0; max-width: min(80%, 520px); user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; animation: u-in .16s var(--ease, ease-out); }
+.u-message { margin-top: 0; max-width: min(80%, 520px); animation: u-in .16s var(--ease, ease-out); }
 @keyframes u-in { from { opacity: 0; transform: translateY(6px); } }
 @media (prefers-reduced-motion: reduce) { .u-message, .u-row, .u-skeleton { animation: none; transition: none; } }
 .u-row:not(.outgoing).pos-first .u-message, .u-row:not(.outgoing).pos-mid .u-message { border-bottom-left-radius: 4px; }
@@ -189,7 +213,7 @@ button { touch-action: manipulation; }
 .tone-text-4 { color: #f0a46a !important; } .tone-text-5 { color: #7fd08f !important; } .tone-text-6 { color: #6fb0f5 !important; } .tone-text-7 { color: #d39bea !important; }
 .tone-text-8 { color: #5ed6b2 !important; } .tone-text-9 { color: #f2977f !important; } .tone-text-10 { color: #a2a7f2 !important; } .tone-text-11 { color: #dcc56a !important; }
 /* quotes */
-.u-quote { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; min-height: 0; margin: 2px 0 6px; padding: 6px 10px; border-radius: 10px; border-left: 3px solid #9dbbff; background: rgba(0,0,0,.22); text-align: left; color: inherit; }
+.u-quote { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; min-height: 0; margin: 2px 0 6px; padding: 6px 10px; border-radius: 10px; border-left: 3px solid var(--link); background: rgba(0,0,0,.22); text-align: left; color: inherit; }
 .u-quote strong { font-size: 13px; font-weight: 600; }
 .u-quote span { font-size: 13px; opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .outgoing .u-quote { border-left-color: #fff; background: rgba(0,0,0,.18); }
@@ -243,6 +267,31 @@ button { touch-action: manipulation; }
 .u-selected > .u-message, .u-selected > .bubble { outline: 2px solid var(--wz-accent, var(--accent)); outline-offset: 2px; }
 .u-selecting .u-message, .u-selecting .bubble { cursor: pointer; }
 /* reactions */
+/* Group mentions and reactor identities extend the existing composer/strip. */
+.u-composer { position: relative; }
+.u-field { position: relative; background: var(--wz-surface-raised, var(--raised)); border-radius: 22px; }
+.u-composer .u-field textarea { position: relative; background: transparent; }
+.u-mention-mirror { position: absolute; inset: 0; overflow: hidden; pointer-events: none; white-space: pre-wrap; overflow-wrap: break-word; color: transparent; font: inherit; line-height: 20px; padding: 12px 18px; border-radius: inherit; }
+.u-mention-mirror mark { color: transparent; background: var(--wz-accent-soft, var(--accent-soft)); border-radius: 4px; }
+.u-mention { color: var(--wz-accent, var(--accent)); text-decoration: none; font-weight: 600; border-radius: 4px; }
+.u-mentioned .u-message { outline: 2px solid var(--wz-accent, var(--accent)); outline-offset: 2px; }
+.u-mention-notice { display: block; font-size: .8rem; font-weight: 600; color: var(--wz-accent, var(--accent)); margin-bottom: 5px; }
+.u-mention-picker, .u-reactor-tooltip { background: var(--wz-panel, var(--panel-tint)); color: var(--wz-text, var(--ink)); border: 1px solid var(--wz-border, var(--line)); box-shadow: var(--wz-shadow, none); }
+.u-mention-picker { position: absolute; bottom: 100%; left: 12px; right: 12px; z-index: 30; max-height: min(40vh, 290px); overflow: auto; padding: 8px; border-radius: 16px; }
+.u-mention-option { display: flex; align-items: center; text-align: left; gap: 10px; width: 100%; padding: 8px; color: inherit; border-radius: 10px; overflow-wrap: anywhere; }
+.u-mention-option[aria-selected="true"], .u-mention-option:active, .u-react.pressed { background: var(--wz-accent-soft, var(--accent-soft)); outline: 1px solid var(--wz-accent, var(--accent)); }
+.u-react { position: relative; }
+.u-reactor-tooltip { position: absolute; z-index: 40; max-width: 270px; padding: 10px; border-radius: 12px; text-align: left; font-weight: 400; pointer-events: none; overflow: auto; }
+.u-mention-picker, .u-reactor-tooltip { box-sizing: border-box; overflow-wrap: anywhere; }
+.u-reactor-row > span:last-child, .u-mention-option > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.u-reactor-row > .avatar, .u-mention-option > .avatar { flex-shrink: 0; }
+.u-reactor-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; overflow-wrap: anywhere; white-space: normal; }
+.u-reactor-tabs { display: flex; gap: 6px; overflow: auto; padding: 5px 0; flex-shrink: 0; }
+.u-reactor-tabs button { flex-shrink: 0; }
+.u-reactor-tabs [aria-selected="true"] { color: var(--wz-accent, var(--accent)); border-color: currentColor; }
+.u-reactor-list { overflow: auto; }
+.u-mention-picker[hidden], .u-reactor-tooltip[hidden] { display: none; }
+
 .u-reactions { display: flex; gap: 4px; margin: -6px 8px 0; position: relative; z-index: 1; flex-wrap: wrap; }
 .u-react { min-height: 26px; min-width: 0; padding: 0 8px; border-radius: 13px; font-size: 14px; background: var(--raised-2); border: 2px solid var(--bg); color: var(--ink); }
 .u-react.mine { background: #2c4a86; }
@@ -255,17 +304,16 @@ button { touch-action: manipulation; }
 .u-compose-row[hidden] { display: none; }
 .u-field { flex: 1; min-width: 0; display: flex; }
 .u-field textarea { flex: 1; resize: none; min-height: 44px; max-height: 140px; line-height: 20px; padding: 12px 18px; border-radius: 22px; overflow-y: auto; background: var(--raised); border: 0; }
+.u-composer.is-file-drag .u-field textarea { background: color-mix(in srgb, var(--accent) 15%, var(--raised)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }
 .u-attach, .u-mic { flex: 0 0 44px; width: 44px; height: 44px; border-radius: 50%; color: var(--ink-2); }
-.u-mic { background: var(--accent); color: #fff; }
+.u-mic { background: var(--accent); color: var(--on-accent); }
 .u-attach[hidden], .u-mic[hidden], .u-send[hidden] { display: none; }
 .u-bar { display: flex; align-items: center; gap: 8px; padding: 0 2px; }
 .u-bar[hidden] { display: none; }
+.u-unsent-voice { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 0.75rem; color: var(--ink-2); }
+.u-unsent-voice button { color: var(--accent); background: transparent; border: 0; padding: 6px; cursor: pointer; }
 .u-bar .u-quote { flex: 1; min-width: 0; margin: 0; background: var(--surface); }
-.u-attach-strip .u-attach-chip .icon-button { left: auto; right: 2px; width: 26px; min-width: 0; height: 26px; }
-.u-attach-strip { display: flex; gap: 8px; overflow-x: auto; max-width: 100%; padding-bottom: 2px; }
-.u-attach-chip { flex: 0 0 auto; position: relative; width: 72px; height: 72px; border-radius: 12px; overflow: hidden; }
-.u-attach-chip img { width: 100%; height: 100%; object-fit: cover; }
-.u-attach-chip .icon-button { position: absolute; top: 2px; right: 2px; width: 26px; height: 26px; min-height: 0; background: rgba(0,0,0,.6); border-radius: 50%; padding: 4px; }
+.u-attach-strip { display: flex; align-items: flex-end; gap: 8px; overflow-x: auto; max-width: 100%; padding-bottom: 2px; }
 .u-recording { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 2px 0 4px; }
 .u-rec-dot { width: 10px; height: 10px; border-radius: 50%; background: #e5484d; animation: u-pulse 1s infinite; }
 .u-rec-time { font-size: 15px; min-width: 40px; }
@@ -279,19 +327,15 @@ button { touch-action: manipulation; }
 .u-qr-btn { width: 44px; height: 44px; min-height: 0; min-width: 0; padding: 0; border-radius: 50%; font-size: 24px; background: none; }
 .u-qr-btn.mine { background: var(--accent-soft); }
 .u-qr-btn.more { font-size: 20px; color: var(--ink-2); background: var(--raised-2); }
-.u-grid { display: grid; grid-template-columns: repeat(8, 44px); gap: 2px; padding: 8px; border-radius: 20px; background: #2b2b30; box-shadow: 0 8px 24px rgba(0,0,0,.5); max-width: calc(100vw - 24px); overflow: auto; }
+.u-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 44px)); gap: 2px; padding: 8px; border-radius: 20px; background: linear-gradient(var(--wz-panel, var(--panel-tint)), var(--wz-panel, var(--panel-tint))) var(--panel-solid); box-shadow: 0 8px 24px color-mix(in srgb, var(--wz-base, var(--bg)) 50%, transparent); box-sizing: border-box; width: min(382px, calc(100vw - 24px)); max-height: min(50vh, 360px); overflow-y: auto; overflow-x: hidden; }
+.u-grid .u-qr-btn { width: 100%; min-width: 0; }
 .u-actions { display: flex; flex-direction: column; min-width: 220px; padding: 6px 0; border-radius: 16px; background: #2b2b30; box-shadow: 0 8px 24px rgba(0,0,0,.5); align-self: flex-start; }
 .u-menu.right .u-quick, .u-menu.right .u-actions { align-self: flex-end; }
 .u-act { display: flex; align-items: center; gap: 14px; min-height: 46px; padding: 0 18px; border-radius: 0; justify-content: flex-start; background: none; color: var(--ink); font-size: 15px; }
 .u-act svg { width: 20px; height: 20px; }
 .u-act.danger { color: #ff8a8a; }
-.u-toast { position: absolute; left: 50%; bottom: 150px; transform: translateX(-50%); width: max-content; max-width: calc(100% - 48px); text-align: center; line-height: 1.4; z-index: 90; margin: 0; padding: 10px 16px; border-radius: 20px; background: var(--wz-surface-raised, #3a3a40); color: var(--wz-text, var(--ink)); font-size: 14px; box-shadow: 0 6px 18px rgba(0,0,0,.45); }
+.u-toast { position: absolute; left: 50%; bottom: 150px; transform: translateX(-50%); width: max-content; max-width: calc(100% - 48px); text-align: center; line-height: 1.4; z-index: 90; margin: 0; padding: 10px 16px; border-radius: 20px; background: linear-gradient(var(--panel-raised-tint), var(--panel-raised-tint)) var(--panel-solid); color: var(--wz-text, var(--ink)); font-size: 0.875rem; box-shadow: 0 6px 18px color-mix(in srgb, var(--wz-base, var(--bg)) 45%, transparent); }
 /* photo viewer */
-.u-viewer { background: #000; flex-direction: column; align-items: stretch; justify-content: center; animation: none; }
-.u-viewer header { position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; gap: 8px; padding: max(8px, env(safe-area-inset-top)) 8px 8px; background: linear-gradient(rgba(0,0,0,.6), transparent); z-index: 2; color: #fff; }
-.u-viewer-who { flex: 1; font-weight: 600; }
-.u-viewer img, .u-viewer video { max-width: 100%; max-height: 100%; object-fit: contain; margin: auto; display: block; }
-.u-viewer-cap { position: absolute; left: 0; right: 0; bottom: 0; margin: 0; padding: 16px 18px max(16px, env(safe-area-inset-bottom)); background: linear-gradient(transparent, rgba(0,0,0,.7)); color: #fff; }
 .u-save { display: grid; place-items: center; color: #fff; }
 .u-save svg { width: 22px; height: 22px; }
 
@@ -302,6 +346,793 @@ button { touch-action: manipulation; }
   #unified-inbox { border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
 }
 
-/* Telegram message gestures: the initial hold is message selection, the next is native text. */
-.u-message, .message .bubble { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
-.u-row.u-selecting .u-message, .message.u-selecting .bubble { -webkit-touch-callout: default; -webkit-user-select: text; user-select: text; }
+/* ---------- Unified Inbox (Beeper-style): accounts strip, filter chips, network badges ---------- */
+.u-accounts { padding: 0 12px 8px; flex-shrink: 0; }
+.u-acct-open { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 8px 14px; border-radius: 16px; background: var(--surface); text-align: left; }
+.u-acct-open.warn { box-shadow: inset 0 0 0 1px var(--warn); }
+.u-acct-strip { display: flex; flex-shrink: 0; }
+.u-acct-dot { display: grid; place-items: center; width: 26px; height: 26px; margin-left: -6px; border-radius: 50%; background: var(--raised-2); color: var(--ink-3); font: 700 12px/1 system-ui, sans-serif; box-shadow: 0 0 0 2px var(--surface); }
+.u-acct-dot:first-child { margin-left: 0; }
+.u-acct-dot.on { color: #fff; }
+.u-acct-dot.warn { background: var(--warn); color: #222; }
+.u-acct-text { flex: 1; min-width: 0; font-size: 14px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.u-acct-cta { flex-shrink: 0; font-size: 14px; font-weight: 600; color: var(--link); }
+.u-chips { padding: 0 12px 10px; }
+.u-chip { min-height: 34px; padding: 0 14px; font-weight: 500; transition: background-color 120ms, color 120ms; }
+.u-chip.net::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: var(--net, var(--ink-3)); vertical-align: 1px; }
+.u-chip[aria-pressed=true] { background: var(--chip-on); color: var(--chip-on-ink); }
+.u-av-wrap { position: relative; flex: 0 0 48px; display: block; }
+.u-net { position: absolute; right: -3px; bottom: -3px; display: grid; place-items: center; width: 19px; height: 19px; border-radius: 50%; color: #fff; font: 700 10px/1 system-ui, sans-serif; box-shadow: 0 0 0 2.5px var(--bg); }
+.u-person { border-radius: 14px; margin: 0 6px; width: calc(100% - 12px); padding: 10px 12px; }
+.u-person.unread .u-chat-top strong { font-weight: 700; }
+.u-person.unread .u-snippet { color: var(--ink); }
+.u-empty { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+.u-empty .primary { padding: 0 22px; min-height: 46px; }
+
+/* ---------- Account cards and login steps ---------- */
+.u-connected-networks { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+.c-summary { font-size: 14px; color: var(--ink-2); margin: 2px 2px 4px; }
+.c-card { padding: 14px; border-radius: 16px; background: var(--raised); }
+.c-card.on { background: var(--surface); box-shadow: inset 0 0 0 1px var(--line-2); }
+.c-card .wide { margin-top: 12px; }
+.c-card .helper { margin-top: 10px; }
+.c-card-top { display: flex; align-items: center; gap: 12px; }
+.c-card-text { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.c-card-text strong { font-size: 16px; font-weight: 600; }
+.c-mark { display: grid; place-items: center; flex: 0 0 38px; width: 38px; height: 38px; border-radius: 12px; color: #fff; font: 700 17px/1 system-ui, sans-serif; }
+.c-mark.big { flex-basis: 48px; width: 48px; height: 48px; border-radius: 14px; font-size: 21px; }
+.c-mark.small { flex-basis: 22px; width: 22px; height: 22px; border-radius: 7px; font-size: 11px; }
+.c-pill { flex-shrink: 0; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; background: var(--raised-2); color: var(--ink-2); }
+.c-pill.on { background: rgba(79,194,138,.16); color: var(--ok); }
+.c-pill.warn { background: rgba(242,183,75,.16); color: var(--warn); }
+.c-link { display: block; width: 100%; min-height: 40px; margin-top: 4px; font-size: 14px; color: var(--link); border-radius: 12px; }
+.c-link.danger { color: var(--err); }
+.c-step-head { display: flex; align-items: center; gap: 14px; margin: 6px 0 10px; }
+.c-step-head h3 { font-size: 19px; font-weight: 600; color: var(--ink); text-transform: none; letter-spacing: 0; margin: 0; }
+.c-howto { margin: 4px 0 0; padding-left: 22px; color: var(--ink-2); font-size: 14px; line-height: 1.7; }
+.c-howto li::marker { color: var(--ink-3); font-weight: 600; }
+.c-qr-frame { display: grid; place-items: center; margin: 16px auto 4px; padding: 14px; width: min(100%, 320px); border-radius: 20px; background: #fff; box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+.c-qr { display: block; width: 100%; height: auto; image-rendering: pixelated; }
+.c-code { margin: 14px 0 4px; padding: 16px; border-radius: 14px; background: var(--raised); font: 600 28px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .14em; text-align: center; overflow-wrap: anywhere; user-select: all; }
+.c-waiting { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 12px; font-size: 14px; color: var(--ink-2); }
+.c-form label:first-child { margin-top: 6px; }
+.c-problem { margin-top: 10px; }
+@media (min-width: 900px) { .u-sheet { max-width: 520px; border-radius: 20px; margin-bottom: 24px; } .u-overlay { align-items: center; } }
+/* Review fixes: chips never shrink or overlap; unread rows carry the weight; compose is the accent. */
+.u-chips .u-chip { flex: 0 0 auto; min-width: 0; }
+.u-chat-top strong { font-weight: 500; }
+.u-person.unread .u-chat-top strong { font-weight: 700; }
+.u-person.unread .u-when { color: var(--link); }
+.u-fab { background: var(--accent); color: var(--on-accent); box-shadow: 0 8px 24px rgba(44,107,237,.35); }
+.u-fab:not(:disabled):hover, .u-fab:not(:disabled):active { background: var(--accent-press); }
+.u-acct-dot { font-size: 10px; letter-spacing: -.02em; }
+.u-net { font-size: 8px; letter-spacing: -.03em; }
+.c-pill { color: var(--ink-2); }
+.c-card { scroll-margin: 12px; }
+body { font-family: system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue","Noto Sans","Noto Sans CJK JP","Noto Sans Thai","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif; }
+.c-card .c-link:last-child { margin-bottom: -4px; } .c-card-text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .c-pill { background: transparent; padding: 0; } .c-pill.on, .c-pill.warn { background: transparent; }
+
+
+/* ---------- Clarity pass: sent vs received, real platform icons, platform filters ---------- */
+:root { --bubble-in-ink: var(--ink); --bubble-out-ink: #fff; --link: color-mix(in srgb, var(--accent) 62%, var(--ink)); --badge-ring: var(--bg); --chip-on: var(--accent); --chip-on-ink: var(--on-accent); }
+/* Platform badges: brand glyph on a light disc, so every mark reads on dark and light skins alike. */
+.net-badge { display: inline-grid; place-items: center; flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%; background: #fff; color: #fff; overflow: hidden; }
+.net-badge.text { font: 700 9px/1 system-ui, sans-serif; letter-spacing: -.03em; }
+.brand-icon { width: 100%; height: 100%; fill: var(--brand, currentColor); stroke: none; }
+.net-badge .brand-icon { width: 68%; height: 68%; }
+.net-badge[data-network=private] { background: var(--accent); }
+.net-badge[data-network=private] .brand-icon { fill: #fff; }
+.u-av-wrap { position: relative; display: block; flex: 0 0 48px; width: 48px; height: 48px; }
+.u-av-wrap.small { flex: 0 0 36px; width: 36px; height: 36px; }
+.u-av-wrap .u-net { position: absolute; right: -3px; bottom: -3px; width: 20px; height: 20px; box-shadow: 0 0 0 2.5px var(--badge-ring); font-size: 8px; }
+.u-av-wrap.small .u-net { width: 16px; height: 16px; right: -3px; bottom: -3px; box-shadow: 0 0 0 2px var(--badge-ring); }
+/* Accounts strip */
+.u-acct-dot.net-badge { width: 26px; height: 26px; margin-left: -4px; box-shadow: 0 0 0 2px var(--surface); background: #fff; }
+.u-acct-dot.net-badge:first-child { margin-left: 0; }
+.u-acct-dot.net-badge:not(.on) { filter: grayscale(1); opacity: .6; }
+.u-acct-text { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.3; font-size: 13px; }
+.u-acct-dot.net-badge.warn { filter: none; opacity: 1; box-shadow: 0 0 0 2px var(--warn); }
+/* Accounts sheet cards: glyph on a white tile */
+.c-mark.has-icon { background: #fff; }
+.c-mark.has-icon .brand-icon { width: 62%; height: 62%; }
+/* Filter chips: one scrollable row; platforms carry their icon; Direct/Groups/labels are quieter. */
+.u-chips { display: flex; align-items: center; gap: 6px; padding: 0 12px 10px; overflow-x: auto; scroll-padding-inline: 12px; -webkit-overflow-scrolling: touch; mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent); }
+.u-chips::-webkit-scrollbar { display: none; }
+.u-chip { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; min-height: 36px; padding: 0 14px; border-radius: 18px; background: var(--raised); color: var(--ink-2); font-size: 14px; font-weight: 500; }
+.u-chip.net { padding-left: 6px; }
+.u-chip.net::before { content: none; }
+.u-chip .u-chip-icon { width: 24px; height: 24px; box-shadow: none; }
+.u-chip[aria-pressed=true] { background: var(--chip-on); color: var(--chip-on-ink); }
+.u-chip-count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent); color: var(--on-accent); font: 600 11px/18px system-ui, sans-serif; text-align: center; font-variant-numeric: tabular-nums; }
+.u-chip-count[hidden] { display: none; }
+.u-chip.sub { min-height: 32px; padding: 0 12px; background: transparent; box-shadow: inset 0 0 0 1px var(--line-2); font-size: 13px; }
+.u-chip.sub[aria-pressed=true] { background: var(--chip-on); color: var(--chip-on-ink); box-shadow: none; }
+.u-chip-divider { flex: 0 0 1px; align-self: stretch; margin: 6px 2px; background: var(--line-2); }
+/* Inbox preview: "You:" in muted ink so own last messages are obvious at a glance. */
+.u-snippet-who { color: var(--ink-3); font-weight: 500; }
+.u-person.unread .u-snippet-who { color: var(--ink-2); }
+/* Thread: received = left, neutral; sent = right, accent. Runs group tightly; runs from different sides breathe. */
+.u-timeline { padding: 0 12px 12px; }
+.u-row { margin-top: 12px; }
+.u-row.pos-mid, .u-row.pos-last { margin-top: 2px; }
+.u-row.incoming { align-items: flex-start; }
+.u-row.outgoing { align-items: flex-end; }
+.u-message { max-width: min(78%, 520px); padding: 7px 12px 6px; }
+.u-row.incoming .u-message { background: var(--bubble-in); color: var(--bubble-in-ink); border-bottom-left-radius: 18px; }
+.u-row.outgoing .u-message { background: var(--bubble-out); color: var(--bubble-out-ink); }
+.u-row.incoming.pos-single .u-message, .u-row.incoming.pos-last .u-message { border-bottom-left-radius: 6px; }
+.u-row.outgoing.pos-single .u-message, .u-row.outgoing.pos-last .u-message { border-bottom-right-radius: 6px; }
+.u-row.outgoing .u-message footer { color: color-mix(in srgb, var(--bubble-out-ink) 72%, transparent); }
+.u-row.incoming .u-message footer { color: var(--ink-3); }
+/* Group chats: a small sender face at the end of each incoming run, names above the run. */
+.u-row.in-group { padding-left: 34px; position: relative; }
+.u-row-av { position: absolute; left: 0; bottom: 0; }
+.u-avatar.tiny { flex-basis: 26px; width: 26px; height: 26px; font-size: 11px; }
+.u-row.in-group .u-reactions { margin-left: 0; }
+.u-message .u-sender { font-size: 13px; font-weight: 600; margin: 0 0 2px; }
+.u-quote.mine strong { opacity: .9; }
+.u-via { display: inline-flex; }
+.u-via .u-via-icon { width: 14px; height: 14px; }
+.u-day { font-size: 12px; font-weight: 500; letter-spacing: .01em; color: var(--ink-2); background: color-mix(in srgb, var(--surface) 94%, transparent); margin: 16px 0 6px; padding: 4px 12px; }
+/* Thread header: avatar + platform badge, name, platform/subtitle */
+.u-who .u-av-wrap.small .u-net { right: -4px; bottom: -4px; }
+/* Private (native) thread: same visual language as bridged threads */
+.chat-avatar { display: block; }
+.chat-avatar .avatar.small { width: 36px; height: 36px; flex-basis: 36px; font-size: 14px; }
+.chat-header { gap: 10px; }
+.messages { gap: 0; }
+.message { margin-top: 12px; max-width: 100%; }
+.message.pos-mid, .message.pos-last { margin-top: 2px; }
+.message .bubble { max-width: min(78%, 520px); border-radius: 18px; }
+.message.received .bubble { background: var(--bubble-in); color: var(--bubble-in-ink); }
+.message.sent .bubble { background: var(--bubble-out); color: var(--bubble-out-ink); }
+.message.received.pos-first .bubble, .message.received.pos-mid .bubble { border-bottom-left-radius: 4px; }
+.message.received.pos-mid .bubble, .message.received.pos-last .bubble { border-top-left-radius: 4px; }
+.message.sent.pos-first .bubble, .message.sent.pos-mid .bubble { border-bottom-right-radius: 4px; }
+.message.sent.pos-mid .bubble, .message.sent.pos-last .bubble { border-top-right-radius: 4px; }
+.message.received.pos-single .bubble, .message.received.pos-last .bubble { border-bottom-left-radius: 6px; }
+.message.sent.pos-single .bubble, .message.sent.pos-last .bubble { border-bottom-right-radius: 6px; }
+.message.pos-first .message-time, .message.pos-mid .message-time { display: none; }
+.message-status:empty { display: none; }
+.date-separator { font-weight: 500; margin: 16px 0 6px; }
+
+html[data-private-view] .chat-header { border-bottom: 1px solid var(--line); }
+/* Light skins: the Wizard shell marks html[data-color-scheme=light]; the same tokens re-map, layout is unchanged. */
+html[data-color-scheme=light] {
+  --bg: var(--wz-canvas, #ffffff); --surface: var(--wz-surface, #f2f3f5); --raised: var(--wz-surface-raised, #e9eaee); --raised-2: var(--wz-surface-raised, #dcdee3);
+  --ink: var(--wz-text, #16171a); --ink-2: var(--wz-text-secondary, #4f525a); --ink-3: var(--wz-text-muted, #7c7f87);
+  --line: var(--wz-border, rgba(0,0,0,.07)); --line-2: var(--wz-border, rgba(0,0,0,.13));
+  --accent-soft: var(--wz-accent-soft, rgba(44,107,237,.12));
+  --bubble-in: color-mix(in srgb, var(--ink) 8%, var(--wz-base, #fff)); --bubble-out: #2c6bed; --bubble-in-ink: var(--ink); --link: color-mix(in srgb, var(--accent) 80%, var(--ink));
+  color-scheme: light;
+}
+html[data-color-scheme=light] .u-day { background: rgba(242,243,245,.95); }
+html[data-color-scheme=light] .u-overlay, html[data-color-scheme=light] .sheet-layer { background: rgba(0,0,0,.4); }
+html[data-color-scheme=light] .u-quick, html[data-color-scheme=light] .u-actions, html[data-color-scheme=light] .u-grid { background: #fff; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+html[data-color-scheme=light] .u-toast { background: #2a2b30; color: #fff; }
+html[data-color-scheme=light] .u-acct-cta, html[data-color-scheme=light] .c-link, html[data-color-scheme=light] .u-person.unread .u-when,
+html[data-color-scheme=light] .u-snippet.typing, html[data-color-scheme=light] .u-message .u-translate, html[data-color-scheme=light] .u-ticks.read { color: var(--link); }
+html[data-color-scheme=light] .u-message .u-sender { color: var(--link); }
+html[data-color-scheme=light] .tone-text-0 { color: #3b4bc0 !important; } html[data-color-scheme=light] .tone-text-1 { color: #17707f !important; }
+html[data-color-scheme=light] .tone-text-2 { color: #6a3ba8 !important; } html[data-color-scheme=light] .tone-text-3 { color: #a8335d !important; }
+html[data-color-scheme=light] .tone-text-4 { color: #9a4d17 !important; } html[data-color-scheme=light] .tone-text-5 { color: #2d7240 !important; }
+html[data-color-scheme=light] .tone-text-6 { color: #1f5ea3 !important; } html[data-color-scheme=light] .tone-text-7 { color: #7c3d91 !important; }
+html[data-color-scheme=light] .tone-text-8 { color: #157a5d !important; } html[data-color-scheme=light] .tone-text-9 { color: #a3412c !important; }
+html[data-color-scheme=light] .tone-text-10 { color: #484ea0 !important; } html[data-color-scheme=light] .tone-text-11 { color: #6e5b10 !important; }
+html[data-color-scheme=light] .u-quote { background: rgba(0,0,0,.06); }
+html[data-color-scheme=light] .outgoing .u-quote { background: rgba(0,0,0,.16); }
+html[data-color-scheme=light] .u-fab, html[data-color-scheme=light] .u-down { box-shadow: 0 6px 18px rgba(0,0,0,.18); }
+html[data-color-scheme=light] .net-badge:not([data-network=private]) { box-shadow: 0 0 0 1px rgba(0,0,0,.08); }
+html[data-color-scheme=light] .u-av-wrap .u-net { box-shadow: 0 0 0 2.5px var(--badge-ring); }
+html[data-color-scheme=light] .c-mark.has-icon { box-shadow: inset 0 0 0 1px rgba(0,0,0,.08); }
+
+/* Message text is selectable with a mouse drag, sent or received (Miguel, 30 Oct 2026). On a touch-only screen the
+   first hold picks messages, so native selection waits for the menu's "Select text" or the next hold in selection. */
+.u-message, .message .bubble { -webkit-user-select: text; user-select: text; -webkit-touch-callout: none; cursor: auto; }
+.u-message .u-text, .message .bubble-text { cursor: text; }
+.u-message footer, .u-message .u-sender, .u-reactions, .u-quote { -webkit-user-select: none; user-select: none; }
+@media (hover: none) and (pointer: coarse) {
+  .u-message, .message .bubble { -webkit-user-select: none; user-select: none; }
+}
+.u-row.u-selecting .u-message, .message.u-selecting .bubble, .u-message.u-textsel, .bubble.u-textsel,
+.u-message.u-textsel .u-text, .bubble.u-textsel .bubble-text { -webkit-touch-callout: default; -webkit-user-select: text; user-select: text; }
+.u-message.u-textsel, .bubble.u-textsel { outline: 2px dashed color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 2px; }
+/* My QR codes */
+.u-myqr-body { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: auto; }
+.u-myqr-chips { padding: 2px 0 8px; }
+.u-myqr-card { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 4px 0 12px; touch-action: pan-y; }
+.u-sheet .u-myqr-name { margin: 6px 0 0; font-size: 17px; text-transform: none; letter-spacing: 0; color: var(--ink); }
+.u-myqr { width: min(100%, 300px, max(160px, calc(92dvh - 290px))); margin: 6px auto 10px; padding: 0; border-radius: 16px; image-rendering: pixelated; }
+.u-myqr-value { margin: 0 0 10px; color: var(--ink-2); font-size: 15px; word-break: break-all; }
+.u-myqr-actions { display: flex; gap: 10px; justify-content: center; }
+.u-myqr-actions button { min-width: 120px; }
+.u-myqr-edit { display: flex; flex-direction: column; gap: 14px; margin: 8px 0 14px; }
+.u-myqr-row { display: grid; grid-template-columns: 1fr 44px 44px 44px; gap: 8px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.u-myqr-row input { grid-column: 1 / -1; }
+.u-myqr-remove { align-self: center; }
+.u-myqr-sheet > .wide, .u-myqr-body > .wide { margin-top: 8px; }
+.u-myqr-sheet header h2 { flex: 1; }
+.u-myqr-row .icon-button:disabled { opacity: .3; }
+.u-sheet .u-myqr-sub { margin: 10px 0 6px; font-size: 13px; font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--ink-2); }
+.u-myqr-auto { display: flex; flex-direction: column; }
+.u-myqr-autorow { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 6px 2px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.u-myqr-autotext { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.u-myqr-autotext small { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.u-myqr-autorow input { width: 20px; height: 20px; accent-color: var(--accent); }
+
+/* Account linking uses the existing Settings sheet, status rows and buttons. */
+.u-connector-card { padding: 8px 0 16px; border-bottom: 1px solid var(--line); }
+.u-connector-text > strong { display: block; margin: 6px 0; }
+.u-connectors .u-status { margin: 6px 0; padding: 8px 12px; }
+.u-connector-qr .u-qr { width: min(100%, 240px); margin: 10px auto; padding: 0; border-radius: 0; }
+.u-connectors ol { padding-left: 20px; font-size: 13px; line-height: 1.4; }
+.u-connectors .u-connector-heading h3 { margin-top: 0; }
+
+.u-connectors .helper { color: var(--ink-2); }
+
+/* ---------- Skin-safe colours (Oct 2026): hosted canvases are transparent, so nothing may use --bg as ink ---------- */
+button:not(:disabled):hover { background-color: color-mix(in srgb, var(--ink) 6%, transparent); }
+button:not(:disabled):active { background-color: color-mix(in srgb, var(--ink) 10%, transparent); }
+.u-person:active { background: color-mix(in srgb, var(--ink) 8%, transparent); }
+/* One Inbox needs no bottom tab bar. */
+#inbox-tabs { display: none !important; }
+/* Platform chips are icon-only: a round target with the brand mark, count beside it when unread. */
+.u-chips { gap: 6px; }
+.u-chip.net { min-width: 40px; height: 40px; padding: 0 8px; justify-content: center; gap: 4px; }
+.u-chip.net .u-chip-icon { width: 24px; height: 24px; }
+.u-chips .u-chip[aria-pressed=true], .u-chips .u-chip[aria-pressed=true]:not(:disabled):hover { background: var(--chip-on); color: var(--chip-on-ink); box-shadow: none; }
+.u-chips .u-chip.net[aria-pressed=true], .u-chips .u-chip.net[aria-pressed=true]:not(:disabled):hover { box-shadow: inset 0 0 0 2px var(--accent); background: var(--accent-soft); color: var(--ink); }
+.u-chip.net .u-chip-count:not([hidden]) { margin-right: 2px; }
+/* Low priority: the quiet folder row at the top of the Inbox and the folder's own header. */
+.u-low-row { min-height: 56px; }
+.u-low-row .u-low-mark { display: grid; place-items: center; flex: 0 0 48px; width: 48px; height: 48px; border-radius: 50%; background: var(--raised); color: var(--ink-2); }
+.u-low-row .u-low-mark svg { width: 22px; height: 22px; }
+.u-low-row .u-chat-top { justify-content: flex-start; gap: 8px; }
+.u-low-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 8px 8px 4px; }
+.u-low-head strong { font-size: 17px; }
+.u-low-head .u-low-note { flex-basis: 100%; padding-left: 50px; margin-top: -10px; color: var(--ink-3); font-size: 13px; }
+#unified-inbox.u-in-low #u-filters { display: none; }
+.u-badge.muted { background: var(--raised-2); color: var(--ink-2); }
+.u-chips .u-chip[aria-pressed=true]:not(.net) .u-chip-count { background: var(--on-accent); color: var(--accent); }
+.u-settings-btn { position: relative; }
+.u-settings-btn.warn::after { content: ""; position: absolute; top: 9px; right: 9px; width: 9px; height: 9px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 2px var(--surface); }
+.u-sheet .u-accounts .u-acct-open { cursor: default; }
+.c-add-title { margin: 18px 0 8px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.c-add-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+.c-steps textarea, .c-form textarea { width: 100%; min-height: 72px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+/* Platform chips: the bare brand glyph on the chip itself (no white disc inside a dark pill). */
+.u-chips .u-chip.net .net-badge.u-chip-icon:not(.text) { width: 22px; height: 22px; background: transparent; box-shadow: none; border-radius: 0; overflow: visible; }
+.u-chips .u-chip.net .net-badge.u-chip-icon:not(.text) .brand-icon { width: 100%; height: 100%; }
+.u-chips .u-chip.net .net-badge.u-chip-icon[data-network=private] .brand-icon,
+.u-chips .u-chip.net .net-badge.u-chip-icon[data-network=messenger] .brand-icon { fill: var(--accent); }
+/* Near-black brand marks would vanish on a dark chip: they take the ink colour instead. */
+html:not([data-color-scheme=light]) .u-chips .net-badge.u-chip-icon[data-network=twitter] .brand-icon,
+html:not([data-color-scheme=light]) .u-chips .net-badge.u-chip-icon[data-network=slack] .brand-icon { fill: var(--ink); }
+.u-chips .u-chip.net .net-badge.u-chip-icon.text { width: 22px; height: 22px; border-radius: 6px; font-size: 9px; }
+.u-chips .u-chip.low:not([aria-pressed=true]) { color: var(--ink-3); }
+.u-avatar { position: relative; overflow: hidden; }
+.u-avatar .u-av-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+/* Merged chats: where the reply goes */
+.u-via-pick { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; min-height: 30px; margin: 0 12px 6px; padding: 0 10px; border-radius: 15px; background: var(--raised); color: var(--ink-2); font-size: 13px; }
+.u-via-pick strong { color: var(--ink); font-weight: 600; }
+.u-via-pick .u-via-icon { width: 18px; height: 18px; }
+.u-via-pick .u-via-caret { font-size: 10px; opacity: .7; }
+/* Suggested merges */
+.u-merge-card { display: grid; gap: 10px; padding: 12px; margin: 0 0 10px; border-radius: 16px; background: var(--raised); }
+.u-merge-pair { display: flex; align-items: center; gap: 10px; }
+.u-merge-who { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.u-merge-who span { display: grid; min-width: 0; }
+.u-merge-who strong, .u-merge-who small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.u-merge-who small { color: var(--ink-3); font-size: 12.5px; }
+.u-merge-plus { color: var(--ink-3); font-size: 18px; flex: 0 0 auto; }
+.u-merge-actions { display: flex; gap: 8px; }
+.u-merge-actions button { flex: 1; min-height: 40px; }
+.u-settings-row { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 48px; padding: 0 14px; margin: 6px 0; border-radius: 14px; background: var(--raised); color: var(--ink); text-align: left; }
+.u-settings-row .u-badge { margin-left: auto; }
+.c-live { position: relative; width: 100%; max-width: 430px; margin: 10px auto 0; border-radius: 14px; overflow: hidden; background: #fff; box-shadow: 0 0 0 1px var(--line-2); }
+.c-live-img { display: block; width: 100%; height: 100%; object-fit: contain; touch-action: none; user-select: none; -webkit-user-select: none; cursor: pointer; }
+.c-live-keys { display: flex; flex-wrap: wrap; gap: 6px; max-width: 430px; margin: 8px auto 0; }
+.c-live-type { flex: 1 1 100%; min-height: 44px; resize: none; }
+.c-live-key { flex: 1 1 auto; min-height: 38px; padding: 0 10px; font-size: 13px; }
+.u-menu.at { width: 300px; max-width: calc(100% - 24px); }
+/* Merged chats: overlapped network badges */
+.u-av-wrap .u-net { z-index: 3; }
+.u-av-wrap .u-net.u-net-1 { right: 11px; z-index: 2; }
+.u-av-wrap .u-net.u-net-2 { right: 25px; z-index: 1; }
+.u-av-wrap.small .u-net.u-net-1 { right: 8px; }
+.u-av-wrap.small .u-net.u-net-2 { right: 19px; }
+/* Calmer filter row: network icons in grey until chosen; counts as quiet text, not bright bubbles */
+.u-chip.net .u-chip-icon { filter: grayscale(1); opacity: .72; transition: filter 120ms, opacity 120ms; }
+.u-chip.net:hover .u-chip-icon, .u-chip.net[aria-pressed=true] .u-chip-icon { filter: none; opacity: 1; }
+.u-chips .u-chip .u-chip-count { min-width: 0; height: auto; padding: 0; background: none; color: var(--ink-3); font-weight: 600; }
+.u-chips .u-chip[aria-pressed=true] .u-chip-count { background: none; color: inherit; }
+/* Owner sign-in uses the existing sheet and framebuffer, not another browser. The app's
+   actual window bounds the stage: vh alone ignores the sheet header, help and controls. */
+.u-sheet:has(.c-viewer) {
+  display: flex; flex-direction: column; width: 100%; max-width: 860px;
+  height: 100%; max-height: 100%; min-height: 0; margin: 0; padding: 8px 12px;
+  overflow: auto; background: var(--panel-solid); color: var(--ink);
+}
+.u-sheet:has(.c-viewer) > :not(header):not(.c-viewer):not(.grabber) { display: none; }
+.u-sheet:has(.c-viewer) > header { flex: 0 0 auto; margin: 0; }
+.u-sheet:has(.c-viewer) > .grabber { display: none; }
+.c-viewer { flex: 1 1 0; min-height: 400px; min-width: 0; display: grid; grid-template-rows: auto auto auto minmax(80px, 1fr) auto auto; gap: 6px; }
+.c-viewer .c-step-head { gap: 8px; margin: 0; }
+.c-viewer .c-step-head h3 { font-size: 1rem; margin: 0; color: var(--ink); }
+.c-viewer .c-mark.big { width: 28px; height: 28px; flex-basis: 28px; }
+.c-live-help { min-width: 0; color: var(--ink-2); font-size: .875rem; }
+.c-live-help summary { cursor: pointer; padding: 4px 0; }
+.c-live-help[open] { max-height: 120px; overflow: auto; }
+.c-live-tools { display: flex; flex-wrap: wrap; gap: 6px; }
+.c-viewer .c-live { width: 100%; height: 100%; min-height: 0; min-width: 0; max-width: none; margin: 0; overflow: auto; border-radius: 8px; background: var(--panel-solid); border: 1px solid var(--line-2); }
+.c-viewer .c-live-img { max-width: none; max-height: none; margin: auto; object-fit: fill; }
+.c-viewer .c-live.full-size .c-live-img { margin: 0; }
+.c-viewer .c-live-keys { max-width: none; width: 100%; margin: 0; gap: 4px; }
+.c-viewer .c-live-type { min-height: 40px; height: 40px; margin: 0; padding: 8px; font-size: 1rem; }
+.c-viewer .c-live-key { min-height: 40px; padding: 0 8px; font-size: .8125rem; }
+.c-viewer button, .c-viewer textarea { background: var(--panel-raised-tint); color: var(--ink); border-color: var(--line-2); }
+.c-viewer .c-waiting { margin: 0; min-height: 18px; font-size: .75rem; overflow-wrap: anywhere; color: var(--ink-2); }
+@media (max-width: 600px) { .u-overlay:has(.c-viewer) { padding: 6px; } .u-sheet:has(.c-viewer) { border-radius: 12px; } }
+/* Settings: solid sheet, compact grouped rows (desktop and phone alike) */
+:root { --sheet-solid: #1b1b1e; }
+html[data-color-scheme=light] { --sheet-solid: #f6f6f8; }
+.u-sheet { background: linear-gradient(var(--surface), var(--surface)), var(--sheet-solid); }
+.u-overlay:has(.u-settings) { background: rgba(0,0,0,.55); }
+@media (min-width: 640px) { .u-overlay:has(.u-sheet) { align-items: center; } .u-sheet { border-radius: 20px; max-height: 86%; } }
+.u-settings .c-card { padding: 12px; border-radius: 14px; }
+.u-settings .c-card + .c-card { margin-top: 8px; }
+.u-settings .c-card .helper { margin-top: 6px; font-size: 13px; line-height: 1.45; }
+.u-settings .c-card .c-go { margin-top: 10px; min-height: 36px; padding: 0 16px; border-radius: 18px; font-size: 14px; }
+.u-settings .c-card .c-link { margin: 8px 0 0 12px; font-size: 14px; }
+.u-settings .c-card-text strong { font-size: 15px; }
+.u-settings .c-card-top .net-badge, .u-settings .c-card-top > :first-child { width: 30px; height: 30px; }
+.c-add-title { margin: 18px 0 8px !important; }
+.u-settings-group { border-radius: 14px; background: var(--raised); overflow: hidden; }
+.u-settings-group > * + * { border-top: 1px solid var(--line); }
+.u-settings-group .u-settings-row { margin: 0; border-radius: 0; background: none; min-height: 48px; cursor: pointer; list-style: none; }
+.u-row-caret { margin-left: auto; color: var(--ink-3); font-size: 18px; transition: transform 120ms; }
+/* More (Miguel, 31 Oct): one plain list under the accounts; Advanced holds the rarely used rest. No boxes inside boxes. */
+.u-more > * { border-top: 0; }
+.u-sheet > h3.u-more-head { margin: 18px 0 8px; } /* same rhythm as Connected / Add an account above */
+.u-more > :not([hidden]) ~ :not([hidden]), .u-more-agents > * + * { border-top: 1px solid var(--line); }
+.u-more [hidden] { display: none !important; }
+.u-more-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 8px 14px; margin: 0; border-radius: 0; background: none; color: var(--ink); text-align: left; font: inherit; }
+.u-more-link { cursor: pointer; }
+.u-more-link .u-more-label { flex: 1; min-width: 0; }
+.u-more-value { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.u-more .u-row-caret { margin-left: 0; }
+.u-more-agent { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; row-gap: 0; padding: 4px 14px 10px; }
+.u-more-agent .u-agent-name { flex: none; overflow-wrap: anywhere; }
+.u-more-what { grid-column: 1 / -1; margin-top: -6px; color: var(--ink-3); font-size: 0.8125rem; line-height: 1.35; }
+.u-sheet select.u-more-level { width: auto; max-width: 100%; min-height: 44px; padding: 0 4px; border: 0; background: none; color: var(--ink-2); font-size: 1rem; text-align: right; cursor: pointer; }
+.u-more-note { margin: 0; padding: 10px 14px; color: var(--ink-2); font-size: 0.8125rem; }
+.u-more-note.warn { color: var(--warn); }
+.u-more-notify { display: grid; gap: 2px; padding: 0; }
+.u-more-notify button { width: 100%; min-height: 52px; padding: 0 14px; border-radius: 0; background: none; color: var(--ink); text-align: left; font: inherit; }
+.u-more-notify p:empty { display: none; }
+.u-more-notify p { margin: -6px 14px 10px; color: var(--ink-3); font-size: 0.8125rem; }
+.u-more-title { margin: 22px 0 6px; font-weight: 600; color: var(--ink); }
+.u-advanced .u-more-title + .helper { margin: 0 0 8px; font-size: 0.8125rem; }
+.u-sheet .u-more-remove { grid-column: 1 / -1; justify-self: start; margin-top: 4px; min-height: 32px; padding: 0; background: none; color: var(--err); font-size: 0.8125rem; }
+.u-advanced .u-access-log { max-height: none; margin: 0; }
+.u-more-foot { margin-top: 18px; font-size: 0.8125rem; color: var(--ink-3); }
+
+/* ---- Visual refresh (30 Oct): softer depth, cleaner previews. Colours come only from skin tokens. ---- */
+.u-message { box-shadow: 0 1px 1px rgba(0,0,0,.08), 0 1px 3px rgba(0,0,0,.06); padding: 7px 12px 5px; }
+.u-message.bare { box-shadow: none; }
+.u-message p { line-height: 1.42; }
+.u-message footer { font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+/* Replies: a quiet card with the author's colour bar, two lines max */
+.u-quote { gap: 2px; margin: 3px -4px 6px; padding: 6px 10px 7px; border-left: 0; border-radius: 10px; position: relative; overflow: hidden;
+  background: color-mix(in srgb, currentColor 9%, transparent); }
+.u-quote::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--link); }
+.outgoing .u-quote::before { background: currentColor; opacity: .85; }
+.u-quote strong { font-size: 12.5px; color: var(--link); }
+.outgoing .u-quote strong { color: inherit; }
+.u-quote span { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.35; opacity: .8; }
+.outgoing .u-quote, html[data-color-scheme=light] .outgoing .u-quote { background: rgba(255,255,255,.14); }
+html[data-color-scheme=light] .u-quote { background: color-mix(in srgb, var(--link) 8%, transparent); }
+.u-bar .u-quote { margin: 0; }
+/* Reactions: small pills that tuck under the bubble */
+.u-reactions { margin: -8px 10px 2px; gap: 4px; }
+.u-row.outgoing .u-reactions { justify-content: flex-end; }
+.u-react { min-height: 24px; padding: 0 7px; border-radius: 12px; font-size: 13px; line-height: 20px; background: var(--surface); color: var(--ink-2);
+  border: 1.5px solid var(--bg); box-shadow: 0 1px 2px rgba(0,0,0,.14); font-variant-numeric: tabular-nums; }
+.u-react.mine { background: color-mix(in srgb, var(--accent, var(--link)) 22%, var(--surface)); color: var(--ink); }
+/* Link previews */
+.u-link-card { display: flex; flex-direction: column; margin: 6px -6px 2px; border-radius: 12px; overflow: hidden; text-decoration: none; color: inherit;
+  background: color-mix(in srgb, currentColor 8%, transparent); max-width: 340px; }
+.outgoing .u-link-card { background: rgba(255,255,255,.14); }
+.u-link-card.side { flex-direction: row; align-items: stretch; }
+.u-link-img { display: block; width: 100%; max-height: 180px; object-fit: cover; background: rgba(0,0,0,.08); }
+.u-link-card.side .u-link-img { width: 76px; max-height: none; flex: 0 0 76px; }
+.u-link-text { display: grid; gap: 2px; padding: 8px 10px 9px; min-width: 0; }
+.u-link-site { font-size: 11.5px; opacity: .7; text-transform: lowercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.u-link-title { font-size: 13.5px; font-weight: 600; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.u-link-desc { font-size: 12.5px; line-height: 1.35; opacity: .78; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.u-link-card:hover .u-link-title { text-decoration: underline; }
+/* Header and composer: lighter chrome */
+.u-thread-head { border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+.u-composer { border-top: 1px solid var(--line); }
+.u-person { border-radius: 14px; margin: 0 6px; width: calc(100% - 12px); padding: 10px 12px; }
+.u-person:hover { background: color-mix(in srgb, var(--raised) 70%, transparent); }
+/* Pickers */
+.u-pick-list { display: grid; gap: 2px; margin-top: 10px; max-height: 56vh; overflow: auto; }
+.u-pick-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 54px; padding: 6px 8px; border-radius: 12px; background: none; color: var(--ink); text-align: left; }
+.u-pick-row:hover { background: var(--raised); }
+.u-pick-text { display: grid; min-width: 0; } .u-pick-text strong { font-weight: 600; }
+.u-pick-text small { color: var(--ink-3); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Browser sign-in hint */
+.c-live-hint { margin: 6px 0 0; padding: 10px 12px; border-radius: 12px; background: var(--raised); color: var(--ink); font-size: 14px; line-height: 1.45; }
+.c-live-hint.attn { background: color-mix(in srgb, var(--warn, #f2b74b) 22%, var(--raised)); font-weight: 600; }
+.c-live-note { font-size: 12.5px; margin: 6px 0 0; }
+
+/* Instagram story replies/reactions: one tidy line over the story frame */
+.u-story-tag { display: flex; flex-direction: column; gap: 1px; margin: 0 0 6px; padding: 6px 10px; border-radius: 10px; text-decoration: none; color: inherit;
+  background: color-mix(in srgb, currentColor 9%, transparent); font-size: 13px; }
+.u-message.bare .u-story-tag { margin: 4px 4px 6px; }
+.u-story-label { font-weight: 600; }
+.u-story-open { font-size: 12px; opacity: .72; }
+a.u-story-tag:hover .u-story-open { text-decoration: underline; }
+.u-link-img { aspect-ratio: 1.91 / 1; max-height: 160px; height: auto; }
+.u-link-card.side .u-link-img { aspect-ratio: auto; }
+
+/* Contacts link in Contact info */
+.u-contact-link { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding: 10px 12px; border-radius: 14px; background: var(--raised); font-size: 14px; color: var(--ink-2); }
+.u-contact-link button { flex: 0 0 auto; min-height: 36px; }
+.u-merge-why { color: var(--link); font-size: 12.5px; font-weight: 600; }
+
+/* Server draft in the composer: who drafted it, and the rare edit conflict. */
+.u-draft-note { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 12px; border: 1px dashed var(--accent); background: var(--accent-soft); font-size: 13px; color: var(--ink-2); }
+.u-draft-note span { flex: 1; min-width: 0; }
+.u-draft-note button.secondary { padding: 4px 10px; min-height: 0; font-size: 13px; }
+.u-draft-note.conflict { border-style: solid; }
+.u-snippet.draft .u-snippet-who { color: var(--danger, var(--accent)); font-weight: 600; }
+
+/* ---- Phone-width windows (Miguel, 30 Oct 2026): Inbox controls move to the bottom, in thumb reach. ----
+   Sized by Messenger's own window width (a Wizard window or a browser tab), never by device. Desktop is unchanged. */
+.u-head-actions { display: flex; align-items: center; gap: 2px; }
+#messenger { container: messenger / inline-size; }
+@container messenger (max-width: 599px) {
+  #unified-inbox[data-view=list], #unified-inbox[data-view=search] { display: flex; flex-direction: column; }
+  #unified-inbox[data-view=list] > .u-list, #unified-inbox[data-view=search] > .u-list { order: 1; padding-top: 6px; padding-bottom: 88px; }
+  #unified-inbox[data-view=list] > #u-filters { order: 2; padding: 8px 12px 4px; border-top: 1px solid var(--line); }
+  #unified-inbox[data-view=list] > .u-header, #unified-inbox[data-view=search] > .u-header { order: 3; flex: 0 0 auto; height: auto;
+    min-height: 56px; padding: 4px 8px max(4px, env(safe-area-inset-bottom)); }
+  #unified-inbox[data-view=search] > .u-header { border-top: 1px solid var(--line); }
+  /* No "Inbox" word on a phone: just the three controls, at the right in thumb reach. */
+  #unified-inbox[data-view=list] > .u-header h1 { display: none; }
+  #unified-inbox[data-view=list] > .u-header { justify-content: flex-end; }
+  #unified-inbox[data-view=list] > .u-header .u-head-actions { gap: 6px; }
+  #unified-inbox[data-view=list] > .u-header .icon-button { width: 48px; height: 48px; }
+  #unified-inbox[data-view=list] > .u-fab { bottom: calc(124px + env(safe-area-inset-bottom)); right: 16px; }
+  /* Inside Wizard those controls live in the window's title bar (WizardApp.titlebar.set, unified.js syncBar):
+   * the toolbar row goes and the filter chips are the last row, straight on top of the Wizard dock. */
+  html[data-bar-tools] #unified-inbox[data-view=list] > .u-header { display: none; }
+  html[data-bar-tools] #unified-inbox[data-view=list] > #u-filters { padding-bottom: max(6px, env(safe-area-inset-bottom)); }
+  html[data-bar-tools] #unified-inbox[data-view=list] > .u-fab { bottom: calc(68px + env(safe-area-inset-bottom)); }
+  html[data-bar-tools]:not([data-in-chat]) .u-toast { bottom: calc(84px + env(safe-area-inset-bottom)); }
+  #unified-inbox > .error { order: 0; }
+  /* Thread: the header stays on top (the composer owns the bottom), but its targets are full size. */
+  .u-thread-head { padding-top: env(safe-area-inset-top); height: auto; min-height: 56px; }
+  .u-thread-head > .icon-button { width: 48px; height: 48px; }
+  .u-composer { padding-left: 8px; padding-right: 8px; }
+  .u-message { max-width: 86%; }
+  .u-toast { bottom: calc(140px + env(safe-area-inset-bottom)); }
+  /* Sheets fill the width and never run under the top of the window. */
+  .u-sheet { max-width: none; max-height: calc(100% - 12px - env(safe-area-inset-top)); }
+}
+/* iOS zooms into any field under 16px when it is focused, and then the page is stuck zoomed (an unusable phone). */
+@media (hover: none) and (pointer: coarse) {
+  input, textarea, select { font-size: 16px; }
+}
+
+/* ---- Desktop split (Miguel, 31 Oct 2026): the chat list on the left, the open chat on the right, like Chats'
+   session list beside its thread. unified.js sets html[data-split] from Messenger's own window width (640px and
+   up since 16.3, see SPLIT_MIN), never the device; narrower windows keep the one-pane Inbox above unchanged.
+   The window is the page here: no max-width on the frame. Skin tokens only. */
+html[data-split] #messenger { --u-list-w: clamp(320px, 28cqi, 380px); }
+#unified-inbox[data-split] { flex-direction: row; max-width: none; margin: 0; border-left: 0; border-right: 0; }
+#unified-inbox[data-split] > .u-pane { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+#unified-inbox[data-split] > .u-pane-list { flex: 0 0 min(var(--u-list-w, 360px), 60%); border-right: 1px solid var(--line); }
+/* 16.3: the split starts at 640px (SPLIT_MIN). The list keeps 16.25rem (260px) and the chat at least 23.75rem (380px),
+   whatever width was saved on a bigger window. */
+#unified-inbox[data-split] > .u-pane-list { flex-basis: clamp(16.25rem, min(var(--u-list-w, 22.5rem), 60%), max(16.25rem, calc(100% - 23.75rem))); }
+/* The divider (Miguel, 31 Oct 2026: "drag and resize the divider" like Chats): a 6px grab strip over the list's edge,
+   tinted with the accent on hover, focus and while dragging. unified.js divider() saves the width on this device. */
+#unified-inbox[data-split] > .u-pane-split { flex: 0 0 6px; margin: 0 -3px; position: relative; z-index: 2; cursor: col-resize; touch-action: none; }
+#unified-inbox[data-split] > .u-pane-split::after { content: ''; position: absolute; inset: 0 2px; border-radius: 2px; transition: background-color .15s; }
+#unified-inbox[data-split] > .u-pane-split:focus { outline: none; }
+#unified-inbox[data-split] > .u-pane-split:focus-visible::after, .u-splitting #unified-inbox[data-split] > .u-pane-split::after { background: var(--accent); }
+@media (hover: hover) { #unified-inbox[data-split] > .u-pane-split:hover::after { background: var(--accent); } }
+html.u-splitting, html.u-splitting * { cursor: col-resize !important; user-select: none !important; }
+#unified-inbox:not([data-split]) > .u-pane-split { display: none; }
+#unified-inbox[data-split] > .u-pane-thread { flex: 1 1 auto; }
+#unified-inbox[data-split] > .u-pane > .error { margin: 0 18px 8px; flex-shrink: 0; }
+#unified-inbox[data-split] > .u-pane > .error:empty { margin-bottom: 0; }
+/* The list is right there, so the thread header needs no Back. */
+#unified-inbox[data-split] .u-thread-head > .u-back { display: none; }
+#unified-inbox[data-split] .u-thread-head { padding-left: 12px; }
+/* The open chat's row stays highlighted while you read it. */
+#unified-inbox[data-split] .u-person.selected, #unified-inbox[data-split] .u-person.selected:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+#unified-inbox[data-split] .u-person.selected .u-when { color: var(--ink-2); }
+/* A very wide window keeps the conversation at a readable width in the middle of its pane. */
+#unified-inbox[data-split] .u-timeline, #unified-inbox[data-split] .u-composer { padding-left: max(12px, calc((100% - 1000px) / 2)); padding-right: max(12px, calc((100% - 1000px) / 2)); }
+/* Nothing open yet. */
+/* New message on the right when no chat is open (split only): centred, quiet, names only while typing. */
+.u-newmsg { margin: auto; display: flex; flex-direction: column; align-items: stretch; gap: 12px; width: min(420px, 100% - 48px); padding: 24px 0; }
+.u-newmsg h2 { margin: 0 0 4px; text-align: center; font-size: 1.15em; font-weight: 600; color: var(--ink); }
+.u-newmsg-results { display: flex; flex-direction: column; gap: 2px; }
+.u-newmsg-results:empty { display: none; }
+.u-newmsg .u-directory-row { border-radius: 12px; padding: 8px 10px; }
+.u-newmsg .u-directory-row:hover, .u-newmsg .u-directory-row:focus-visible { background: var(--raised); }
+.u-newmsg .u-empty { text-align: center; color: var(--ink-3); margin: 6px 0; }
+.u-newmsg-wizard { align-self: center; color: var(--ink-3); }
+/* A native Wizard thread (app.js #workspace) takes the right side; the list stays on the left. */
+html[data-split][data-private-view] #messenger { flex-direction: row; }
+html[data-split][data-private-view] #unified-inbox { display: flex !important; flex: 0 0 min(var(--u-list-w, 360px), 60%); }
+html[data-split][data-private-view] #unified-inbox { flex-basis: clamp(16.25rem, min(var(--u-list-w, 22.5rem), 60%), max(16.25rem, calc(100% - 23.75rem))); }
+html[data-split][data-private-view] #unified-inbox > .u-pane-list { flex: 1 1 auto; }
+html[data-split][data-private-view] #unified-inbox > .u-pane-thread { display: none; }
+html[data-split][data-private-view] #workspace { order: 2; min-width: 0; }
+html[data-split][data-private-view] #chat-back { display: none !important; }
+
+/* Settings 15.7 (Miguel): flat account icons. Every account is the brand mark on its own (no tile behind it, no card
+   around it), the name under it and, when connected, a small green dot. "Soon" networks are the same, dimmed. */
+.u-settings h3.c-add-title, .u-sheet > h3.u-more-head { text-transform: none; letter-spacing: 0; font-size: 0.875rem; color: var(--ink-2); }
+.c-add-grid { grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 14px 4px; align-items: start; }
+.c-mark.has-icon { background: none; box-shadow: none !important; border-radius: 0; }
+.c-mark.has-icon .brand-icon { width: 100%; height: 100%; }
+.c-mark[data-network=twitter] .brand-icon { fill: var(--ink); transform: scale(.8); }
+.c-tile { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 6px; min-width: 0; min-height: 0; padding: 6px 2px; border: 0; border-radius: 12px; background: none; box-shadow: none; color: var(--ink); font-size: 0.78rem; line-height: 1.2; text-align: center; white-space: normal; }
+@media (hover: hover) { .u-sheet .c-tile:not(:disabled):hover { background: color-mix(in srgb, var(--ink) 6%, transparent); } }
+.c-tile-icon { position: relative; display: inline-flex; }
+.c-tile .c-mark { flex: 0 0 40px; width: 40px; height: 40px; border-radius: 11px; font-size: 1rem; }
+.c-tile .c-mark.has-icon { border-radius: 0; }
+.c-tile-name { max-width: 100%; overflow-wrap: anywhere; }
+.c-tile-sub { max-width: 100%; margin-top: -4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); font-size: 0.7rem; }
+/* The dot's ring is painted with the sheet's own layers, so it matches the background in every skin. */
+.c-tile-dot { position: absolute; right: -4px; bottom: -4px; width: 15px; height: 15px; border-radius: 50%; background: linear-gradient(var(--surface), var(--surface)), var(--sheet-solid); }
+.c-tile-dot::after { content: ""; position: absolute; inset: 2.5px; border-radius: 50%; background: var(--ok); }
+.c-tile.busy { opacity: .6; cursor: progress; }
+.c-tile.c-soon:disabled { opacity: .45; cursor: default; }
+/* The plus at the end of Your accounts: one quiet circle; it turns into a close mark while Add an account is open. */
+.c-plus .c-plus-mark { position: relative; border-radius: 50%; background: color-mix(in srgb, var(--ink) 9%, transparent); color: var(--ink-2); transition: transform 160ms; }
+.c-plus .c-plus-mark::before, .c-plus .c-plus-mark::after { content: ""; position: absolute; left: 50%; top: 50%; width: 16px; height: 2px; margin: -1px 0 0 -8px; border-radius: 1px; background: currentColor; }
+.c-plus .c-plus-mark::after { transform: rotate(90deg); }
+.c-plus[aria-expanded=true] .c-plus-mark { transform: rotate(45deg); }
+.c-plus .c-tile-name { color: var(--ink-2); }
+.c-add-panel[hidden] { display: none; }
+/* Agent access: the agent's name and its picker on one line. */
+.u-more-agents > .u-more-agent { display: flex; align-items: center; gap: 12px; padding: 4px 14px; }
+.u-more-agents > .u-more-agent .u-agent-name { flex: 1; }
+.u-settings-group.u-more-other { margin-top: 10px; }
+.u-sheet > h3.u-more-head[hidden], .u-settings-group.u-more[hidden] { display: none; }
+.c-manage-who { margin: 2px 0 4px; }
+.u-settings .c-back { display: block; margin: 10px auto 0; }
+/* My QR codes: the Wizard Messenger address under the code, with Copy. */
+.u-myqr-address { display: flex; align-items: center; gap: 12px; width: 100%; max-width: 340px; margin: 12px auto 0; padding-top: 12px; border-top: 1px solid var(--line); text-align: left; }
+.u-myqr-address[hidden] { display: none; }
+.u-myqr-address-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.u-myqr-address-text small { color: var(--ink-3); font-size: 0.8125rem; }
+.u-myqr-address-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: 0.875rem; }
+.u-myqr-actions + .u-myqr-address { margin-top: 14px; }
+.u-myqr-card:has(.u-myqr-address:not([hidden])) .u-myqr { width: min(100%, 300px, max(150px, calc(92dvh - 360px))); }
+/* One-phone linking (James, 28 Oct 2026): same-phone routes first, big copyable code. */
+.u-connectors-title { margin: 4px 0 2px; }
+a.u-connector-open { display: flex; align-items: center; justify-content: center; border-radius: 22px; text-decoration: none; }
+.u-connector-code { font: 600 1.875rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-align: center; margin: 14px 0 4px; padding: 14px 8px; border-radius: 14px; background: var(--raised-2); user-select: all; -webkit-user-select: all; overflow-wrap: anywhere; }
+.u-connector-copied { text-align: center; min-height: 18px; margin: 0; }
+.u-connector-other { margin-top: 14px; }
+.u-connector-other summary { min-height: 44px; display: flex; align-items: center; color: var(--ink-2); cursor: pointer; }
+
+/* ---- List and detail (Miguel, 31 Oct 2026): "whenever there's a list and I click something it opens beside it, and I
+   can always close it and go back to the list". With nothing open the chat list fills the window; a chat or New
+   message opens on the right; ✕, Back or Escape close it (unified.js closeDetail/closePane). */
+#unified-inbox[data-split][data-detail=none] > .u-pane-list { flex: 1 1 auto; border-right: 0; }
+#unified-inbox[data-split][data-detail=none] > .u-pane-split, #unified-inbox[data-split][data-detail=none] > .u-pane-thread { display: none; }
+.u-pane-thread > .u-newmsg-close { position: absolute; top: 10px; right: 10px; z-index: 2; }
+/* Narrow windows: the chat slides in over the list. */
+@keyframes u-slide-in { from { transform: translateX(32px); opacity: .35; } to { transform: none; opacity: 1; } }
+#unified-inbox.u-enter { animation: u-slide-in .18s ease-out; }
+@media (prefers-reduced-motion: reduce) { #unified-inbox.u-enter { animation: none; } }
+/* Compact list (default; Settings > Message previews brings the last line back): one line per chat with a small
+   picture, the name, a one-word state, the time and the unread count, like Chats' session list. */
+.u-compact .u-person { min-height: 52px; padding-top: 7px; padding-bottom: 7px; gap: 12px; }
+.u-compact .u-chat-top { align-items: center; gap: 8px; }
+.u-compact .u-chat-top strong { flex: 1 1 auto; min-width: 0; font-size: 0.97em; }
+.u-compact .u-chat-top .u-when { flex: none; }
+.u-compact .u-chat-top .u-badge { flex: none; }
+.u-state { flex: none; font-size: 0.8em; color: var(--ink-3); }
+.u-state.draft { color: var(--link); }
+.u-state.typing { color: var(--link); font-style: italic; }
+  background: color-mix(in srgb, var(--ink) 22%, transparent); transition: background-color .15s; }
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--ink) 30%, transparent); transition: transform .15s; }
+/* Full screen in Wizard: the shell's "Exit full screen" pill sits over the top-right corner, where the Inbox tools and the
+   chat's ✕ live, so the headers drop below it. */
+html[data-presentation="immersive"] #unified-inbox .u-header, html[data-presentation="immersive"] .u-pane-thread > .u-newmsg-close { margin-top: 40px; }
+
+/* ---- Inbox filters in two rows (Miguel, 2 Nov 2026: "no scrolling sideways"). Row 1 is one segmented control
+   (All, Unread, Medium, Low; equal widths), row 2 one icon per network plus Filters on the right. Networks that do
+   not fit fold into "+N" (unified.js fitNets), so neither row ever scrolls. Skin tokens only. ---- */
+#u-filters.u-filter-rows { display: flex; flex-direction: column; align-items: stretch; gap: .375rem; overflow: visible; -webkit-mask-image: none; mask-image: none; }
+.u-seg { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .125rem; padding: .1875rem; border-radius: .75rem; background: var(--raised); }
+.u-seg .u-seg-btn { display: inline-flex; align-items: center; justify-content: center; gap: .3125rem; min-width: 0; min-height: 2rem; padding: 0 .375rem; border: 0; border-radius: .5625rem; background: transparent; color: var(--ink-2); font-size: .8125rem; font-weight: 500; box-shadow: none; transition: background-color 120ms, color 120ms; }
+.u-seg .u-seg-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.u-seg .u-seg-count { color: var(--ink-3); font-size: .75rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.u-seg .u-seg-count[hidden] { display: none; }
+@media (hover: hover) { .u-seg .u-seg-btn:not(:disabled):hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); } }
+.u-seg .u-seg-btn[aria-checked=true], .u-seg .u-seg-btn[aria-checked=true]:not(:disabled):hover { background: var(--chip-on); color: var(--chip-on-ink); }
+.u-seg .u-seg-btn[aria-checked=true] .u-seg-count { color: inherit; opacity: .8; }
+/* 16.3: in the desktop split the list pane can be 16.25rem narrow. Segments stay equal while they fit; a label with a
+   count ("Medium 1") keeps its full width instead of being cut, and the others give up the room. Phones unchanged. */
+#unified-inbox[data-split] .u-seg { grid-template-columns: repeat(4, minmax(min-content, 1fr)); }
+#unified-inbox[data-split] .u-seg .u-seg-btn { gap: .25rem; padding: 0 .3125rem; }
+.u-netrow { display: flex; align-items: center; gap: .375rem; min-width: 0; }
+.u-nets { display: flex; align-items: center; gap: .375rem; min-width: 0; overflow: hidden; }
+.u-netrow .u-chip[hidden] { display: none; }
+.u-netrow .u-chip.net { flex: 0 0 auto; width: 2.25rem; min-width: 2.25rem; height: 2.25rem; min-height: 2.25rem; padding: 0; justify-content: center; gap: 0; }
+.u-netrow .u-more-nets { color: var(--ink-2); font-size: .75rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.u-netrow .u-filter-btn { flex: 0 0 auto; gap: .375rem; margin-left: auto; height: 2.25rem; min-height: 2.25rem; padding: 0 .875rem; font-size: .8125rem; }
+.u-filter-dot { display: none; width: .375rem; height: .375rem; border-radius: 50%; background: var(--accent); }
+.u-filter-btn.on { color: var(--ink); }
+.u-filter-btn.on .u-filter-dot { display: inline-block; }
+.u-menu-head { padding: .625rem 1.125rem .25rem; color: var(--ink-3); font-size: .75rem; font-weight: 600; letter-spacing: 0; text-transform: none; }
+.u-menu-head:first-child { padding-top: .25rem; }
+.u-filter-menu .u-actions { max-height: min(70vh, 32rem); overflow-y: auto; }
+.u-menu.u-filter-menu.at { width: max-content; min-width: 13.75rem; max-width: calc(100% - 1.5rem); }
+.u-filter-menu .u-actions { min-width: 13.75rem; }
+.u-filter-menu .u-act { min-height: 2.5rem; font-size: .875rem; }
+.u-act.checked { font-weight: 600; }
+.u-act.checked svg { color: var(--accent); }
+@container messenger (max-width: 599px) {
+  #unified-inbox[data-view=list] > #u-filters.u-filter-rows { gap: .375rem; padding-top: .5rem; }
+  #unified-inbox[data-view=list] > .u-fab { bottom: calc(10.5rem + env(safe-area-inset-bottom)); }
+  html[data-bar-tools] #unified-inbox[data-view=list] > .u-fab { bottom: calc(7rem + env(safe-area-inset-bottom)); }
+  html:not([data-in-chat]) .u-toast { bottom: calc(10.75rem + env(safe-area-inset-bottom)); }
+  html[data-bar-tools]:not([data-in-chat]) .u-toast { bottom: calc(7.75rem + env(safe-area-inset-bottom)); }
+}
+/* 16.14 friendliness pass (Miguel: "extremely friendly, easy to use, intuitive, and also mobile friendly").
+   Touch: every Inbox filter control is a full 44px target (segments, network icons, +N, Filters, filter menu rows).
+   The rows grow by 1.25rem together, so the compose button and toasts move up by the same amount. Mouse unchanged. */
+@media (pointer: coarse) {
+  .u-seg .u-seg-btn { min-height: 2.75rem; }
+  .u-netrow, .u-nets { gap: .25rem; }
+  .u-netrow .u-chip.net { width: 2.75rem; min-width: 2.75rem; height: 2.75rem; min-height: 2.75rem; }
+  .u-netrow .u-filter-btn { height: 2.75rem; min-height: 2.75rem; padding: 0 .75rem; }
+  .u-filter-menu .u-act { min-height: 2.75rem; }
+}
+@container messenger (max-width: 599px) {
+  @media (pointer: coarse) {
+    #unified-inbox[data-view=list] > .u-fab { bottom: calc(11.75rem + env(safe-area-inset-bottom)); }
+    html[data-bar-tools] #unified-inbox[data-view=list] > .u-fab { bottom: calc(8.25rem + env(safe-area-inset-bottom)); }
+    html:not([data-in-chat]) .u-toast { bottom: calc(12rem + env(safe-area-inset-bottom)); }
+    html[data-bar-tools]:not([data-in-chat]) .u-toast { bottom: calc(9rem + env(safe-area-inset-bottom)); }
+  }
+}
+/* Empty folders say what they are for and how to fill them; a filter that hides everything offers one-tap Clear. */
+.u-empty .u-empty-hint { margin: -.5rem 0 0; font-size: .875rem; line-height: 1.45; color: var(--ink-3); }
+.u-empty .u-empty-clear { min-height: 2.75rem; padding: 0 1.25rem; }
+/* Settings → Agent access: the picker is as wide as the chosen level (where supported), so the agent's name stays
+   on one line instead of wrapping word by word next to the widest option ("Draft-only (recommended)"). */
+.u-more-agents > .u-more-agent .u-agent-name { min-width: 0; text-wrap: balance; }
+.u-more-agents > .u-more-agent .u-more-level { field-sizing: content; flex: 0 1 auto; min-width: 0; }
+/* Amber text on a light sheet was hard to read: keep the warning hue, darkened toward the ink (lightened on dark). */
+.u-more-note.warn { color: color-mix(in srgb, var(--warn) 45%, var(--ink)); }
+/* 16.15 keyboard (Wizard app-key contract): j/k/r and a spare / are real buttons with a box, so the shared client
+   (and the fallback in unified.js) can click them, but they take no space and draw nothing. */
+.u-keys { position: absolute; inset-block-start: 0; inset-inline-start: 0; inline-size: 0.0625rem; block-size: 0.0625rem; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.u-keys .u-key { all: unset; display: inline-block; inline-size: 0.0625rem; block-size: 0.0625rem; overflow: hidden; }
+
+/* Incoming media and text details (16.16): GIFs, animated stickers, mentions, media a bridge could not deliver. */
+.u-media.gif video, .u-media.sticker video { opacity: 1; }
+.u-media.sticker video { object-fit: contain; background: transparent; }
+.u-gif-tag { position: absolute; left: 0.5rem; top: 0.5rem; padding: 0.0625rem 0.375rem; border-radius: 0.375rem; font-size: 0.6875rem; font-weight: 700; letter-spacing: 0.04em; line-height: 1.4; background: var(--accent); color: var(--on-accent); pointer-events: none; }
+.u-row .u-message.sticker-only { background: transparent; box-shadow: none; padding: 0; }
+.u-message.sticker-only .u-media { background: transparent; }
+.u-unavailable { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.4rem; color: var(--ink-3); font-style: italic; }
+.u-unavailable small { font-size: 0.8125rem; }
+.u-message.outgoing .u-unavailable { color: inherit; opacity: 0.8; }
+.u-mention { padding: 0 0.2em; border-radius: 0.35em; font-weight: 600; -webkit-box-decoration-break: clone; box-decoration-break: clone; color: var(--link); background: var(--accent-soft); }
+.u-mention.me { color: var(--on-accent); background: var(--accent); }
+.u-message.outgoing .u-mention { color: inherit; background: color-mix(in srgb, currentColor 18%, transparent); }
+.u-message.outgoing .u-mention.me { background: color-mix(in srgb, currentColor 30%, transparent); }
+.u-text code { padding: 0 0.25em; border-radius: 0.3em; font-family: var(--wz-font-mono, monospace); font-size: 0.9em; background: color-mix(in srgb, currentColor 12%, transparent); }
+.u-text .u-code-block { display: block; margin: 0.2em 0; padding: 0.4em 0.5em; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Emoji / GIFs / Stickers (Miguel, 5 Nov 2026): one smiley in the message box opens a tabbed panel above it. */
+.u-field { position: relative; }
+.u-field textarea { padding-right: 46px; }
+.u-pick-btn { position: absolute; right: 2px; bottom: 0; width: 44px; height: 44px; min-width: 0; min-height: 0; border-radius: 50%; color: var(--ink-3); background: none; }
+.u-pick-btn:hover, .u-pick-btn.on { color: var(--accent); }
+.u-pick-btn svg { width: 24px; height: 24px; }
+.u-picker { display: flex; flex-direction: column; height: min(44vh, 360px); min-height: 220px; border-radius: 18px; overflow: hidden; background: linear-gradient(var(--panel-tint), var(--panel-tint)) var(--panel-solid); color: var(--ink); border: 1px solid var(--line); }
+.u-picker[hidden] { display: none; }
+.u-pick-tabs { display: flex; gap: 4px; padding: 6px 8px 0; flex-shrink: 0; }
+.u-pick-tab { flex: 0 0 auto; min-height: 36px; padding: 0 14px; border-radius: 18px; background: none; color: var(--ink-2); font-weight: 600; font-size: 0.875rem; }
+.u-pick-tab.on { background: var(--accent-soft); color: var(--ink); }
+.u-pick-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 8px 8px; }
+.u-pick-search { width: 100%; box-sizing: border-box; min-height: 38px; margin: 4px 0 6px; padding: 8px 14px; border-radius: 19px; border: 0; background: var(--raised); color: var(--ink); }
+.u-pick-head { margin: 8px 4px 4px; font-size: 0.75rem; font-weight: 600; color: var(--ink-3); }
+.u-emo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); gap: 2px; }
+.u-emo { width: 100%; height: 42px; min-width: 0; min-height: 0; padding: 0; border-radius: 10px; font-size: 1.625rem; line-height: 1; background: none; }
+.u-emo:hover, .u-emo:focus-visible, .u-pick-tile:hover, .u-pick-tile:focus-visible { background: var(--raised); }
+.u-pick-empty { margin: 18px 8px; text-align: center; color: var(--ink-3); font-size: 0.875rem; }
+.u-pick-retry, .u-pick-more { display: block; margin: 0 auto 8px; }
+.u-gif-grid { columns: 3 110px; column-gap: 4px; }
+.u-pick-tile { position: relative; display: block; width: 100%; min-width: 0; min-height: 0; padding: 0; margin: 0 0 4px; border-radius: 10px; overflow: hidden; background: var(--raised); break-inside: avoid; }
+.u-pick-tile img, .u-pick-tile video { display: block; width: 100%; height: 100%; object-fit: cover; }
+.u-pick-tile video { position: absolute; inset: 0; opacity: 0; }
+.u-pick-tile.live video { opacity: 1; }
+.u-pick-tile.gif:not([style]) { aspect-ratio: 4 / 3; }
+.u-pick-alt { display: grid; place-items: center; width: 100%; height: 100%; min-height: 64px; font-size: 1.75rem; color: var(--ink-3); }
+.u-pack-row { display: flex; gap: 6px; overflow-x: auto; padding: 4px 0 6px; scrollbar-width: none; }
+.u-pack { flex: 0 0 auto; max-width: 160px; min-height: 32px; padding: 0 12px; border-radius: 16px; background: var(--raised); color: var(--ink-2); font-size: 0.8125rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.u-pack.on { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
+.u-sticker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 4px; }
+.u-pick-tile.sticker { aspect-ratio: 1; margin: 0; background: none; }
+.u-pick-tile.sticker img { object-fit: contain; }
+@media (max-width: 600px) {
+  .u-picker { height: min(42vh, 340px); border-radius: 16px; }
+  .u-emo-grid { grid-template-columns: repeat(auto-fill, minmax(38px, 1fr)); }
+  .u-sticker-grid { grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); }
+}
+/* "N new messages": where to start reading in a chat opened with unread messages. Calm hairlines in the accent,
+   the label on the panel's own solid layers so it stays readable over photo skins. */
+.u-unread-divider { display: flex; align-items: center; gap: .75rem; margin: 1rem 0 .375rem; overflow-anchor: none; }
+.u-unread-divider::before, .u-unread-divider::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--accent) 45%, transparent); }
+.u-unread-divider span { font-size: .75rem; font-weight: 600; letter-spacing: .01em; color: var(--link); padding: .25rem .75rem; border-radius: 1rem; background: linear-gradient(color-mix(in srgb, var(--accent) 12%, transparent), color-mix(in srgb, var(--accent) 12%, transparent)) var(--panel-solid); }
+/* Labels (your own groups of chats): checkbox rows, a New label box, Manage labels. Sheets stay opaque; Appearance v1 tokens only. */
+.u-labels-help { margin: 0 0 8px; }
+.u-labels-chat { margin: 0 0 6px; font-weight: 600; color: var(--wz-text, var(--ink)); }
+.u-label-list { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 10px; }
+.u-label-row { display: flex; align-items: center; gap: 14px; width: 100%; min-height: 48px; padding: 0 14px; border-radius: 14px; background: var(--wz-surface-raised, var(--raised)); color: var(--wz-text, var(--ink)); font-size: 15px; text-align: left; justify-content: flex-start; }
+.u-label-row.on { box-shadow: inset 0 0 0 2px var(--wz-accent, var(--accent)); }
+.u-label-row .u-check { flex: 0 0 24px; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: 7px; box-shadow: inset 0 0 0 2px var(--wz-border, var(--line-2)); color: var(--wz-on-accent, var(--on-accent)); }
+.u-label-row.on .u-check { background: var(--wz-accent, var(--accent)); box-shadow: none; }
+.u-label-row .u-check svg { width: 16px; height: 16px; }
+.u-label-name { min-width: 0; overflow-wrap: anywhere; }
+.u-label-new { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; }
+.u-label-new input { flex: 1; min-width: 0; min-height: 44px; }
+.u-label-new button { min-height: 44px; min-width: 64px; flex: 0 0 auto; }
+.u-label-manage { display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 4px 8px 4px 14px; border-radius: 14px; background: var(--wz-surface-raised, var(--raised)); color: var(--wz-text, var(--ink)); }
+.u-label-manage > .u-label-name { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.u-label-manage small { color: var(--wz-text-muted, var(--ink-3)); font-size: 12px; }
+.u-label-manage .u-label-new { flex: 1; margin: 0; }
+.u-label-act { min-height: 44px; min-width: 44px; padding: 0 12px; flex: 0 0 auto; }
+.u-label-act.danger { color: var(--wz-danger, #ff8a8a); }
+.u-chip.manage { font-style: normal; }
+.u-empty .helper { max-width: 320px; margin: 6px auto 12px; }
+/* Menu rows (Filters > Labels, chat Labels) are full 44px tap targets. */
+.u-menu .u-act { min-height: 44px; }
+
+/* Catch me up (6 Nov 2026): opaque sheet, --wz-* tokens with the standalone fallbacks, 44px+ targets. */
+.u-catchup-btn svg { stroke: currentColor; }
+.u-unread-catchup { display: flex; justify-content: center; margin: -.125rem 0 .5rem; overflow-anchor: none; }
+.u-unread-catchup-btn { min-height: 44px; padding: 0 18px; font-size: .8125rem; font-weight: 600; color: var(--wz-accent, var(--accent)); border: 1px solid color-mix(in srgb, var(--wz-accent, var(--accent)) 55%, transparent); border-radius: 22px; background: var(--wz-surface, var(--panel-solid)); }
+.u-catchup .u-cu-lead { font-size: .9375rem; line-height: 1.5; margin: 6px 0; color: var(--wz-text, var(--ink)); }
+.u-catchup .wide { width: 100%; margin-top: 10px; }
+.u-catchup .u-cu-choice, .u-catchup .u-cu-refresh, .u-cu-info .wide:not(.danger), .u-cu-info .danger { border: 1px solid var(--wz-border, var(--line)); color: var(--wz-text, var(--ink)); }
+.u-cu-info .danger { color: var(--err); }
+.u-cu-basis { margin: 4px 0 10px; font-size: .8125rem; color: var(--wz-text-muted, var(--ink-3)); }
+.u-cu-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.u-cu-bullet { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; min-height: 44px; padding: 11px 14px; border-radius: 14px; text-align: left; line-height: 1.4;
+  color: var(--wz-text, var(--ink)); background: color-mix(in srgb, var(--wz-text, var(--ink)) 8%, var(--panel-solid)); border: 1px solid var(--wz-border, var(--line)); }
+.u-cu-bullet.for_you { border-color: var(--wz-accent, var(--accent)); }
+.u-cu-bullet.plain { cursor: default; }
+.u-cu-kind { font-size: .6875rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--wz-accent, var(--accent)); }
+.u-cu-text { font-size: .9375rem; overflow-wrap: anywhere; }
+.u-cu-foot { margin: 14px 0 2px; font-size: .8125rem; font-weight: 600; color: var(--wz-text-secondary, var(--ink-2)); }
+.u-cu-running { font-size: .9375rem; margin: 10px 0 4px; }
+.u-cu-bar { height: 4px; border-radius: 2px; margin: 12px 0; background: linear-gradient(90deg, transparent, var(--wz-accent, var(--accent)), transparent) 0 0 / 40% 100% no-repeat, color-mix(in srgb, var(--wz-text, var(--ink)) 12%, var(--panel-solid)); animation: u-cu-slide 1.4s ease-in-out infinite; }
+@keyframes u-cu-slide { from { background-position: -40% 0, 0 0; } to { background-position: 140% 0, 0 0; } }
+@media (prefers-reduced-motion: reduce) { .u-cu-bar { animation: none; } }
+.u-cu-grant { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px; }
+.u-cu-off { border: 1px solid var(--wz-border, var(--line)); }
+
+/* Inbox view (Settings): a two-way choice, Chats (default) or Compact; 44px tap targets, theme tokens only. */
+.u-more-view { justify-content: space-between; flex-wrap: wrap; }
+.u-more-view .u-more-label { flex: 1 1 8rem; min-width: 0; }
+.u-view-choice { display: inline-grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 3px; border-radius: 12px; background: var(--raised); flex: 0 1 15rem; }
+.u-view-btn { min-height: 44px; min-width: 44px; padding: 0 14px; border: 0; border-radius: 10px; background: transparent; color: var(--ink-2, var(--ink)); font: inherit; font-weight: 600; cursor: pointer; }
+.u-view-btn.on { background: var(--accent); color: var(--on-accent); }
+.u-view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

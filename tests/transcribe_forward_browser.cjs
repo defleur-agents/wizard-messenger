@@ -9,7 +9,7 @@ const assert = require('node:assert/strict');
   const ev = process.env.EVIDENCE_DIR || './evidence'; fs.mkdirSync(ev, {recursive: true});
   const transcript = 'Miguel says: Let us think through the next step together. ' + 'This longer transcript wraps safely inside the voice-note bubble. '.repeat(3).trim();
   let transcribes = 0; const shares = [], inputs = []; let receipt = 'sent';
-  const browser = await chromium.launch({headless: true});
+  const browser = await chromium.launch({headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE});
   const ctx = await browser.newContext({viewport: {width: 390, height: 844}, deviceScaleFactor: 2, colorScheme: 'dark', ignoreHTTPSErrors: true, hasTouch: true, isMobile: true, timezoneId: 'UTC'});
   await ctx.exposeBinding('__transcribe', (_, data) => { transcribes++; inputs.push(data); return {text: transcript}; });
   await ctx.exposeBinding('__share', (_, data) => { shares.push(data); return receipt; });
@@ -41,11 +41,14 @@ s.add_message('$v2',a,'You',True,'',1792869960000,msgtype='m.audio',media={'voic
   page.on('close', () => {});
   const ticket = JSON.parse(execFileSync('curl', ['-sf','-X','POST','-H','Authorization: Bearer ' + process.env.MESSENGER_API_TOKEN,'-H','Content-Type: application/json','-d','{"bootstrap":true}','http://127.0.0.1:19252/api/view/ticket'])).result.ticket;
   await page.goto(base + '#ticket=' + ticket); await page.waitForTimeout(2000);
+  await page.locator('#setup-form:visible, #inbox-tabs:visible').first().waitFor({timeout: 60000});
   if (!(await page.locator('#setup-form').isVisible())) await page.click('#inbox-tabs [data-tab="messenger"]');
   await page.locator('#confirm-passphrase').waitFor({state: 'visible', timeout: 30000});
   const pw = 'preview-only-passphrase-' + Date.now(); await page.fill('#passphrase', pw); await page.fill('#confirm-passphrase', pw); await page.click('#setup-submit');
   await page.locator('#inbox-tabs').waitFor({state: 'visible', timeout: 60000});
-  if (await page.locator('#sheet-layer:not([hidden])').count()) await page.click('#close-sheet');
+  // Address sheet opens after the asynchronous post-create snapshot, not at first ready paint.
+  await page.locator('#sheet-layer:not([hidden])').waitFor({state: 'visible', timeout: 30000});
+  await page.click('#close-sheet');
   await page.click('#inbox-tabs [data-tab="people"]');
   await page.locator('.u-person', {hasText: 'Miguel'}).click();
   const note = page.locator('.u-row').filter({has: page.locator('.u-voice')}).first();
@@ -68,10 +71,34 @@ s.add_message('$v2',a,'You',True,'',1792869960000,msgtype='m.audio',media={'voic
   assert.equal(await page.getByRole('menuitem', {name:'Select',exact:true}).count(),0);
   await page.getByRole('menuitem', {name:'Forward to Wizard',exact:true}).waitFor();
   await page.screenshot({path:ev+'/tap-menu-dark.png'});
-  await page.evaluate(() => window.__backHandler.back());
+  { const vp = page.viewportSize(); await page.touchscreen.tap(Math.round(vp.width/2), 90); }
+  await page.waitForTimeout(150);
+  assert.equal(await page.getByRole('menu').count(), 0, 'tapping outside the menu closes it without Back');
+  assert.equal(await page.locator('.u-selection:not([hidden])').count(), 0, 'outside tap is consumed, nothing beneath reacts');
+  // Beside the box (the panel's empty width) also closes; the emoji ＋ keeps the menu open on the full grid.
+  await page.locator('.u-message').first().tap({position:{x:12,y:12}});
+  { const box = await page.locator('.u-actions').boundingBox(); await page.touchscreen.tap(Math.round(box.x + box.width + 24), Math.round(box.y + box.height / 2)); }
+  await page.waitForTimeout(150);
+  assert.equal(await page.getByRole('menu').count(), 0, 'tapping right of the menu box closes it');
+  await page.locator('.u-message').first().tap({position:{x:12,y:12}});
+  await page.locator('.u-qr-btn.more').tap(); await page.waitForTimeout(150);
+  assert.equal(await page.locator('.u-grid').count(), 1, 'emoji ＋ opens the full grid and keeps the menu open');
+  await page.screenshot({path:ev+'/emoji-grid-dark.png'});
+  await page.touchscreen.tap(Math.round(page.viewportSize().width/2), 90); await page.waitForTimeout(150);
+  assert.equal(await page.getByRole('menu').count(), 0);
   await page.locator('.u-vplay').first().tap();
   assert.equal(await page.getByRole('menu').count(),0,'play is not a menu gesture');
   await page.locator('.u-vplay').first().tap();
+  const vpFull = page.viewportSize(); await page.setViewportSize({width: vpFull.width, height: 380}); await page.waitForTimeout(300);
+  const target = page.locator('.u-message').nth(1); await target.evaluate(el => el.scrollIntoView({block: 'center'})); await page.waitForTimeout(200);
+  const overflow = await page.evaluate(() => { const s = document.querySelector('.u-scroll,#u-scroll,.u-thread-scroll') || [...document.querySelectorAll('*')].find(n => ['auto','scroll'].includes(getComputedStyle(n).overflowY) && n.querySelector('.u-row')); return s ? s.scrollHeight - s.clientHeight : -1; });
+  const y0 = (await target.boundingBox()).y;
+  await press(target);
+  const y1 = (await target.boundingBox()).y;
+  console.log('anchor', {overflow, y0, y1});
+  assert.ok(overflow > 0, 'thread scrolls in the anchor check'); assert.ok(Math.abs(y1 - y0) < 4, 'long-press selection keeps the pressed message in place (' + y0 + ' -> ' + y1 + ')');
+  await page.setViewportSize(vpFull); await page.waitForTimeout(300);
+  await page.getByRole('button', {name: 'Cancel', exact: true}).click(); await page.locator('.u-selection').waitFor({state: 'hidden'});
   await press(page.locator('.u-message').first());
   assert.equal(await page.evaluate(() => window.getSelection().toString()),'','initial touch hold never highlights text');
   assert.equal(await page.getByRole('menu').count(),0);
@@ -80,6 +107,13 @@ s.add_message('$v2',a,'You',True,'',1792869960000,msgtype='m.audio',media={'voic
   await page.locator('.u-message', {hasText: 'What do you think'}).tap();
   assert.equal(await page.locator('.u-selection strong').textContent(), '2 selected');
   assert.equal(await page.locator('.u-row.u-selected').count(), 2);
+  // Unselecting everything leaves selection, like Cancel; then select both again for the rest of the proof.
+  await page.locator('.u-message', {hasText: 'What do you think'}).tap();
+  await page.locator('.u-row.u-selected .u-message').first().tap();
+  await page.locator('.u-selection').waitFor({state: 'hidden'});
+  assert.equal(await page.locator('.u-row.u-selecting').count(), 0, 'no selected messages = selection over');
+  await press(page.locator('.u-message').first()); await page.locator('.u-message', {hasText: 'What do you think'}).tap();
+  assert.equal(await page.locator('.u-selection strong').textContent(), '2 selected');
   // The next long-press is native: selectstart and contextmenu are no longer cancelled.
   await press(page.locator('.u-message', {hasText:'What do you think'}));
   const nativeSelection = await page.locator('.u-message', {hasText:'What do you think'}).evaluate(el => {

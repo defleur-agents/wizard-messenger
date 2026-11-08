@@ -5,13 +5,118 @@
     if (state.overlay) return {...state, overlay: null, handled: true};
     if (state.person) return {...state, person: null, handled: true};
     if (state.search != null) return {...state, search: null, handled: true};
+    if (state.low || state.seg === 'medium') return {...state, low: false, seg: 'all', handled: true}; // Low/Medium folder → All
     return {...state, handled: false}; // Shared WizardApp owns the root guard.
   }
-  if (typeof module !== 'undefined') module.exports = {backState};
+  async function fetchOlder(t, id, call) {
+    if (!t.has_more || !t.next_cursor) return false;
+    const r = await call('people/' + encodeURIComponent(id) + '?limit=60&cursor=' + encodeURIComponent(t.next_cursor));
+    const known = new Set(t.messages.map(m => m.id));
+    t.messages = [...r.messages.filter(m => !known.has(m.id)), ...t.messages];
+    t.has_more = r.has_more; t.next_cursor = r.next_cursor;
+    return true;
+  }
+  async function notificationSettings(sheet, api, env = window) {
+    const box = env.document.createElement('section'); sheet.append(box);
+    try {
+      const config = await api('api/view/push');
+      if (!config.enabled) return;
+      const button = env.document.createElement('button'); button.type = 'button';
+      const status = env.document.createElement('p'); status.setAttribute('role', 'status');
+      button.textContent = 'Enable notifications'; box.append(button, status);
+      if (!env.isSecureContext || !env.Notification || !env.navigator.serviceWorker || !env.PushManager) {
+        button.disabled = true; status.textContent = 'Notifications require a supported secure browser.'; return;
+      }
+      let subscription, identifier;
+      button.onclick = async () => {
+        button.disabled = true;
+        try {
+          if (identifier) {
+            await api('api/view/push/unsubscribe', {method: 'POST', body: {id: identifier}});
+            if (!await subscription.unsubscribe()) throw new Error('Browser subscription removal incomplete.');
+            identifier = null; button.textContent = 'Enable notifications'; status.textContent = 'Notifications disabled.';
+            return;
+          }
+          // Permission is requested synchronously from this explicit click, not on mount.
+          const permission = await env.Notification.requestPermission();
+          if (permission !== 'granted') throw new Error('Notification permission was not granted.');
+          const scope = new URL(config.scope, env.location.origin).href;
+          const existing = await env.navigator.serviceWorker.getRegistration(scope);
+          const script = new URL(config.worker, env.location.origin).href;
+          if (existing && (existing.scope !== scope || [existing.active, existing.waiting, existing.installing].filter(Boolean).some(w => w.scriptURL !== script)))
+            throw new Error('Another service worker owns this app scope.');
+          const registration = existing || await env.navigator.serviceWorker.register(script, {scope, updateViaCache: 'none'});
+          if (!registration.active) await new Promise((resolve, reject) => {
+            const worker = registration.installing || registration.waiting;
+            if (!worker) return reject(new Error('Notification worker unavailable.'));
+            worker.addEventListener('statechange', () => { if (worker.state === 'activated') resolve(); else if (worker.state === 'redundant') reject(new Error('Notification worker failed.')); });
+          });
+          const key = env.atob(config.public_key.replace(/-/g, '+').replace(/_/g, '/'));
+          subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: Uint8Array.from(key, c => c.charCodeAt(0))});
+          const result = await api('api/view/push/subscribe', {method: 'POST', body: subscription.toJSON()});
+          identifier = result.id; button.textContent = 'Disable notifications'; status.textContent = 'Notifications enabled for this browser. Real-device delivery still needs verification.';
+        } catch (e) { status.textContent = e.message || 'Notification setup failed.'; }
+        finally { button.disabled = false; }
+      };
+    } catch (_) { box.textContent = 'Notification settings unavailable.'; }
+  }
+  function mentionQuery(text, caret = text.length) {
+    const match = /(?:^|[\s(])@([^@\n]{0,80})$/u.exec(text.slice(0, caret));
+    return match ? {start: caret - match[1].length - 1, end: caret, query: match[1].toLocaleLowerCase()} : null;
+  }
+  function parseMentions(text, members) {
+    const spans = [], occupied = new Set();
+    const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const member of [...members].sort((a,b) => b.label.length - a.label.length)) {
+      const re = new RegExp('(?<![\\p{L}\\p{N}_@])' + escape('@' + member.label) + '(?![\\p{L}\\p{N}_])', 'gu');
+      for (const match of text.matchAll(re)) {
+        const start = match.index, end = start + match[0].length;
+        if (Array.from({length:end-start}, (_,i) => start+i).some(i => occupied.has(i))) continue;
+        for (let i=start;i<end;i++) occupied.add(i);
+        spans.push({id:member.id, name:member.name, start, end});
+      }
+    }
+    return spans.sort((a,b) => a.start-b.start);
+  }
+  function insertMention(text, query, member) {
+    const token = '@' + member.label + ' ';
+    return {text:text.slice(0, query.start) + token + text.slice(query.end), caret:query.start + token.length};
+  }
+  function mentionKey(key, index, count) {
+    if (!count) return {index, handled:false};
+    if (key === 'ArrowDown' || key === 'ArrowUp') return {index:(index + (key === 'ArrowDown' ? 1 : -1) + count) % count, handled:true};
+    return {index, handled:['Enter','Tab','Escape'].includes(key), select:key === 'Enter' || key === 'Tab', close:key === 'Escape'};
+  }
+  function reactorGroups(reactions) {
+    return reactions.map(r => ({...r, reactors:[...new Map((r.reactors || []).map(u => [u.id,u])).values()],
+      missing:Math.max(0,r.count-new Set((r.reactors || []).map(u => u.id)).size)}));
+  }
+  function composerMembers(person, identityId, messages) {
+    const identity = (person.identities || []).find(i => i.id === identityId);
+    if (!identity || identity.kind !== 'group') return [];
+    const members = (person.members || []).filter(m => m.identity_id === identityId);
+    if (members.length) return members;
+    // Only names already visible in this group's open timeline, never inferred
+    // addresses. Missing/stale membership cannot authorize a native mention.
+    const names = [...new Set(messages.filter(m => m.identity_id === identityId && !m.outgoing && !m.deleted)
+      .map(m => m.sender).filter(n => typeof n === 'string' && n.trim() && !/^@[^\s]+:/.test(n)))];
+    return names.map(name => ({id:'visible:' + name, name, label:name, identity_id:identityId, native:false}));
+  }
+  function floatingBox(anchor, size, bounds, gap = 8) {
+    const left = bounds.left + gap, top = bounds.top + gap;
+    const right = bounds.right - gap, bottom = bounds.bottom - gap;
+    const width = Math.min(size.width, Math.max(0, right - left));
+    const height = Math.min(size.height, Math.max(0, bottom - top));
+    const above = anchor.top - gap - height, below = anchor.bottom + gap;
+    return {left:Math.max(left, Math.min(anchor.left, right - width)),
+      top:Math.max(top, Math.min(above >= top ? above : below, bottom - height)), width, height};
+  }
+  if (typeof module !== 'undefined') module.exports = {backState, fetchOlder, notificationSettings, mentionQuery, parseMentions, insertMention, mentionKey, reactorGroups, composerMembers, floatingBox};
   if (typeof document === 'undefined') return;
   const $ = id => document.getElementById(id);
-  const s = {tab: 'people', person: null, overlay: null, search: null, ready: false, epoch: 0, busy: false, drafts: {}, people: [], login: null};
-  let api, timer, lastFocus, updateHold;
+  const s = {tab: 'people', person: null, overlay: null, search: null, low: false, seg: (() => { try { const v = sessionStorage.getItem('messenger-inbox-seg') || (sessionStorage.getItem('messenger-inbox-low') === '1' ? 'low' : 'all'); return ['all', 'unread', 'medium', 'low'].includes(v) ? v : 'all'; } catch { return 'all'; } })(), ready: false, epoch: 0, busy: false, drafts: {}, people: [], login: null};
+  let api, timer, lastFocus, updateHold, connectorController, native;
+  let nativeRows = [], nativeFocus = null;
   // A letter outside the Latin script (Thai, Cyrillic, CJK…) offers Translate; English never does.
   const foreignScript = t => /(?![\p{Script=Latin}])\p{L}/u.test(t || '');
   const shown = {}; // message id -> 'translated' | 'original' for on-tap translation
@@ -23,15 +128,22 @@
     search: ['M10.5 18a7.5 7.5 0 1 0 0-15 7.5 7.5 0 0 0 0 15z', 'M16 16l5 5'],
     settings: ['M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z'],
     compose: ['M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z', 'M15 5l4 4'],
+    merge: ['M6 4v5a6 6 0 0 0 6 6h0a6 6 0 0 0 6-6V4', 'M12 15v5'],
     more: ['M12 5.5v.01', 'M12 12v.01', 'M12 18.5v.01'],
+    sparkle: ['M11 3l1.9 5.6L18.5 10.5l-5.6 1.9L11 18l-1.9-5.6L3.5 10.5l5.6-1.9z', 'M19 15.5v4', 'M17 17.5h4'],
     send: ['M4 12 20 4l-4 16-4-6.5L4 12z', 'm12 13.5 8-9.5'],
-    down: ['M12 5v14', 'm5 12 7 7 7-7'], plus: ['M12 5v14', 'M5 12h14'],
+    down: ['M12 5v14', 'm5 12 7 7 7-7'], up: ['M12 19V5', 'm5 12 7-7 7 7'], plus: ['M12 5v14', 'M5 12h14'],
     mic: ['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M19 11a7 7 0 0 1-14 0', 'M12 18v3'],
     play: ['M7 4.5v15l12-7.5z'], reply: ['M9 14 4 9l5-5', 'M4 9h10a6 6 0 0 1 6 6v4'],
+    forward: ['M15 14l5-5-5-5', 'M20 9H10a6 6 0 0 0-6 6v4'], textsel: ['M5 6h14', 'M5 11h14', 'M5 16h8', 'M17 14v7', 'M15 14h4', 'M15 21h4'],
     copy: ['M9 9h11v11H9z', 'M5 15H4V4h11v1'], trash: ['M4 7h16', 'M10 11v6', 'M14 11v6', 'M6 7l1 13h10l1-13', 'M9 7V4h6v3'],
-    download: ['M12 4v11', 'm7 10 5 5 5-5', 'M5 20h14'],
+    download: ['M12 4v11', 'm7 10 5 5 5-5', 'M5 20h14'], check: ['m5 12.5 4.5 4.5L19 7'], none: [],
     bell: ['M6 9a6 6 0 0 1 12 0c0 6 2.5 7.5 2.5 7.5h-17S6 15 6 9z', 'M10 20a2 2 0 0 0 4 0'],
     belloff: ['M6 9a6 6 0 0 1 9.4-4.9', 'M18 9c0 6 2.5 7.5 2.5 7.5H8', 'M10 20a2 2 0 0 0 4 0', 'M3 3l18 18'],
+    lowpri: ['M3 4h18v4H3z', 'M5 8v11h14V8', 'M10 12h4'], unread: ['M21 12a9 9 0 1 1-6-8.5', 'M19 7a2 2 0 1 0 0-.01'], inbox: ['M3 13h5l2 3h4l2-3h5', 'M5.5 5h13L21 13v6H3v-6z'],
+    smile: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M8.5 14.5s1.3 2 3.5 2 3.5-2 3.5-2', 'M9 9.5v.01', 'M15 9.5v.01'],
+    tag: ['M3 12V4h8l10 10-8 8z', 'M7.5 8.5v.01'],
+    qr: ['M4 4h6v6H4z', 'M14 4h6v6h-6z', 'M4 14h6v6H4z', 'M14 14h2v2h-2z', 'M18 14h2', 'M14 18v2', 'M18 18h2v2h-2z'],
   };
   function icon(name) {
     const ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg');
@@ -49,39 +161,256 @@
     const initials = text.split(/\s+/).filter(Boolean).slice(0, 2).map(w => [...w][0]).join('').toUpperCase() || '?';
     const el = node('span', 'u-avatar tone-' + (h % TONES) + (cls ? ' ' + cls : ''), initials); el.setAttribute('aria-hidden', 'true'); return el;
   }
+  // Real profile pictures over the initials; a missing or broken picture leaves the initials showing.
+  const pictureURL = (pid, tag, who) => tag && pid && !String(pid).startsWith('private:') ? 'api/unified/people/' + encodeURIComponent(pid) + '/avatar?' + new URLSearchParams(who ? {who, v: tag} : {v: tag}) : '';
+  // Pictures load only when their row is near the screen, a few at a time, so opening the Inbox is not a burst of
+  // dozens of requests that a restarting gateway answers with 502s. One failed picture retries once, then initials stay.
+  const AVATAR_PARALLEL = 4, avatarQueue = []; let avatarBusy = 0;
+  function pumpAvatars() {
+    while (avatarBusy < AVATAR_PARALLEL && avatarQueue.length) {
+      const img = avatarQueue.shift(); if (!img.isConnected) continue;
+      avatarBusy++; let settled = false; const done = () => { if (settled) return; settled = true; avatarBusy--; pumpAvatars(); };
+      img.addEventListener('load', done, {once: true}); img.addEventListener('error', done, {once: true}); setTimeout(done, 10000);
+      img.src = img.dataset.src;
+    }
+  }
+  // Watch the visible avatar circle, never the picture: the picture stays hidden until it loads, and a hidden
+  // element never intersects, so observing it directly meant no picture was ever requested (16.27-16.29).
+  const avatarFor = new WeakMap();
+  const avatarSeen = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+    for (const e of entries) if (e.isIntersecting) {
+      avatarSeen.unobserve(e.target);
+      const img = avatarFor.get(e.target); avatarFor.delete(e.target);
+      if (img && !img.src && img.parentElement === e.target && !avatarQueue.includes(img)) avatarQueue.push(img);
+    }
+    pumpAvatars();
+  }, {rootMargin: '300px 0px'}) : null;
+  function watchAvatar(el, img) {
+    if (img.src) return;
+    if (!avatarSeen) { img.loading = 'lazy'; img.src = img.dataset.src; return; }
+    avatarFor.set(el, img); avatarSeen.observe(el);
+  }
+  // A refresh replaces rows, not their decoded pictures. Scope the slot to its
+  // surface so the same person can appear in the list and header simultaneously.
+  // Keep this memory-only and bounded; never persist profile pictures in storage.
+  const avatarPictures = new Map(), AVATAR_CACHE_LIMIT = 512;
+  function withPicture(el, url, slot) {
+    if (!url) { if (slot) avatarPictures.delete(slot); return el; }
+    const cached = slot && avatarPictures.get(slot);
+    if (cached?.url === url) {
+      avatarPictures.delete(slot); avatarPictures.set(slot, cached);
+      el.append(cached.img);
+      if (!cached.img.hidden && cached.img.complete && cached.img.naturalWidth) el.classList.add('has-img');
+      watchAvatar(el, cached.img); // a repaint before it came on screen: watch the new circle
+      return el;
+    }
+    const img = document.createElement('img'); img.className = 'u-av-img'; img.alt = ''; img.decoding = 'async'; img.dataset.src = url; img.hidden = true;
+    img.onerror = () => {
+      img.hidden = true; img.parentElement?.classList.remove('has-img');
+      if (img.dataset.retried) return;
+      img.dataset.retried = '1'; setTimeout(() => { if (img.isConnected) { avatarQueue.push(img); pumpAvatars(); } }, 2500 + Math.random() * 2000);
+    };
+    img.onload = () => { img.hidden = false; img.parentElement?.classList.add('has-img'); }; el.append(img);
+    if (slot) {
+      avatarPictures.delete(slot); avatarPictures.set(slot, {url, img});
+      // Do not evict a picture which is currently on screen.
+      for (const [key, entry] of avatarPictures) {
+        if (avatarPictures.size <= AVATAR_CACHE_LIMIT) break;
+        if (!entry.img.isConnected && entry.img !== img) avatarPictures.delete(key);
+      }
+    }
+    watchAvatar(el, img);
+    return el;
+  }
   const networksOf = p => [...new Set((p.identities || []).map(i => i.network))];
   const cap = t => t ? t[0].toUpperCase() + t.slice(1) : '';
+  // Brand-correct network names (WhatsApp, LINE, Instagram…) from connectors.js, falling back to Capitalised.
+  const brandOf = n => (window.MessengerConnectors?.BRAND || {})[n] || (n === 'private' ? {color: 'var(--accent)', mark: 'W', label: 'Wizard'} : null);
+  const netLabel = n => brandOf(n)?.label || cap(n);
+  // Every account network rides the same bridge transport; only Wizard-to-Wizard chats use their own engine.
+  const bridged = n => !!n && n !== 'private' && n !== 'messenger';
+  // Round network badge (inline SVG glyph); a text mark only when connectors.js is missing.
+  function netBadge(n, cls = '') {
+    const made = window.MessengerConnectors?.badge?.(n, cls);
+    if (made) return made;
+    const b = brandOf(n) || {mark: (n || '?')[0].toUpperCase(), color: 'var(--ink-3)'};
+    const el = node('span', 'net-badge text' + (cls ? ' ' + cls : ''), b.mark); el.style.background = b.color; el.dataset.network = n; el.title = netLabel(n); return el;
+  }
   const call = (path, body) => api('api/unified/' + path, body === undefined ? {} : {method: 'POST', body});
-  const error = e => { const el = $('u-error'); if (el) el.textContent = e.message || 'Request failed. Please try again.'; };
-  async function action(fn) { if (s.busy) return; s.busy = true; try { await fn(); } catch (e) { error(e); } finally { s.busy = false; } }
+  // Two panes side by side (desktop split) each carry a notice line: errors go to the sheet if one is open,
+  // else to the pane the owner is working in.
+  const errorBox = () => $('u-overlay')?.querySelector('#u-error') || (split.on ? (s.person ? $('u-pane-thread') : $('u-pane-list'))?.querySelector('#u-error') : null) || $('u-error');
+  const error = e => { const el = errorBox(); if (el) el.textContent = e.message || 'Request failed. Please try again.'; };
+  // Release a "Saving" hold taken mid-action as soon as the action ends, or it would block Wizard reloads until the next hold() call.
+  async function action(fn) { if (s.busy) return; s.busy = true; try { await fn(); } catch (e) { error(e); } finally { s.busy = false; hold(); } }
   // Hold off a Wizard update reload only for work a reload would really lose: a send still going out or a recording.
-  // Drafts are kept in sessionStorage and come back after the reload, and an open sheet loses nothing, so neither holds.
+  // Drafts are kept in localStorage and come back after the reload, and an open sheet loses nothing, so neither holds.
   function hold() {
     const reason = view.recording ? 'Recording' : store.pending > 0 ? 'Sending' : s.busy ? 'Saving' : '';
     if (updateHold && updateHold.reason !== reason) { updateHold.h.release(); updateHold = null; }
     if (reason && !updateHold) updateHold = {reason, h: window.WizardApp.update.hold(reason)};
   }
-  function inChat(on) { if (on) document.documentElement.dataset.inChat = ''; else delete document.documentElement.dataset.inChat; }
+  function inChat(on) { if (on) document.documentElement.dataset.inChat = ''; else delete document.documentElement.dataset.inChat; syncKeys(); }
+  // ---------- keyboard (Wizard app-key contract, 16.15; ⌥ anchor 16.18) ----------
+  // Gmail-style keys, each held with left ⌥ (16.18: Wizard's one anchor): j/k = next/previous chat in the order the
+  // list shows, r = reply (focus the open chat's composer), / = search chats, n = new chat (on the compose button). Each key is a real control marked
+  // data-wz-key; the shared Wizard client (WizardApp.keys) clicks the first visible, enabled match and draws
+  // keycaps while ⌥ is held. j/k/r and a spare / live in one visually quiet row so they work from the list and
+  // from an open chat alike (phone-width Messenger shows only one of them). Escape stays Back.
+  const hotkeys = {nav: null, order: []}, KEYBOARD = matchMedia('(any-hover: hover) and (any-pointer: fine)');
+  function keyButton(key, label, fn) { const b = button(label, fn, 'u-key'); b.dataset.wzKey = key; b.dataset.wzKeyLabel = label; b.tabIndex = -1; return b; }
+  const openKey = () => s.native && s.nativeGroup ? 'native:' + s.nativeGroup : s.person;
+  function stepChat(dir) {
+    const order = hotkeys.order; if (!order.length || s.overlay) return;
+    const at = order.findIndex(r => r.key === openKey());
+    const next = order[at < 0 ? (dir > 0 ? 0 : order.length - 1) : Math.max(0, Math.min(order.length - 1, at + dir))];
+    if (!next || next.key === openKey()) return;
+    // The row itself when it is on screen (same tap path), else open it from memory (phone width, chat open).
+    const row = [...document.querySelectorAll('.u-person[data-pid]')].find(el => el.dataset.pid === next.key);
+    if (row) { row.click(); row.scrollIntoView?.({block: 'nearest'}); return; }
+    if (next.p.native) openNative(next.p.group_id); else openPerson(next.p.id, next.p);
+  }
+  function replyKey() {
+    const field = s.native ? $('draft') : document.querySelector('#unified-inbox .u-composer textarea');
+    if (!field || field.disabled) return;
+    field.focus(); const end = field.value.length; try { field.setSelectionRange(end, end); } catch { /* not a text field */ }
+  }
+  function searchKey() {
+    if (s.overlay) return;
+    if (s.native) returnNative();
+    if (s.person && !split.on) { s.person = null; view.id = null; inChat(false); }
+    s.search = ''; s.epoch++; renderList();
+  }
+  function syncKeys() {
+    if (!hotkeys.nav) {
+      const host = $('messenger'); if (!host) return;
+      hotkeys.nav = node('div', 'u-keys'); hotkeys.nav.setAttribute('aria-label', 'Keyboard shortcuts');
+      hotkeys.nav.append(keyButton('j', 'Next chat', () => stepChat(1)), keyButton('k', 'Previous chat', () => stepChat(-1)),
+        keyButton('r', 'Reply', replyKey), keyButton('/', 'Search chats', searchKey));
+      host.append(hotkeys.nav);
+      new MutationObserver(keysSoon).observe(host, {childList: true, subtree: true});   // a chat or the list redrawn
+    }
+    hotkeys.nav.hidden = !s.ready || s.tab === 'messenger';
+    const [j, k, r] = hotkeys.nav.children;
+    j.disabled = k.disabled = !hotkeys.order.length;
+    r.disabled = !(s.person || s.native);
+    keysSoon();
+  }
+  // 16.17 (Miguel: no hints while holding ⌥): the keycaps sit ON what the key does, like the shell's ↓ / ↑ on Ready
+  // rows: j on the next chat's row, k on the previous one, r on the reply box, / on the visible Search. The quiet
+  // row's own j/k/r/'/' carry the key only while that target is not on screen (phone width with a chat open).
+  function keysSoon() { if (!hotkeys.pend) { hotkeys.pend = true; requestAnimationFrame(() => { hotkeys.pend = false; placeKeys(); }); } }
+  function placeKeys() {
+    if (!hotkeys.nav) return;
+    const [j, k, r, sl] = hotkeys.nav.children, seen = el => !!el && wzVisible(el) && wzEnabled(el) && el.getBoundingClientRect().width > 8;
+    for (const el of document.querySelectorAll('.u-person[data-wz-key], .u-step[data-wz-key]')) { delete el.dataset.wzKey; delete el.dataset.wzKeyLabel; }
+    const rows = [...document.querySelectorAll('.u-person[data-pid]')].filter(seen), order = hotkeys.order.map(o => o.key);
+    const at = order.indexOf(openKey()), rowOf = key => key != null && rows.find(el => el.dataset.pid === key);
+    const step = k => [...document.querySelectorAll(`.u-step[data-step="${k}"]`)].find(seen);
+    const nx = rowOf(order[at < 0 ? 0 : at + 1]) || (at < order.length - 1 && step('j')), pv = (at > 0 && rowOf(order[at - 1])) || (at > 0 && step('k'));
+    const put = (row, key, label, own) => { if (row) { row.dataset.wzKey = key; row.dataset.wzKeyLabel = label; delete own.dataset.wzKey; } else own.dataset.wzKey = key; };
+    put(nx, 'j', 'Next chat', j); put(pv, 'k', 'Previous chat', k);
+    const field = s.native ? $('draft') : document.querySelector('#unified-inbox .u-composer textarea');
+    for (const el of document.querySelectorAll('textarea[data-wz-key="r"], input[data-wz-key="r"]')) if (el !== field) delete el.dataset.wzKey;
+    if (seen(field) && (s.person || s.native)) { field.dataset.wzKey = 'r'; field.dataset.wzKeyLabel = 'Reply'; delete r.dataset.wzKey; } else r.dataset.wzKey = 'r';
+    const find = [...document.querySelectorAll('[data-wz-key="/"]')].find(el => el !== sl && seen(el));
+    if (find) delete sl.dataset.wzKey; else sl.dataset.wzKey = '/';
+  }
+  // Fallback for a plain browser tab only (16.18, one anchor: left ⌥ for every Wizard key). data-wz-key="j" means ⌥J.
+  // Inside Wizard the shell routes ⌥+key to the marked control, so a framed Messenger never acts here, and it stands
+  // down whenever the shared client brings WizardApp.keys. Plain keys never act. The key comes from e.code (⌥J on a
+  // Mac types ∆), so only KeyA..KeyZ and / , . ; map; a held key does not repeat; ⌥ in the composer still acts.
+  const wzVisible = el => !!el.getClientRects().length && (el.checkVisibility ? el.checkVisibility({visibilityProperty: true}) : getComputedStyle(el).visibility !== 'hidden');
+  const wzEnabled = el => !el.disabled && el.getAttribute('aria-disabled') !== 'true' && !el.closest('[inert],[hidden],fieldset[disabled]');
+  const WZ_CODE_KEYS = {Slash: '/', Comma: ',', Period: '.', Semicolon: ';'};
+  const wzKeyName = e => /^Key[A-Z]$/.test(e.code || '') ? e.code.slice(3).toLowerCase() : WZ_CODE_KEYS[e.code] || '';
+  function wzKeyFallback(e) {
+    if (window.parent !== window || window.WizardApp?.keys) return;   // in Wizard (or a client with keys): the shell's
+    if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.defaultPrevented || e.isComposing) return;
+    const key = wzKeyName(e); if (!key) return;
+    const modals = [...document.querySelectorAll('dialog[open],[aria-modal="true"]')].filter(wzVisible);
+    const scope = modals.at(-1) || document;
+    const hit = [...scope.querySelectorAll('[data-wz-key]')].find(el => el.dataset.wzKey === key && wzVisible(el) && wzEnabled(el));
+    if (!hit) return;
+    e.preventDefault(); e.stopPropagation();   // ⌥ in a field would type ∆ / ˚ on a Mac
+    if (e.repeat) return;
+    if (hit.matches('textarea,input,select,[contenteditable]:not([contenteditable=false])')) { replyKey(); return; } // the reply box: focus it
+    hit.click();
+  }
+  document.addEventListener('keydown', wzKeyFallback);
+  window.__messengerKeys = {fallback: wzKeyFallback, sync: () => syncKeys()}; // test hook
+  // Phone-width Inbox inside Wizard: QR, Search and Settings ride the window's own title bar
+  // (WizardApp.titlebar.set), so the Inbox drops its bottom toolbar and the filter chips sit right on the
+  // Wizard dock. Published only on the plain list (no chat, search or sheet open); a host without title-bar
+  // tools (a browser tab, an older Wizard) keeps Messenger's own compact toolbar. Desktop widths are unchanged.
+  const bar = {key: null, gen: 0, ok: false, queued: false};
+  const BAR_TOOLS = [['qr', 'My QR codes', 'QR'], ['search', 'Search', 'Search'], ['settings', 'Settings', 'Settings']];
+  const narrow = () => { const m = $('messenger'); return (m?.clientWidth || innerWidth) < 600; };
+  function onBarTool({id} = {}) {
+    if (!wantBar()) return;
+    if (id === 'qr') myCodes();
+    else if (id === 'search') { s.search = ''; renderList(); }
+    else if (id === 'settings') accounts();
+  }
+  function wantBar() {
+    const inbox = $('unified-inbox');
+    return !!(s.ready && narrow() && inbox && !inbox.hidden && inbox.dataset.view === 'list' && !s.person && s.search == null && !s.overlay && !$('u-overlay') && !('privateView' in document.documentElement.dataset));
+  }
+  function barMode(on) { document.documentElement.toggleAttribute('data-bar-tools', on); }
+  function syncBar() {
+    if (bar.queued) return; bar.queued = true;
+    Promise.resolve().then(() => {
+      bar.queued = false;
+      const tb = window.WizardApp?.titlebar;
+      if (!tb?.set) { barMode(false); return; }
+      const want = wantBar(), warn = !!document.querySelector('.u-settings-btn.warn');
+      // The own toolbar stays hidden under a sheet or menu on the list, so nothing jumps behind it.
+      barMode(bar.ok && narrow());
+      const label = document.querySelector('.u-settings-btn')?.getAttribute('aria-label') || 'Settings';
+      const tools = want ? BAR_TOOLS.map(([id, name, text]) => ({id, kind: 'button', icon: id, text, label: id === 'settings' ? label : name, ...(id === 'settings' && warn ? {dot: true} : {})})) : null;
+      const key = JSON.stringify(tools); if (key === bar.key) return; bar.key = key;
+      const gen = ++bar.gen;
+      let pending; try { pending = Promise.resolve(tb.set(tools, onBarTool)); } catch { pending = Promise.resolve(false); }
+      pending.then(ok => ok === true, () => false).then(ok => {
+        if (gen !== bar.gen) return;
+        if (tools || !ok) bar.ok = ok;
+        if (!ok) bar.key = null; // try again on the next change (a host that connects late)
+        barMode(bar.ok && narrow());
+      });
+    });
+  }
   function closeOverlay() {
+    connectorController?.close().catch(() => {}); connectorController = null;
     const answered = s.answer; s.answer = null; answered?.(false);
-    s.login = null; s.overlay = null; $('u-overlay')?.remove(); view.lifted?.classList.remove('lifted'); view.lifted = null; lastFocus?.focus(); hold();
+    const closed = s.menuClosed; s.menuClosed = null; closed?.();
+    s.login = null; s.overlay = null; $('u-overlay')?.remove(); view.lifted?.classList.remove('lifted'); view.lifted = null; lastFocus?.focus(); hold(); syncBar();
   }
   function back() {
+    if (view.mentionClose?.()) return true;
+    if (!s.overlay && view.picker?.isOpen) { view.picker.close(); return true; }
     if (!s.overlay && view.selection?.active) { view.selection.clear(); return true; }
+    if (s.overlay && connectorController?.back?.()) return true;
+    if (s.overlay === 'Edit QR codes') { myCodes(); return true; }
+    if (s.overlay === 'Manage labels' && view.manageFrom) { const p = view.manageFrom; view.manageFrom = null; labelsSheet(p); return true; } // opened from a chat's Labels: Back returns to it
+    if (s.overlay === 'Suggested merges') { accounts(); return true; } // nested: Back returns to the codes, not the list
+    if (s.overlay === 'Advanced' || s.overlay === 'Agent drafts') { accounts(); return true; } // pages opened from Settings return to it
+    if (!s.overlay && !s.person && detailOpen()) { closePane(); return true; } // New message beside the list
     const next = backState(s);
     if (!next.handled) return false;
     if (s.overlay) closeOverlay();
-    else if (s.person) { s.person = null; view.id = null; s.epoch++; inChat(false); renderList(); }
-    else { s.search = null; s.epoch++; renderList(); }
+    else if (s.person) { s.person = null; view.id = null; s.epoch++; inChat(false); if (split.on && hasListPane()) { closePane(); markSelected(); } else { renderList(); keepListTop(); } }
+    else if (s.search != null) { s.search = null; s.epoch++; renderList(); }
+    else { setSeg('all'); s.epoch++; renderList(); }
     return true;
   }
   function overlay(title) {
     closeOverlay(); lastFocus = document.activeElement; s.overlay = title;
     const layer = node('div', 'u-overlay'); layer.id = 'u-overlay';
     const panel = node('section', 'u-sheet'); panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-modal', 'true'); panel.setAttribute('aria-label', title); panel.tabIndex = -1;
-    const head = node('header'); head.append(node('h2', '', title), iconButton('close', 'Close', closeOverlay)); panel.append(node('span', 'grabber'), head);
+    const dismiss = () => { if (!connectorController?.back?.()) closeOverlay(); };
+    const head = node('header'); head.append(node('h2', '', title), iconButton('close', 'Close', dismiss)); panel.append(node('span', 'grabber'), head);
     layer.append(panel); $('messenger').append(layer);
-    layer.onclick = e => { if (e.target === layer) closeOverlay(); };
+    layer.onclick = e => { if (e.target === layer) dismiss(); };
     panel.onkeydown = e => {
       if (e.key !== 'Tab') return;
       const focusable = [...panel.querySelectorAll('button,input,select,textarea')].filter(x => !x.disabled);
@@ -92,27 +421,213 @@
     const notice = node('p', 'error'); notice.id = 'u-error'; notice.setAttribute('role', 'alert'); panel.append(notice);
     panel.focus(); hold(); return panel;
   }
+  // ---------- desktop split (Miguel, 31 Oct 2026) ----------
+  // A wide Messenger window (desktop or a wide tablet) shows the chat list and the open chat side by side, like
+  // Chats' session list beside its thread: the list stays put (scroll, filters, search) while chats open on the
+  // right. Sized by Messenger's own window (#messenger), never the device. Narrower windows keep the one-pane
+  // Inbox exactly as before (list or thread), including the phone title-bar tools.
+  // 16.3 (Miguel, 2 Nov 2026: "even at the biggest size it only shows the chat"): the split starts at 640px of Messenger's
+  // window, the narrowest list (260px) beside the narrowest readable chat (380px), not at 900px.
+  const SPLIT_MIN = 640, THREAD_MIN = 380;
+  const split = {on: false, threadGen: 0, listGen: 0};
+  const wideNow = () => { const m = $('messenger'); return !!m && (m.clientWidth || innerWidth) >= SPLIT_MIN; };
+  function panes() {
+    const root = $('unified-inbox');
+    let list = $('u-pane-list'), thread = $('u-pane-thread');
+    if (!list || list.parentNode !== root || !thread || thread.parentNode !== root) {
+      root.replaceChildren();
+      list = node('div', 'u-pane u-pane-list'); list.id = 'u-pane-list'; list.setAttribute('aria-label', 'Chats');
+      thread = node('section', 'u-pane u-pane-thread'); thread.id = 'u-pane-thread'; thread.setAttribute('aria-label', 'Conversation');
+      root.append(list, divider(), thread); thread.dataset.view = 'closed'; root.dataset.detail = 'none';
+    }
+    return {root, list, thread};
+  }
+  // The divider between the chat list and the open chat, like Chats' list/thread splitter in the Wizard shell
+  // (desktop.js setListW): drag it, ←/→ nudge it by 24px, double-click puts it back. Saved on this device. Desktop
+  // split only; the phone layout has no split and no divider.
+  const LIST_W = {min: 260, max: 640, key: 'messenger.listW'};
+  const listW = () => { let v = 0; try { v = +localStorage.getItem(LIST_W.key); } catch { /* blocked */ } return v >= LIST_W.min && v <= LIST_W.max ? v : 0; };
+  function setListW(px) {
+    // The list stays 260-640px and at most 60% of the window, and always leaves the chat THREAD_MIN (unified.css
+    // clamps the painted width the same way, so a width saved on a big window still fits a small one).
+    const mw = $('messenger')?.clientWidth || innerWidth, cap = Math.max(LIST_W.min, Math.min(LIST_W.max, Math.round(mw * 0.6), mw - THREAD_MIN));
+    if (px) px = Math.round(Math.max(LIST_W.min, Math.min(cap, px)));
+    try { if (px) localStorage.setItem(LIST_W.key, String(px)); else localStorage.removeItem(LIST_W.key); } catch { /* private mode: this visit only */ }
+    paintListW(px); return px;
+  }
+  function paintListW(px = listW()) {
+    const m = $('messenger'); if (!m) return;
+    if (px) m.style.setProperty('--u-list-w', px + 'px'); else m.style.removeProperty('--u-list-w');
+    const h = $('u-pane-split'), w = $('u-pane-list')?.getBoundingClientRect().width;
+    if (h && w) h.setAttribute('aria-valuenow', String(Math.round(w)));
+  }
+  function divider() {
+    const h = node('div', 'u-pane-split'); h.id = 'u-pane-split'; h.tabIndex = 0;
+    h.setAttribute('role', 'separator'); h.setAttribute('aria-orientation', 'vertical'); h.setAttribute('aria-label', 'Resize the chat list');
+    h.setAttribute('aria-valuemin', String(LIST_W.min)); h.setAttribute('aria-valuemax', String(LIST_W.max)); h.title = 'Drag to resize · double-click to reset';
+    let drag = null;
+    h.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return; e.preventDefault(); e.stopPropagation();
+      drag = {left: $('unified-inbox').getBoundingClientRect().left, id: e.pointerId};
+      h.setPointerCapture?.(e.pointerId); document.documentElement.classList.add('u-splitting');
+    });
+    h.addEventListener('pointermove', e => { if (drag) setListW(e.clientX - drag.left); });
+    const end = () => { if (!drag) return; drag = null; document.documentElement.classList.remove('u-splitting'); };
+    h.addEventListener('pointerup', end); h.addEventListener('pointercancel', end); h.addEventListener('lostpointercapture', end);
+    h.addEventListener('dblclick', e => { e.stopPropagation(); setListW(0); });
+    h.addEventListener('keydown', e => {
+      const d = {ArrowLeft: -24, ArrowRight: 24}[e.key]; if (!d && e.key !== 'Home') return;
+      e.preventDefault(); e.stopPropagation();
+      setListW(e.key === 'Home' ? 0 : ($('u-pane-list')?.getBoundingClientRect().width || listW() || 340) + d);
+    });
+    requestAnimationFrame(() => paintListW());
+    return h;
+  }
+  const hasListPane = () => !!$('u-pane-list')?.querySelector('.u-list');
+  // With no chat open, the right side is New message (Miguel, 31 Oct 2026): "the list of chats without one selected",
+  // reached from the New chat button or the ✕ on an open chat. Picking someone opens that chat in the same place.
+  function fillEmpty(thread, focus = false) {
+    thread.replaceChildren(); thread.dataset.view = 'empty'; $('unified-inbox').dataset.detail = 'open';
+    // Calm and centred (Miguel): a title, one "To:" field and New Wizard chat. Names appear only once he types.
+    const box = node('div', 'u-newmsg'), token = {}; thread.__pick = token;
+    const search = node('input', 'u-search'); search.type = 'search'; search.placeholder = 'To: name or group'; search.setAttribute('aria-label', 'Search people and groups');
+    const list = node('div', 'u-newmsg-results'), wizard = button('New Wizard chat', () => { showNative(); native?.newChat(); }, 'link u-newmsg-wizard');
+    box.append(node('h2', '', 'New message'), search, list, wizard); thread.append(iconButton('close', 'Close', closeDetail, 'u-close u-newmsg-close'), box);
+    if (focus) requestAnimationFrame(() => search.focus());
+    let all = null;
+    const draw = () => {
+      const q = search.value.trim().toLowerCase(); list.replaceChildren();
+      if (!q) return;
+      if (!all) { list.append(node('p', 'u-empty', 'Loading…')); return; }
+      for (const p of all.filter(p => p.display_name.toLowerCase().includes(q)).slice(0, 8)) {
+        const row = button('', () => openPerson(p.id), 'u-directory-row');
+        const text = node('span', 'u-who-text'); text.append(node('strong', '', p.display_name), node('span', '', (p.group ? 'Group · ' : '') + networksOf(p).map(netLabel).join(' · ')));
+        row.append(netAvatar(p, 'small', 'new-message'), text); list.append(row);
+      }
+      if (!list.children.length) list.append(node('p', 'u-empty', 'No one matches'));
+    };
+    search.oninput = draw;
+    search.onkeydown = e => { if (e.key === 'Enter') list.querySelector('.u-directory-row')?.click(); };
+    const fresh = store.directory && Date.now() - store.directory.at < 60e3;
+    (fresh ? Promise.resolve(store.directory.rows) : call('directory').then(d => {
+      const rows = [...(d.people || []), ...(d.groups || []).map(g => ({...g, group: true}))].sort((a, b) => a.display_name.localeCompare(b.display_name));
+      store.directory = {at: Date.now(), rows}; return rows;
+    })).then(rows => { if (thread.__pick === token) { all = rows; draw(); } })
+      .catch(e => { if (thread.__pick === token) list.replaceChildren(node('p', 'u-empty', 'Could not load people. ' + (e?.message || ''))); });
+  }
+  // The right pane with nothing open. The old composer's pending draft save still runs (see composer()).
+  function emptyPane(focus = false) { if (!split.on) return; view.id = null; view.scroll = null; view.root = null; const {root, thread} = panes(); fillEmpty(thread, focus); root.dataset.view = s.search != null ? 'search' : 'list'; }
+  // List and detail (Miguel, 31 Oct 2026): with nothing open the list fills the window; a chat or New message opens
+  // beside it, and ✕ / Back / Escape close that pane so the full-width list comes back (scroll and filters kept).
+  function closePane() {
+    if (!split.on) return; view.id = null; view.scroll = null; view.root = null;
+    const {root, thread} = panes(); thread.__pick = null; thread.replaceChildren(); thread.dataset.view = 'closed';
+    root.dataset.detail = 'none'; root.dataset.view = s.search != null ? 'search' : 'list';
+  }
+  const detailOpen = () => split.on && $('u-pane-thread')?.dataset.view === 'empty';
+  function closeDetail() {
+    if (s.native) returnNative();
+    if (s.person) { s.person = null; view.id = null; s.epoch++; inChat(false); }
+    if (!hasListPane()) renderList();
+    closePane(); markSelected(); syncBar();
+  }
+  // New chat in the split: leave the open chat (same path as Back) and show New message on the right.
+  function newMessagePane() {
+    if (s.native) returnNative();
+    if (s.person) { s.person = null; view.id = null; s.epoch++; inChat(false); }
+    if (!hasListPane()) renderList();
+    emptyPane(true); markSelected();
+  }
+  // Highlight the open chat's row in place: no list rebuild, so the scroll position stays where it was.
+  function markSelected() {
+    const list = $('u-pane-list'); if (!list) return;
+    for (const el of list.querySelectorAll('.u-person[data-pid]')) {
+      const on = !!(split.on && (el.dataset.nativeGroup ? s.native && s.nativeGroup === el.dataset.nativeGroup : el.dataset.pid === s.person));
+      el.classList.toggle('selected', on); if (on) el.setAttribute('aria-current', 'true'); else el.removeAttribute('aria-current');
+    }
+  }
+  // Narrow windows: the chat slides in over the list; Back puts the list back where it was scrolled.
+  function slideIn() {
+    const r = $('unified-inbox'); if (!r || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    r.classList.remove('u-enter'); void r.offsetWidth; r.classList.add('u-enter');
+    r.addEventListener('animationend', () => r.classList.remove('u-enter'), {once: true});
+  }
+  function keepListTop() {
+    const top = split.listTop || 0; split.listTop = 0; if (!top) return;
+    const put = () => { const l = $('unified-inbox')?.querySelector(':scope > .u-list'); if (l && !s.person) l.scrollTop = top; };
+    put(); requestAnimationFrame(put);
+  }
+  // Crossing the width line keeps the open chat: wide shows list + chat, narrow shows just that chat.
+  function relayout() {
+    const want = wideNow(); if (want === split.on) return;
+    const place = s.person && !s.native ? readingPlace() : null; // measured in the old layout, before it changes
+    split.on = want; document.documentElement.toggleAttribute('data-split', want);
+    const root = $('unified-inbox');
+    if (!root || !s.ready || !document.documentElement.dataset.inboxTab || s.tab === 'messenger') { if (root && !want) { delete root.dataset.split; } return; }
+    if (want) root.dataset.split = ''; else delete root.dataset.split;
+    root.replaceChildren();
+    if (s.native) { root.hidden = !want; if (want) { renderList(); } return; }
+    if (want) { renderList(); if (s.person) reopenThread(place); }
+    else if (s.person) reopenThread(place); else renderList();
+  }
+  // Re-draw the open chat in its new place from memory (no refetch); the draft carries over through the server draft.
+  // James, 6 Nov 2026: a group must open where he stopped reading, never jump to the bottom on its own. Crossing the
+  // width line (window resize, phone rotation) keeps the message at the top of the window where it was.
+  function reopenThread(place = readingPlace()) {
+    const id = s.person, t = store.threads[id];
+    if (!t) { openPerson(id); return; }
+    if (view.id !== id) place = null;
+    els.clear(); buildThread(id, t.person); paintThread(!place, !!place);
+    if (place) putPlace(place);
+  }
+  // The first message showing at the top of the open chat, or null when the chat is at the bottom (or not on screen).
+  function readingPlace() {
+    const sc = view.scroll; if (!sc?.isConnected || nearBottom()) return null;
+    const top = sc.getBoundingClientRect().top;
+    for (const el of sc.querySelectorAll('.u-row[data-id]')) { const r = el.getBoundingClientRect(); if (r.bottom > top) return {id: el.dataset.id, off: r.top - top}; }
+    return null;
+  }
+  function putPlace(place) {
+    const sc = view.scroll, el = sc?.querySelector('.u-row[data-id="' + CSS.escape(place.id) + '"]');
+    if (!el) { if (sc) sc.scrollTop = sc.scrollHeight; return; }
+    sc.scrollTop += el.getBoundingClientRect().top - sc.getBoundingClientRect().top - place.off;
+    view.bottom = nearBottom(); if (view.pill) view.pill.hidden = view.bottom;
+  }
   function listBase(title) {
-    const root = $('unified-inbox'); root.replaceChildren();
+    const root = split.on ? panes().list : $('unified-inbox'); root.replaceChildren(); root.dataset.view = s.search != null ? 'search' : 'list';
+    if (split.on) { const r = $('unified-inbox'); r.dataset.split = ''; if (!s.person) r.dataset.view = root.dataset.view; }
     const head = node('header', 'u-header');
     if (s.search != null) {
-      const field = node('input', 'u-search'); field.type = 'search'; field.placeholder = 'Search'; field.setAttribute('aria-label', 'Search ' + title.toLowerCase()); field.value = s.search;
-      field.oninput = () => { s.search = field.value; root.querySelector('.u-list')?.dispatchEvent(new Event('filter')); };
+      const field = node('input', 'u-search'); field.type = 'search'; field.placeholder = 'Search messages'; field.setAttribute('aria-label', 'Search ' + title.toLowerCase()); field.value = s.search;
+      field.oninput = () => { s.search = field.value; scheduleSearch(); };
       head.append(iconButton('back', 'Close search', back), field);
       requestAnimationFrame(() => field.focus());
     } else {
-      head.append(node('h1', '', title), iconButton('search', 'Search', () => { s.search = ''; renderList(); }), iconButton('settings', 'Settings', accounts));
+      // On a phone-width window these controls sit at the bottom, in thumb reach (unified.css @container messenger).
+      const actions = node('div', 'u-head-actions');
+      const find = iconButton('search', 'Search', () => { s.search = ''; renderList(); }); find.dataset.wzKey = '/'; find.dataset.wzKeyLabel = 'Search chats';
+      actions.append(iconButton('qr', 'My QR codes', () => myCodes()), find, iconButton('settings', 'Settings', () => accounts(), 'u-settings-btn'));
+      head.append(node('h1', '', title), actions);
     }
     root.append(head); const notice = node('p', 'error'); notice.id = 'u-error'; notice.setAttribute('role', 'status'); root.append(notice); return root;
   }
-  function threadBase(name, subtitle, onInfo) {
-    const root = $('unified-inbox'); root.replaceChildren();
+  function threadBase(name, subtitle, onInfo, network, picture = '') {
+    const root = split.on ? panes().thread : $('unified-inbox'); root.replaceChildren(); root.dataset.view = 'thread';
+    if (split.on) $('unified-inbox').dataset.view = 'thread';
     const head = node('header', 'u-header u-thread-head');
-    head.append(iconButton('back', 'Back', back));
+    head.append(iconButton('back', 'Back', back, 'u-back')); // hidden in the desktop split: the list is right there
     const who = button('', onInfo || null, 'u-who'); who.disabled = !onInfo;
     const text = node('span', 'u-who-text'); text.append(node('strong', '', name)); if (subtitle) text.append(node('span', '', subtitle));
-    who.append(avatar(name, 'small'), text); head.append(who);
-    if (onInfo) head.append(iconButton('more', 'Edit', onInfo));
+    const face = node('span', 'u-av-wrap small'); face.append(withPicture(avatar(name, 'small'), picture, 'thread-header'));
+    if (network) { const b = netBadge(network, 'u-net'); b.setAttribute('aria-hidden', 'true'); face.append(b); }
+    who.append(face, text); head.append(who);
+    // 16.17: with a keyboard and no list beside the chat, ↑ / ↓ step to the previous / next chat (j / k sit on them)
+    if (!split.on && KEYBOARD.matches && hotkeys.order.length > 1) {
+      const up = iconButton('up', 'Previous chat', () => stepChat(-1), 'u-step'), dn = iconButton('down', 'Next chat', () => stepChat(1), 'u-step');
+      up.dataset.step = 'k'; dn.dataset.step = 'j'; head.append(up, dn);
+    }
+    if (onInfo) { const more = iconButton('more', 'Chat options', () => (view.menu || onInfo)(more)); head.append(more); }
+    if (split.on) { $('unified-inbox').dataset.detail = 'open'; head.append(iconButton('close', 'Close chat', closeDetail, 'u-close')); }
     root.append(head); const notice = node('p', 'error'); notice.id = 'u-error'; notice.setAttribute('role', 'status'); root.append(notice); return root;
   }
   function when(ms) {
@@ -128,30 +643,38 @@
     if (now - d < 6 * 864e5) return d.toLocaleDateString([], {weekday: 'long'});
     return d.toLocaleDateString([], {weekday: 'short', month: 'short', day: 'numeric', ...(d.getFullYear() !== now.getFullYear() ? {year: 'numeric'} : {})});
   }
+  function recentSharePeople(rows) {
+    // Directory entries may omit activity; the already-loaded chat lists know the latest timestamp.
+    const activity = new Map([...(store.lists.people || []), ...(store.lists.groups || [])].map(p => [p.id, p.last?.timestamp || 0]));
+    const stamp = p => Math.max(p.last?.timestamp || 0, activity.get(p.id) || 0);
+    return [...rows].sort((a, b) => stamp(b) - stamp(a) || a.display_name.localeCompare(b.display_name));
+  }
   async function newChat(shareText, placeShare) {
-    // The full A-Z contact list lives only here. From Wizard's share sheet it picks who gets the shared text.
-    const title = shareText || placeShare ? 'Send to…' : 'New chat';
+    // New chat keeps its A-Z directory; Send to… offers recent chats first.
+    // placeShare (a shared photo): called with the picked chat; settles true only once the photo is staged there.
+    const sharing = !!(shareText || placeShare), title = sharing ? 'Send to…' : 'New chat';
     const sheet = overlay(title); sheet.classList.add('tall');
     // Sharing: settles true once the owner picks someone (text placed) or closes the picker (declined).
-    const settled = shareText || placeShare ? new Promise(resolve => { s.answer = result => resolve(placeShare ? result === true : true); }) : null;
+    const settled = sharing ? new Promise(resolve => { s.answer = result => resolve(placeShare ? result === true : true); }) : null;
+    if (!sharing) sheet.append(button('New Wizard chat', () => { closeOverlay(); showNative(); native?.newChat(); }, 'secondary wide'));
     const search = node('input', 'u-search'); search.type = 'search'; search.placeholder = 'Search people and groups'; search.setAttribute('aria-label', 'Search people and groups');
     const list = node('div', 'u-directory'); sheet.append(search, list);
     try {
       const d = await call('directory'); if (s.overlay !== title) return settled;
-      const all = [...d.people, ...d.groups.map(g => ({...g, group: true}))].sort((a, b) => a.display_name.localeCompare(b.display_name));
+      const directory = [...d.people, ...d.groups.map(g => ({...g, group: true}))];
+      const all = sharing ? recentSharePeople(directory) : directory.sort((a, b) => a.display_name.localeCompare(b.display_name));
       const draw = () => {
         const q = search.value.trim().toLowerCase(); list.replaceChildren(); let letter = '';
         for (const p of all.filter(p => !q || p.display_name.toLowerCase().includes(q)).slice(0, 200)) {
           const first = ([...p.display_name.trim()][0] || '#').toUpperCase();
-          if (!q && first !== letter) { letter = first; list.append(node('p', 'u-letter', /\p{L}/u.test(first) ? first : '#')); }
+          if (!sharing && !q && first !== letter) { letter = first; list.append(node('p', 'u-letter', /\p{L}/u.test(first) ? first : '#')); }
           const row = button('', () => {
-            if (placeShare) {
-              const answer = s.answer; s.answer = null; closeOverlay();
-              Promise.resolve(placeShare(p.id)).then(answer, e => { error(e); answer(false); });
-            } else { if (shareText) placeShared(p.id, shareText); closeOverlay(); openPerson(p.id); }
+            if (placeShare) { const answer = s.answer; s.answer = null; closeOverlay(); Promise.resolve(placeShare(p.id)).then(answer, e => { error(e); answer(false); }); return; }
+            if (shareText) placeShared(p.id, shareText);
+            closeOverlay(); openPerson(p.id);
           }, 'u-directory-row');
-          const text = node('span', 'u-who-text'); text.append(node('strong', '', p.display_name), node('span', '', p.group ? 'Group' : networksOf(p).map(cap).join(' · ')));
-          row.append(avatar(p.display_name, 'small'), text); list.append(row);
+          const text = node('span', 'u-who-text'); text.append(node('strong', '', p.display_name), node('span', '', (p.group ? 'Group · ' : '') + networksOf(p).map(netLabel).join(' · ')));
+          row.append(netAvatar(p, 'small', 'directory'), text); list.append(row);
         }
         if (!list.children.length) list.append(node('p', 'u-empty', 'No one matches'));
       };
@@ -160,23 +683,24 @@
     return settled;
   }
   // ---------- live store: lists and open threads stay in memory and follow the change feed ----------
-  const store = {seq: 0, lists: {people: null, groups: null}, threads: {}, typing: {}, pending: 0};
+  const store = {seq: 0, lists: {people: null, groups: null}, threads: Object.create(null), typing: {}, pending: 0};
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const uid = () => (crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '') : Math.random().toString(36).slice(2) + Date.now().toString(36)).slice(0, 32);
   const listKey = p => (p.identities || []).some(i => i.kind === 'group') ? 'groups' : 'people';
   const mediaURL = (id, kind) => 'api/unified/media/' + encodeURIComponent(id) + (kind ? '?kind=' + kind : '');
-  const nameOf = sender => !sender ? '' : sender.startsWith('@') ? sender.slice(1).split(':')[0] : sender;
+  // Bridges tag names with their network ("Mike (WA)"); the chat already says which network it is.
+  const nameOf = sender => !sender ? '' : sender.startsWith('@') ? sender.slice(1).split(':')[0] : sender.replace(/ \((WA|Twitter|LinkedIn)\)$/, '');
   const fmtDur = ms => { const t = Math.max(0, Math.round((ms || 0) / 1000)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); };
   const fmtSize = b => !b ? '' : b < 1024 * 1024 ? Math.max(1, Math.round(b / 1024)) + ' KB' : (b / 1048576).toFixed(1) + ' MB';
   const QUICK = ['❤️', '👍', '👎', '😂', '😮', '😢'];
-  const MORE = ['🙏', '🔥', '🎉', '👏', '😍', '🤔', '😅', '🙌', '💯', '😎', '🥲', '😡', '🤯', '🤝', '👀', '✅', '😘', '🥰', '😆', '😬', '🤣', '😭', '🤗', '😴', '💪', '👌', '🙃', '😇', '🤩', '😱', '💔', '⭐', '🌹', '☕', '🍻', '🎂', '🚀', '💡', '📌', '❓', '❗', '👋'];
+  const MORE = ['😁', '😀', '😃', '😄', '😊', '🙂', '😉', '🥹', '😋', '😜', '🤪', '🤭', '🫡', '🤷', '🤦', '😔', '😞', '😤', '😩', '😳', '🤨', '😐', '😑', '🤢', '🙏', '🔥', '🎉', '👏', '😍', '🤔', '😅', '🙌', '💯', '😎', '🥲', '😡', '🤯', '🤝', '👀', '✅', '😘', '🥰', '😆', '😬', '🤣', '😭', '🤗', '😴', '💪', '👌', '🙃', '😇', '🤩', '😱', '💔', '⭐', '🌹', '☕', '🍻', '🎂', '🚀', '💡', '📌', '❓', '❗', '👋'];
   // Saved copy on this device: the list and recent threads paint before the session handshake; Lock erases it.
   const CACHE_KEY = 'messenger-unified-cache-v2', THREADS_KEPT = 40, MESSAGES_KEPT = 80;
   let saveTimer = null, savedOrder = [];
   function persist() {
     syncBadge(); shareTargets(); clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      const threads = {};
+      const threads = Object.create(null);
       for (const id of savedOrder.slice(0, THREADS_KEPT)) { const t = store.threads[id]; if (t) threads[id] = {person: t.person, has_more: true, messages: t.messages.filter(m => !m.pending && !m.failed).slice(-MESSAGES_KEPT).map(({retry, local, ...m}) => m)}; }
       try { localStorage.setItem(CACHE_KEY, JSON.stringify({lists: store.lists, threads, order: savedOrder.slice(0, THREADS_KEPT)})); } catch { /* storage full or blocked: still works online */ }
     }, 400);
@@ -190,9 +714,9 @@
     } catch { return false; }
   }
   // App badge: the total unread across chats and groups goes on Messenger's desk mark, like the phone's app badge.
-  const unreadById = {}, kindById = {}, mutedById = {}; let nativeUnread = 0;
+  const unreadById = {}, kindById = {}, mutedById = {}, lowById = {}, mediumById = {}; let nativeUnread = 0;
   let badgeShown = -1;
-  function noteUnread(rows) { for (const p of rows || []) { unreadById[p.id] = Math.max(0, p.unread | 0); kindById[p.id] = listKey(p); mutedById[p.id] = !!p.muted; } }
+  function noteUnread(rows) { for (const p of rows || []) { unreadById[p.id] = Math.max(0, p.unread | 0); kindById[p.id] = listKey(p); mutedById[p.id] = !!p.muted; lowById[p.id] = !!p.low_priority; mediumById[p.id] = !!p.medium_priority; } }
   // Each bottom tab carries its own unread count (Chats, Groups, Messenger), like Signal's tab badges.
   function paintTabBadges(counts) {
     for (const [tab, n] of Object.entries(counts)) {
@@ -205,10 +729,13 @@
   }
   function syncBadge() {
     noteUnread(store.lists.people); noteUnread(store.lists.groups);
-    const counts = {people: 0, groups: 0, messenger: nativeUnread};
-    for (const [id, n] of Object.entries(unreadById)) if (!mutedById[id]) counts[kindById[id] === 'groups' ? 'groups' : 'people'] += n;
+    const twins = wizardTwins();
+    const counts = {people: nativeRows.length ? twins.visible.reduce((n, p) => n + (p.muted || p.low_priority || p.medium_priority || !(p.unread > 0) ? 0 : 1), 0) : nativeUnread, groups: 0};
+    // The app badge counts unread chats (the same number as the Unread chip), not messages: one busy group
+    // must not push it to 99+. Muted, Medium and Low priority chats never count.
+    for (const [id, n] of Object.entries(unreadById)) { const t = twins.twinOf.get(id); if (n > 0 && !mutedById[id] && !lowById[id] && !mediumById[id] && !twins.hideMirror.has(id) && !(t && (t.muted || t.low_priority || t.medium_priority))) counts.people += 1; }
     paintTabBadges(counts);
-    const n = counts.people + counts.groups + counts.messenger;
+    const n = counts.people + counts.groups;
     if (n === badgeShown) return; badgeShown = n;
     try { Promise.resolve(window.WizardApp?.badge?.set?.(n)).catch(() => {}); } catch { /* standalone: no shell badge */ }
   }
@@ -217,10 +744,38 @@
   let csrf = () => '';
   let feedCtl = null;
 
+  // Instagram story replies/reactions arrive as a photo whose caption is Markdown:
+  // "> Replied to @Name's story\n\n[https://instagram.com/stories/…](…)". Read it as words, not markup.
+  const STORY = /^>\s*(Replied|Reacted) to @(.+?)['’]s story\s*(?:\n+\s*\[(https?:\/\/[^\]\s]+)\]\((https?:\/\/[^)\s]+)\))?\s*$/s;
+  const MD_LINK = /\[([^\]\n]{1,300})\]\((https?:\/\/[^)\s]+)\)/g;
+  function storyOf(text, outgoing) {
+    text = text || '';
+    const m = STORY.exec(text.trim());
+    if (m) return {verb: m[1].toLowerCase(), url: m[4] || m[3] || '', label: outgoing ? 'You ' + m[1].toLowerCase() + ' to their story' : m[1] + ' to your story', rest: ''};
+    const only = /^\[(https?:\/\/(?:www\.)?instagram\.com\/stories\/[^\]\s]+)\]\((https?:\/\/[^)\s]+)\)\s*$/.exec(text.trim());
+    if (only) return {verb: 'shared', url: only[2], label: outgoing ? 'You shared a story' : 'Shared a story', rest: ''};
+    return null;
+  }
+  // Plain words for previews: Markdown links show their text (or the site), bare links show the site.
+  const plainText = text => (text || '').replace(MD_LINK, (_, label, url) => /^https?:\/\//.test(label) ? siteOf(url) : label).replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/https?:\/\/[^\s)]+/g, url => siteOf(url)).replace(/^>\s?/gm, '').replace(/\s*\n+\s*/g, ' ').trim();
+  function siteOf(url) { try { return new URL(url).hostname.replace(/^www\./, '') + (new URL(url).pathname.length > 1 ? '/…' : ''); } catch { return url; } }
+  // Media a bridge could not deliver (WhatsApp keeps old media only on the sender's phone for a while) and
+  // messages it is still decrypting: a quiet placeholder instead of the bridge's own sentence. Same words as unified.unavailable_label.
+  function unavailableLabel(kind) {
+    if (kind === 'waiting') return '⏳ Waiting for this message';
+    if (kind === 'undecryptable') return "🔒 Message couldn't be decrypted";
+    if (kind === 'status') return '🟢 Status update';
+    return ({photo: '📷 Photo', gif: 'GIF', voice: '🎤 Voice message', video: '🎬 Video', file: '📎 File', sticker: 'Sticker', audio: '🎵 Audio'}[kind] || '📎 Media') + ' not available';
+  }
   function snippet(last) {
     if (!last) return '';
     if (last.deleted) return 'This message was deleted';
-    const label = last.voice ? '🎤 Voice message' : {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.audio': '🎵 Audio', 'm.file': '📎 File', 'm.sticker': 'Sticker', 'm.location': '📍 Location'}[last.msgtype];
+    const story = storyOf(last.text, false);
+    if (story) return (story.verb === 'reacted' ? '❤️ ' : story.verb === 'replied' ? '↩︎ ' : '📖 ') + story.label;
+    last = {...last, text: plainText(last.text)};
+    const label = last.unavailable ? unavailableLabel(last.unavailable) : last.voice ? '🎤 Voice message' : last.sticker ? 'Sticker' : last.gif ? 'GIF'
+      : {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.audio': '🎵 Audio', 'm.file': '📎 File', 'm.sticker': 'Sticker', 'm.location': '📍 Location'}[last.msgtype];
     return label ? label + (last.text ? ' · ' + last.text : '') : last.text;
   }
   function mergeList(people) {
@@ -234,26 +789,29 @@
   function mergeMessages(pid, rows) {
     const t = store.threads[pid]; if (!t) return;
     const oldest = t.messages.find(m => !m.pending)?.timestamp ?? 0;
-    for (const m of rows) {
+    for (const incoming of rows) {
+      const m = pendingReactions(pid, incoming);
       const i = t.messages.findIndex(x => x.id === m.id || (m.client_id && x.client_id === m.client_id));
       if (i >= 0) { const local = t.messages[i].local; t.messages[i] = m; if (local) m.local = local; }
       else if (!t.has_more || m.timestamp >= oldest) t.messages.push(m);
     }
-    t.messages.sort((a, b) => (a.pending ? 1 : 0) - (b.pending ? 1 : 0) || a.timestamp - b.timestamp || (a.id < b.id ? -1 : 1));
+    // Telegram parts share second-resolution timestamps; random Matrix IDs must not reorder/split albums.
+    t.messages.sort((a, b) => (a.pending ? 1 : 0) - (b.pending ? 1 : 0) || a.timestamp - b.timestamp || ((a.timeline_order || 0) - (b.timeline_order || 0)) || (a.id < b.id ? -1 : 1));
   }
   function apply(r) {
-    if (r.reset) { for (const k in unreadById) delete unreadById[k]; store.seq = r.seq; store.lists = {people: null, groups: null}; store.threads = {}; if (s.person) openPerson(s.person); else renderList(); return; }
+    if (r.reset) { for (const k in unreadById) delete unreadById[k]; store.seq = r.seq; store.lists = {people: null, groups: null}; store.threads = Object.create(null); if (s.person) { openPerson(s.person); if (split.on) renderList(); } else renderList(); return; } // desktop: the list beside the chat reloads too
     store.seq = Math.max(store.seq, r.seq);
+    if (typeof r.labels_rev === 'number' && labelCat.ok && r.labels_rev !== labelCat.rev) loadLabelCatalog(true);
     for (const id of r.removed || []) {
       for (const k of ['people', 'groups']) if (store.lists[k]) store.lists[k] = store.lists[k].filter(p => p.id !== id);
-      delete unreadById[id]; delete mutedById[id]; delete kindById[id];
+      delete unreadById[id]; delete mutedById[id]; delete lowById[id]; delete mediumById[id]; delete kindById[id];
     }
     if (r.removed?.length) syncBadge();
     if (r.people?.length) { noteUnread(r.people); mergeList(r.people); }
     for (const p of r.people || []) store.typing[p.id] = (r.typing || {})[p.id] || [];
     for (const [pid, rows] of Object.entries(r.messages || {})) mergeMessages(pid, rows);
     if (s.person && store.threads[s.person]) { paintHead(); paintThread(); }
-    else if (!s.person && s.tab !== 'messenger') drawList();
+    if ((!s.person || split.on) && s.tab !== 'messenger') drawList();
     persist();
   }
   async function feed() {
@@ -265,80 +823,400 @@
       if (!s.ready || ctl.signal.aborted) return;
       try {
         // Long-poll: answers the moment anything changes; jitter keeps two views from syncing up.
-        apply(await api('api/unified/updates?since=' + store.seq + '&hold=' + (20 + Math.random() * 3).toFixed(1), {signal: ctl.signal}));
-      } catch (e) { if (ctl.signal.aborted) return; await sleep(3000); }
+        // A phone that slept or changed network can leave this request hanging forever on a dead connection, and the
+        // list then never moves again (James, 26 Oct 2026: chats sent from the PC never showed on the phone). Each
+        // poll gives up after 35 s and asks again; waking the phone restarts the feed at once (see wake below).
+        const one = new AbortController(), giveUp = setTimeout(() => one.abort(), 35000), stop = () => one.abort();
+        ctl.signal.addEventListener('abort', stop, {once: true});
+        try { apply(await api('api/unified/updates?since=' + store.seq + '&hold=' + (20 + Math.random() * 3).toFixed(1), {signal: one.signal})); }
+        finally { clearTimeout(giveUp); ctl.signal.removeEventListener('abort', stop); }
+      } catch (e) { if (ctl.signal.aborted) return; await sleep(1500); }
     }
   }
 
   // ---------- chat list ----------
   function skeleton(rows, cls) { const box = node('div', 'u-skeleton ' + cls); for (let i = 0; i < rows; i++) { const r = node('div', 'u-sk-row'); r.append(node('span', 'u-sk-av'), node('span', 'u-sk-lines')); box.append(r); } return box; }
+  // One Inbox for every network (like Beeper): direct chats and groups together, narrowed by filter chips.
+  async function loadLists(force = false) {
+    const keys = ['people', 'groups'].filter(k => force || !store.lists[k]);
+    const rows = await Promise.all(keys.map(k => call(k)));
+    keys.forEach((k, i) => { store.lists[k] = rows[i][k] || []; });
+    // The older of the two cursors, so the change feed cannot skip anything between the two reads.
+    if (!store.seq && rows.length) { store.seq = Math.min(...rows.map(r => r.seq || 0)); feed(); }
+  }
+  // Whether a list load that started earlier may still paint: in the split the open chat never cancels it.
+  const listLive = (epoch, gen) => split.on ? gen === split.listGen && s.ready : s.epoch === epoch && !s.person;
   async function renderList() {
-    const epoch = ++s.epoch, key = s.tab === 'groups' ? 'groups' : 'people';
-    const root = listBase(key === 'groups' ? 'Groups' : 'Chats');
+    const epoch = ++s.epoch, gen = ++split.listGen;
+    $('messenger')?.classList.toggle('u-compact', !previewsOn());
+    const root = listBase('Inbox');
+    if (split.on && !s.person && !s.native && !detailOpen()) closePane();
+    if (s.search == null) root.append(filterChips()); // account status lives in Settings, not on top of the Inbox
     const list = node('div', 'u-list'); list.addEventListener('filter', drawList); root.append(list);
-    if (key === 'people' && s.search == null) root.append(iconButton('compose', 'New chat', () => newChat(), 'u-fab'));
-    if (store.lists[key]) { drawList(); if (!store.seq && s.ready) freshen(key, epoch); return; }
-    list.append(skeleton(8, 'list'));
+    if (s.search == null) { const fab = iconButton('compose', 'New chat', () => split.on ? newMessagePane() : newChat(), 'u-fab'); fab.dataset.wzKey = 'n'; fab.dataset.wzKeyLabel = 'New chat'; root.append(fab); }
+    refreshAccounts();
+    if (store.lists.people && store.lists.groups) { drawList(); if (!store.seq && s.ready) freshen(null, epoch); return; }
+    if (store.lists.people) drawList(); else list.append(skeleton(8, 'list'));
     if (!s.ready) return;
     try {
-      const r = await call(key);
-      if (!store.lists[key]) store.lists[key] = r[key] || [];
-      if (!store.seq) { store.seq = r.seq || 0; feed(); }
-      if (s.epoch === epoch && !s.person) drawList();
+      await loadLists();
+      if (listLive(epoch, gen)) drawList();
       persist();
-    } catch (e) { error(e); }
+    } catch (e) {
+      // Never leave skeletons on screen: the list asks again by itself (a restart or a refused burst passes).
+      error(e); if (s.ready) setTimeout(() => { if (s.ready && listLive(epoch, gen) && !store.lists.people) renderList(); }, 2500 + Math.random() * 1500);
+    }
   }
   // A saved list painted first; the server's copy replaces it, then the change feed keeps it current.
-  async function freshen(key, epoch) {
+  async function freshen(_key, epoch) {
+    const gen = split.listGen;
     try {
-      const r = await call(key); store.lists[key] = r[key] || [];
-      if (!store.seq) { store.seq = r.seq || 0; feed(); }
-      if (s.epoch === epoch && !s.person) drawList();
+      await loadLists(true);
+      if (listLive(epoch, gen)) drawList();
       persist();
-    } catch (e) { error(e); }
+    } catch (e) { error(e); if (s.ready) setTimeout(() => { if (s.ready && !store.seq) freshen(null, s.epoch); }, 3000 + Math.random() * 1500); }
   }
-  function drawList() {
-    const root = $('unified-inbox'), list = root.querySelector('.u-list'); if (!list || s.person) return;
-    const groups = s.tab === 'groups', people = store.lists[groups ? 'groups' : 'people']; if (!people) return;
-    let label = root.dataset.label || '';
-    if (groups && !root.querySelector('.u-chips')) {
-      const labels = [...new Set(people.flatMap(p => p.labels || []))];
-      if (labels.length) {
-        const chips = node('div', 'u-chips'); chips.setAttribute('role', 'group'); chips.setAttribute('aria-label', 'Filter groups by label');
-        const paintChips = () => { for (const c of chips.children) c.setAttribute('aria-pressed', String(c.dataset.label === (root.dataset.label || ''))); };
-        for (const l of ['', ...labels]) { const chip = button(l || 'All', () => { root.dataset.label = l; paintChips(); drawList(); }, 'u-chip'); chip.dataset.label = l; chips.append(chip); }
-        paintChips(); root.insertBefore(chips, list);
+  // ---------- accounts: always one tap away from the Inbox ----------
+  let accountsSeen = null;
+  async function refreshAccounts() {
+    if (!s.ready) return;
+    try {
+      const d = await call('connectors');
+      accountsSeen = (d.providers || []).filter(p => p.network === 'telegram' || (p.supported && p.state !== 'not_configured'));
+      paintAccounts();
+    } catch { /* older installs: Telegram lives in Settings */ }
+  }
+  function accountsBanner() { const box = node('div', 'u-accounts'); box.id = 'u-accounts'; paintAccounts(box); return box; }
+  function paintAccounts(box = $('u-accounts')) {
+    if (!accountsSeen) return;
+    const on = accountsSeen.filter(p => p.state === 'connected'), broken = accountsSeen.filter(p => p.state === 'degraded');
+    // The Inbox only carries a small dot on Settings when an account needs reconnecting.
+    for (const b of document.querySelectorAll('.u-settings-btn')) { b.classList.toggle('warn', broken.length > 0); b.setAttribute('aria-label', broken.length ? 'Settings, ' + broken.map(p => p.label).join(', ') + ' needs reconnecting' : 'Settings'); }
+    syncBar();
+    if (!box) return;
+    box.replaceChildren();
+    const strip = node('div', 'u-acct-strip');
+    // Connected accounts first, in full colour; the rest are dimmed so the strip reads as status at a glance.
+    for (const p of [...accountsSeen].sort((a, b) => (b.state === 'connected') - (a.state === 'connected'))) {
+      const m = netBadge(p.network, 'u-acct-dot' + (p.state === 'connected' ? ' on' : p.state === 'degraded' ? ' warn' : ''));
+      m.title = p.label + ': ' + (p.state === 'connected' ? 'connected' : p.state === 'degraded' ? 'needs reconnecting' : 'not connected'); strip.append(m);
+    }
+    const text = broken.length ? broken.map(p => p.label).join(', ') + ' needs reconnecting'
+      : on.length ? on.map(p => p.label).join(', ') : 'No accounts connected yet';
+    const open = node('div', 'u-acct-open' + (broken.length ? ' warn' : ''));
+    open.append(strip, node('span', 'u-acct-text', text));
+    box.append(open);
+  }
+  // Inbox filters (Miguel, 2 Nov 2026: "no scrolling sideways"). Two rows that always fit the window:
+  //  1. One segmented control: All · Unread · Medium · Low (exactly one on). Low is the Low priority folder; Medium
+  //     lists the chats that stay in All but never ping.
+  //  2. One icon-only button per network (narrows the row-1 view), then Filters (Type, Labels) on the right. Networks
+  //     that do not fit fold into a "+N" button opening the same menu, never a scroll.
+  const SEG_KEY = 'messenger-inbox-seg', NET_KEY = 'messenger-inbox-net', TYPE_KEY = 'messenger-inbox-type', LABEL_KEY = 'messenger-inbox-label';
+  const SEGMENTS = [['all', 'All'], ['unread', 'Unread'], ['medium', 'Medium'], ['low', 'Low']];
+  const TYPES = [['all', 'All chats'], ['direct', 'Direct'], ['groups', 'Groups'], ['merged', 'Merged']];
+  const kept = key => { try { return sessionStorage.getItem(key) || ''; } catch { return ''; } };
+  const keep = (key, value) => { try { if (value) sessionStorage.setItem(key, value); else sessionStorage.removeItem(key); } catch { /* memory only */ } };
+  const filterState = {net: kept(NET_KEY), type: kept(TYPE_KEY) || 'all', label: kept(LABEL_KEY), nets: [], labels: [], merged: false};
+  function setSeg(seg) { s.seg = SEGMENTS.some(x => x[0] === seg) ? seg : 'all'; setLowView(s.seg === 'low'); keep(SEG_KEY, s.seg === 'all' ? '' : s.seg); }
+  function setNarrow(key, value) {
+    if (key === 'net') { filterState.net = value; keep(NET_KEY, value); }
+    if (key === 'type') { filterState.type = value || 'all'; keep(TYPE_KEY, value === 'all' ? '' : value); }
+    if (key === 'label') { filterState.label = value; keep(LABEL_KEY, value); }
+    drawList();
+  }
+  function filterChips() {
+    const box = node('div', 'u-chips u-filter-rows'); box.id = 'u-filters'; box.setAttribute('role', 'group'); box.setAttribute('aria-label', 'Filter chats');
+    const seg = node('div', 'u-seg'); seg.setAttribute('role', 'radiogroup'); seg.setAttribute('aria-label', 'Show');
+    for (const [value, text] of SEGMENTS) {
+      const b = button('', () => { setSeg(value); drawList(); }, 'u-seg-btn'); b.dataset.seg = value; b.setAttribute('role', 'radio');
+      b.append(node('span', 'u-seg-text', text), node('span', 'u-seg-count')); seg.append(b);
+    }
+    const row = node('div', 'u-netrow'), nets = node('div', 'u-nets');
+    const more = button('', e => filterMenu(e.currentTarget, true), 'u-chip net u-more-nets'); more.hidden = true; more.setAttribute('aria-haspopup', 'menu');
+    const filters = button('', e => filterMenu(e.currentTarget, false), 'u-chip u-filter-btn'); filters.setAttribute('aria-haspopup', 'menu'); filters.setAttribute('aria-expanded', 'false');
+    filters.append(node('span', 'u-filter-text', 'Filters'), node('span', 'u-filter-dot'));
+    row.append(nets, more, filters); box.append(seg, row);
+    try { new ResizeObserver(() => fitNets(box)).observe(row); } catch { /* old browsers: fitNets runs on every paint */ }
+    return box;
+  }
+  const isMedium = p => !!p.medium_priority && !p.low_priority;
+  // Row 2 narrows whatever row 1 shows: one network, a chat type and a label.
+  function narrowed(p) {
+    const f = filterState;
+    if (f.net && !matchesFilter(p, 'net:' + f.net)) return false;
+    if (f.type !== 'all' && !matchesFilter(p, f.type)) return false;
+    if (f.label && !matchesFilter(p, 'label:' + f.label)) return false;
+    return true;
+  }
+  function inSegment(p, seg) {
+    if (seg === 'unread') return p.unread > 0 && !isMedium(p); // Medium never counts as unread
+    if (seg === 'medium') return isMedium(p);
+    return true;
+  }
+  // all = every listed chat (Low included), returns the chats row 1 + row 2 select.
+  function paintFilters(all) {
+    const box = $('u-filters'); if (!box) return all;
+    const connected = (accountsSeen || []).filter(p => p.state === 'connected' || p.state === 'degraded').map(p => p.network);
+    const nets = [...new Set([...all.flatMap(networksOf), ...connected])].filter(n => n !== 'private' && n !== 'messenger').sort((a, b) => netLabel(a).localeCompare(netLabel(b))).concat('private');
+    const labels = labelNames(all), merged = all.some(p => networksOf(p).length > 1);
+    const f = Object.assign(filterState, {nets, labels, merged});
+    if (f.net && !nets.includes(f.net)) setNarrowQuiet('net', '');
+    if (!TYPES.some(t => t[0] === f.type) || (f.type === 'merged' && !merged)) setNarrowQuiet('type', 'all');
+    if (f.label && labelCat.ok && !labels.includes(f.label)) setNarrowQuiet('label', '');
+    // Row 1: exactly one segment. Counts are quiet text: unread chats that would ping (never muted, Medium or Low).
+    const inbox = all.filter(p => !isLow(p) && narrowed(p));
+    const counts = {unread: inbox.filter(p => p.unread > 0 && !p.muted && !isMedium(p)).length, medium: inbox.filter(p => isMedium(p) && p.unread > 0 && !p.muted).length};
+    for (const b of box.querySelectorAll('.u-seg-btn')) {
+      const v = b.dataset.seg, n = counts[v] || 0, c = b.querySelector('.u-seg-count');
+      b.setAttribute('aria-checked', String(v === s.seg)); b.tabIndex = v === s.seg ? 0 : -1;
+      c.textContent = n ? (n > 99 ? '99+' : String(n)) : ''; c.hidden = !n;
+      const name = SEGMENTS.find(x => x[0] === v)[1]; b.setAttribute('aria-label', n ? name + ', ' + n + ' unread' : name); b.title = b.getAttribute('aria-label');
+    }
+    // Row 2: one icon per network.
+    const row = box.querySelector('.u-nets'), sig = nets.join('|');
+    if (row.dataset.sig !== sig) {
+      row.dataset.sig = sig; row.replaceChildren();
+      for (const n of nets) {
+        const label = n === 'private' ? 'Wizard' : netLabel(n);
+        const chip = button('', () => setNarrow('net', filterState.net === n ? '' : n), 'u-chip net');
+        chip.dataset.filter = 'net:' + n; chip.setAttribute('aria-label', label); chip.title = label;
+        chip.append(netBadge(n, 'u-chip-icon')); row.append(chip);
       }
     }
-    const q = (s.search || '').trim().toLowerCase(), frag = document.createDocumentFragment();
-    for (const p of people.filter(p => (!label || (p.labels || []).includes(label)) && (!q || p.display_name.toLowerCase().includes(q) || (p.last?.text || '').toLowerCase().includes(q)))) {
-      const card = button('', () => { if (card.dataset.held) { delete card.dataset.held; return; } openPerson(p.id, p); }, 'u-person' + (p.unread ? ' unread' : '') + (p.muted ? ' muted' : ''));
+    for (const c of row.querySelectorAll('.u-chip')) c.setAttribute('aria-pressed', String(c.dataset.filter === 'net:' + f.net));
+    const btn = box.querySelector('.u-filter-btn'), on = f.type !== 'all' || !!f.label;
+    btn.classList.toggle('on', on); btn.setAttribute('aria-label', on ? 'Filters, ' + [f.type !== 'all' ? TYPES.find(t => t[0] === f.type)[1] : '', f.label].filter(Boolean).join(', ') + ' on' : 'Filters');
+    btn.title = btn.getAttribute('aria-label');
+    fitNets(box);
+    const seg = s.seg || 'all';
+    return (seg === 'low' ? all.filter(isLow) : all.filter(p => !isLow(p))).filter(p => narrowed(p) && inSegment(p, seg));
+  }
+  function setNarrowQuiet(key, value) { filterState[key] = value; keep({net: NET_KEY, type: TYPE_KEY, label: LABEL_KEY}[key], value === 'all' ? '' : value); }
+  // Fold networks that do not fit into "+N". The chosen network always stays visible.
+  function fitNets(box = $('u-filters')) {
+    const row = box?.querySelector('.u-netrow'); if (!row || !row.clientWidth) return;
+    const chips = [...row.querySelectorAll('.u-nets .u-chip')], more = row.querySelector('.u-more-nets'), filters = row.querySelector('.u-filter-btn');
+    if (!chips.length) { more.hidden = true; return; }
+    for (const c of chips) c.hidden = false;
+    const gap = parseFloat(getComputedStyle(row).columnGap) || 0, w = chips[0].offsetWidth + gap;
+    const room = row.clientWidth - filters.offsetWidth - gap, fit = Math.max(1, Math.floor((room + gap) / w));
+    if (chips.length <= fit) { more.hidden = true; return; }
+    const show = new Set(chips.slice(0, fit - 1)), chosen = chips.find(c => c.getAttribute('aria-pressed') === 'true');
+    if (chosen && !show.has(chosen)) { show.delete(chips[fit - 2]); show.add(chosen); }
+    for (const c of chips) c.hidden = !show.has(c);
+    const n = chips.length - show.size; more.hidden = false; more.textContent = '+' + n;
+    more.setAttribute('aria-label', n + ' more networks'); more.title = chips.filter(c => !show.has(c)).map(c => c.getAttribute('aria-label')).join(', ');
+  }
+  // The Filters popover (and "+N"): Type, Labels and, when networks folded away, every network.
+  function filterMenu(anchor, netsFirst) {
+    const f = filterState, folded = !!$('u-filters')?.querySelector('.u-more-nets:not([hidden])');
+    const pick = (key, value) => () => setNarrow(key, value);
+    const radio = (label, checked, run) => ({label, icon: checked ? 'check' : 'none', checked, run});
+    const netItems = folded ? [{head: 'Networks'}, radio('All networks', !f.net, pick('net', '')),
+      ...f.nets.map(n => radio(n === 'private' ? 'Wizard' : netLabel(n), f.net === n, pick('net', n)))] : [];
+    const typeItems = [{head: 'Type'}, ...TYPES.filter(t => t[0] !== 'merged' || f.merged).map(([v, t]) => radio(t, f.type === v, pick('type', v)))];
+    const labelItems = [{head: 'Labels'}, ...(f.labels.length ? [radio('Any label', !f.label, pick('label', '')), ...f.labels.map(l => radio(l, f.label === l, pick('label', l)))] : []), {label: f.labels.length ? 'Manage labels' : 'Make a label', icon: 'tag', run: () => manageLabels()}];
+    anchor.setAttribute('aria-expanded', 'true');
+    actionMenu(anchor, netsFirst ? 'Networks' : 'Filters', netsFirst ? [...netItems, ...typeItems, ...labelItems] : [...typeItems, ...labelItems, ...netItems], {cls: 'u-filter-menu', flip: true, side: 'right', onClose: () => anchor.setAttribute('aria-expanded', 'false')});
+  }
+  function matchesFilter(p, f) {
+    if (f === 'all') return true;
+    if (f === 'unread') return p.unread > 0;
+    if (f === 'direct') return listKey(p) === 'people';
+    if (f === 'merged') return networksOf(p).length > 1;
+    if (f === 'groups') return listKey(p) === 'groups';
+    if (f === 'net:private') return networksOf(p).some(n => n === 'private' || n === 'messenger');
+    if (f.startsWith('net:')) return networksOf(p).includes(f.slice(4));
+    if (f.startsWith('label:')) return (p.labels || []).includes(f.slice(6));
+    return true;
+  }
+  function netAvatar(p, size = '', surface = 'list') {
+    const wrap = node('span', 'u-av-wrap' + (size ? ' ' + size : '')); wrap.append(withPicture(avatar(p.display_name, size), pictureURL(p.id, p.avatar), surface + ':' + p.id));
+    // Merged chats show every network's badge, overlapped (up to three).
+    const nets = networksOf(p).slice(0, 3);
+    nets.forEach((n, i) => { const b = netBadge(n, 'u-net' + (i ? ' u-net-' + i : '')); wrap.append(b); });
+    if (nets.length > 1) wrap.classList.add('multi');
+    return wrap;
+  }
+  let searchTimer, searchGeneration = 0;
+  const searchView = {query: null, rows: [], cursor: null, loading: false};
+  function scheduleSearch() {
+    clearTimeout(searchTimer); const generation = ++searchGeneration;
+    Object.assign(searchView, {query: s.search, rows: [], cursor: null, loading: !!s.search.trim()});
+    drawSearch();
+    if (s.search.trim()) searchTimer = setTimeout(() => loadSearch(generation), 200);
+  }
+  async function loadSearch(generation = searchGeneration, cursor = null) {
+    const query = s.search, epoch = s.epoch;
+    if (!s.ready || (s.person && !split.on) || query == null || !query.trim() || generation !== searchGeneration) return;
+    try {
+      const r = await call('search?' + new URLSearchParams({q: query, limit: '50', ...(cursor ? {cursor} : {})}));
+      if (generation !== searchGeneration || (!split.on && (epoch !== s.epoch || s.person)) || query !== s.search || !s.ready) return;
+      searchView.rows.push(...r.messages); searchView.cursor = r.next_cursor; searchView.loading = false; drawSearch();
+    } catch (e) {
+      if (generation !== searchGeneration || epoch !== s.epoch || query !== s.search) return;
+      searchView.loading = false; drawSearch(); error(e);
+    }
+  }
+  function drawSearch() {
+    const list = (split.on ? $('u-pane-list') : $('unified-inbox'))?.querySelector('.u-list'); if (!list || (s.person && !split.on) || s.search == null) return;
+    list.replaceChildren();
+    for (const m of searchView.rows) {
+      const row = button('', () => action(async () => {
+        if (split.on) { for (const el of list.querySelectorAll('.u-person.selected')) { el.classList.remove('selected'); el.removeAttribute('aria-current'); } row.classList.add('selected'); row.setAttribute('aria-current', 'true'); }
+        await openPerson(m.person_id);
+        const t = store.threads[m.person_id];
+        while (s.person === m.person_id && t && !t.messages.some(x => x.id === m.message_id) && t.has_more && t.next_cursor) await fetchOlder(t, m.person_id, call);
+        if (s.person === m.person_id) { paintThread(); jumpTo(m.message_id); }
+      }), 'u-person');
+      const info = node('span', 'u-person-info');
+      info.append(node('strong', '', m.display_name + ' · ' + netLabel(m.network)), node('span', 'u-snippet', m.original), node('time', 'u-when', when(m.timestamp)));
+      if (m.translated && m.translated !== m.original) info.append(node('span', 'u-snippet', m.translated));
+      row.append(info); list.append(row);
+    }
+    if (searchView.loading) list.append(node('p', 'u-empty', 'Searching stored messages…'));
+    else if (!searchView.rows.length) list.append(node('p', 'u-empty', s.search.trim() ? 'No stored messages match' : 'Type any words from a message. Every network is searched at once.'));
+    if (searchView.cursor) {
+      const more = button('More results', () => { more.disabled = true; loadSearch(searchGeneration, searchView.cursor); }); list.append(more);
+    }
+  }
+  // A feed/backfill repaint must not detach a chat button between pointerdown
+  // and click: browsers then target the list instead and the chat never opens.
+  // Keep the pressed row in place until its click has dispatched; reconcile next.
+  let listPress = null, listPaintPending = false, listPressExpiry = null;
+  const releaseListPress = () => {
+    listPress = null; clearTimeout(listPressExpiry);
+    if (listPaintPending) { listPaintPending = false; drawList(); }
+  };
+  document.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || !e.target.closest?.('.u-person')) return;
+    listPress = e.pointerId; clearTimeout(listPressExpiry);
+    listPressExpiry = setTimeout(releaseListPress, 5000);
+  }, true);
+  for (const type of ['pointerup', 'pointercancel']) document.addEventListener(type, e => {
+    if (e.pointerId === listPress) setTimeout(releaseListPress, 0);
+  }, true);
+  window.addEventListener('blur', releaseListPress);
+  function drawList() {
+    if (listPress !== null) { listPaintPending = true; return; }
+    if (contacts.ok) applyContacts();
+    if (s.search != null) {
+      if (searchView.query !== s.search) scheduleSearch(); else drawSearch();
+      return;
+    }
+    const list = (split.on ? $('u-pane-list') : $('unified-inbox'))?.querySelector('.u-list'); if (!list || (s.person && !split.on)) return;
+    const twins = wizardTwins();
+    const everyone = [...(store.lists.people || []), ...(store.lists.groups || [])].filter(p => !twins.hideMirror.has(p.id))
+      .map(p => { const t = twins.twinOf.get(p.id); if (!t) return p; const low = !!(p.low_priority || t.low_priority); return {...p, muted: !!(p.muted || t.muted), low_priority: low, medium_priority: !low && !!(p.medium_priority || t.medium_priority), twin: t}; })
+      .concat(twins.visible)
+      .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.last?.timestamp || 0) - (a.last?.timestamp || 0));
+    // Low priority (Beeper's name; WhatsApp's Archive): out of All/Unread, unread counts and notifications, and a new
+    // message never brings a chat back. Medium priority stays in All but never pings (no push, badge or Unread).
+    // Row 1 picks the folder (All, Unread, Medium, Low); row 2 (network, Filters) narrows it.
+    const people = paintFilters(everyone);
+    const q = (s.search || '').trim().toLowerCase(), frag = document.createDocumentFragment(), compact = !previewsOn();
+    $('messenger')?.classList.toggle('u-compact', compact);
+    const shown = people.filter(p => (!q || p.display_name.toLowerCase().includes(q) || (p.last?.text || '').toLowerCase().includes(q)));
+    hotkeys.order = shown.map(p => ({key: p.native ? 'native:' + p.group_id : p.id, p})); syncKeys(); // j/k walk exactly these rows
+    for (const p of shown) {
+      const groups = listKey(p) === 'groups';
+      const card = button('', () => { if (card.dataset.held) { delete card.dataset.held; return; } p.native ? openNative(p.group_id, card) : openPerson(p.id, p); }, 'u-person' + (p.unread ? ' unread' : '') + (p.muted ? ' muted' : ''));
       holdToMenu(card, () => chatMenu(p, card));
-      card.append(avatar(p.display_name));
+      if (p.native) card.dataset.nativeGroup = p.group_id;
+      card.dataset.pid = p.native ? 'native:' + p.group_id : p.id;
+      if (split.on && (p.native ? s.native && s.nativeGroup === p.group_id : p.id === s.person)) { card.classList.add('selected'); card.setAttribute('aria-current', 'true'); }
+      card.append(netAvatar(p, compact ? 'small' : '')); card.dataset.network = networksOf(p)[0] || '';
       const info = node('span', 'u-person-info');
       const top = node('span', 'u-chat-top'); const name = node('strong', '', p.display_name);
       if (p.muted) { const m = icon('belloff'); m.classList.add('u-muted-mark'); m.setAttribute('aria-label', 'Muted'); m.removeAttribute('aria-hidden'); name.append(m); }
       top.append(name);
+      const typing = (store.typing[p.id] || []).length;
+      const dr = s.person !== p.id && !p.native ? (s.draftIndex?.[p.id] || ((s.drafts[p.id] || '').trim() ? {text: s.drafts[p.id]} : null)) : null;
+      if (compact) {
+        // Compact list (Miguel's default): the name, a one-word state, the time and the unread count. No last line.
+        if (typing) top.append(node('span', 'u-state typing', 'typing…'));
+        else if (dr) top.append(node('span', 'u-state draft', 'Draft'));
+        if (p.last) top.append(node('time', 'u-when', when(p.last.timestamp)));
+        if (p.unread) top.append(node('span', 'u-badge' + (p.muted || isLow(p) || isMedium(p) ? ' muted' : ''), p.unread > 99 ? '99+' : String(p.unread)));
+        info.append(top); card.append(info); frag.append(card);
+        continue;
+      }
       if (p.last) top.append(node('time', 'u-when', when(p.last.timestamp)));
       const bottom = node('span', 'u-chat-bottom');
-      const typing = (store.typing[p.id] || []).length;
       if (typing) bottom.append(node('span', 'u-snippet typing', 'typing…'));
-      else if (p.last) {
-        const who = p.last.outgoing ? 'You: ' : groups && p.last.sender ? nameOf(p.last.sender).split(' ')[0] + ': ' : '';
-        bottom.append(node('span', 'u-snippet', who + snippet(p.last)));
+      else if (dr) {
+        // A waiting draft (yours or your Wizard's) leads the row, like every messenger shows an unsent reply.
+        const n = (dr.attachments || []).length, line = node('span', 'u-snippet draft');
+        line.append(node('span', 'u-snippet-who', 'Draft: '), (dr.text || '').trim().split('\n')[0] || (n ? n + (n > 1 ? ' attachments' : ' attachment') : ''));
+        bottom.append(line);
       }
-      if (p.unread) bottom.append(node('span', 'u-badge' + (p.muted ? ' muted' : ''), p.unread > 99 ? '99+' : String(p.unread)));
+      else if (p.last) {
+        // Own last message always reads "You:", never the owner's display name; groups name the other sender.
+        const who = p.last.outgoing ? 'You' : groups && p.last.sender ? nameOf(p.last.sender).split(' ')[0] : '';
+        const line = node('span', 'u-snippet' + (p.last.outgoing ? ' mine' : ''));
+        if (who) line.append(node('span', 'u-snippet-who', who + ': '));
+        line.append(snippet(p.last) || ''); bottom.append(line);
+      }
+      if (p.unread_mentions) bottom.append(node('span', 'u-badge u-mention-badge', '@'));
+      if (p.unread) bottom.append(node('span', 'u-badge' + (p.muted || isLow(p) || isMedium(p) ? ' muted' : ''), p.unread > 99 ? '99+' : String(p.unread)));
       else if (p.last?.outgoing) bottom.append(node('span', 'u-ticks' + (p.peer_read_ts >= p.last.timestamp ? ' read' : ''), p.peer_read_ts >= p.last.timestamp ? '✓✓' : '✓'));
       info.append(top, bottom);
-      const extra = [...(networksOf(p).length > 1 ? networksOf(p).map(cap) : []), ...(p.labels || [])];
+      const extra = networksOf(p).length > 1 ? networksOf(p).map(netLabel) : []; // labels live in the filter chips
       if (extra.length) info.append(node('span', 'u-tags', extra.join(' · ')));
       card.append(info); frag.append(card);
     }
-    if (!frag.children.length) frag.append(node('p', 'u-empty', q ? 'No matches' : label ? 'No groups with this label' : groups ? 'Group chats appear here once an account is connected.' : 'No chats yet. Connect Telegram in Settings, or start a new chat.'));
+    if (!frag.children.length) {
+      const empty = node('div', 'u-empty');
+      const narrow = !!(filterState.net || filterState.type !== 'all' || filterState.label);
+      // 16.14: an empty folder says what it is for and how a chat gets there (hold on touch, right-click with a mouse);
+      // a filter that hides every chat offers one tap back to all chats.
+      const how = matchMedia('(hover: none)').matches ? 'Hold a chat' : 'Right-click a chat';
+      const hint = text => node('p', 'u-empty-hint', text);
+      if (s.seg === 'low' && !narrow) empty.append(node('p', '', 'No low priority chats here'), hint('Low chats stay out of All and never notify you. ' + how + ', then Priority → Low.'));
+      else if (s.seg === 'medium' && !narrow) empty.append(node('p', '', 'No medium priority chats here'), hint('Medium chats stay in All but never notify you. ' + how + ', then Priority → Medium.'));
+      else if (s.seg === 'unread' && !narrow && !q) empty.append(node('p', '', 'No unread chats'), hint('You are all caught up.'));
+      else if (!q && filterState.label) {
+        const name = filterState.label;
+        empty.append(node('p', '', 'No chats in ' + name + ' yet.'), hint('To add one: ' + how.toLowerCase() + ' and choose Labels, or open a chat, tap its name, and tick ' + name + ' under Labels. Chats from every network can go in.'));
+        empty.append(button('Manage labels', () => manageLabels(), 'secondary u-empty-clear'));
+      }
+      else if (q || narrow || s.seg !== 'all') {
+        empty.append(node('p', '', q ? 'No matches' : 'Nothing here with this filter'));
+        if (narrow) empty.append(button('Clear filters', () => { setNarrowQuiet('net', ''); setNarrowQuiet('type', 'all'); setNarrowQuiet('label', ''); drawList(); }, 'u-chip u-empty-clear'));
+      }
+      else {
+        empty.append(node('p', '', 'No chats yet. Connect WhatsApp, Telegram, Slack, LINE or Instagram and their chats land here.'));
+        empty.append(button('Connect an account', () => accounts('accounts'), 'primary'));
+      }
+      frag.append(empty);
+    }
     list.replaceChildren(frag);
   }
 
-  // Long-press (or right-click) a chat row: Mute / Unmute. A held press never also opens the chat.
+  const isLow = p => !!p.low_priority;
+  // One row per Wizard chat. The native engine row (private:<group>) and the mirrored unified chat (network
+  // 'messenger', address = group) are the same conversation; once the mirror exists only it is listed, because
+  // its thread has attachments and server drafts. The native row's device mute/Low priority still apply to it.
+  // A pending invite keeps the native row (Accept lives there) and hides the mirror until it is accepted.
+  function wizardTwins() {
+    const mirror = new Map();
+    for (const p of [...(store.lists.people || []), ...(store.lists.groups || [])])
+      for (const i of p.identities || []) if (i.network === 'messenger' && i.address && !mirror.has(i.address)) mirror.set(i.address, p);
+    const visible = [], twinOf = new Map(), hideMirror = new Set();
+    for (const n of nativeRows) {
+      const m = mirror.get(n.group_id);
+      if (!m) visible.push(n);
+      else if (n.invite) { visible.push(n); hideMirror.add(m.id); }
+      else twinOf.set(m.id, n);
+    }
+    return {mirror, visible, twinOf, hideMirror};
+  }
+  const mirrorOf = group => group ? wizardTwins().mirror.get(group) : null;
+  const LOW_KEY = 'messenger-inbox-low';
+  function setLowView(on) { s.low = !!on; if (!on && s.seg === 'low') s.seg = 'all'; try { if (on) sessionStorage.setItem(LOW_KEY, '1'); else sessionStorage.removeItem(LOW_KEY); } catch { /* memory only */ } }
+  s.low = s.seg === 'low';
+  // Long-press (or right-click) a chat row: Mute / Unmute, Low priority / Inbox. A held press never also opens the chat.
   // A phone turns the finger lifting off a long-press into a click, which lands on the menu's backdrop and closes
   // it at once. Swallow exactly that click.
   function swallowRelease() {
@@ -350,7 +1228,9 @@
   function holdToMenu(el, open) {
     let timer = null, x0 = 0, y0 = 0;
     const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
-    el.addEventListener('pointerdown', e => { if (e.button > 0) return; delete el.dataset.held; x0 = e.clientX; y0 = e.clientY; cancel();
+    // Mouse uses right-click only: a mouse press whose release never arrives (the first click into a Wizard window)
+    // must not count as a long-press.
+    el.addEventListener('pointerdown', e => { if (e.button > 0 || e.pointerType === 'mouse') return; delete el.dataset.held; x0 = e.clientX; y0 = e.clientY; cancel();
       timer = setTimeout(() => { timer = null; el.dataset.held = '1'; navigator.vibrate?.(10); swallowRelease(); open(); }, 450); });
     el.addEventListener('selectstart', e => e.preventDefault());
     el.addEventListener('pointermove', e => { if (timer && Math.hypot(e.clientX - x0, e.clientY - y0) > 8) cancel(); });
@@ -359,22 +1239,94 @@
     el.addEventListener('contextmenu', e => { e.preventDefault(); if (el.dataset.held) return; cancel(); open(); });
   }
   // One small action menu under a held row; used by Chats/Groups rows here and the Messenger tab's rows (app.js).
-  function actionMenu(card, title, actions) {
+  // A tap anywhere outside an open menu closes it (no Back needed); the tap is consumed so it never lands on the chat beneath.
+  // "Inside" is the visible boxes only (actions list, emoji strip, emoji grid), not the panel's empty width beside them.
+  // closest() also works for a control the tap itself just replaced (the emoji ＋ swaps the strip for the grid).
+  function outsideCloses(layer, panel) {
+    const inside = t => !!t?.closest?.('.u-actions,.u-quick,.u-grid');
+    layer.addEventListener('pointerdown', e => { if (inside(e.target)) return; e.preventDefault(); swallowRelease(); closeOverlay(); });
+    layer.addEventListener('click', e => { if (!inside(e.target)) closeOverlay(); });
+  }
+  // opts.quick = {mine, pick(key)} adds the same emoji strip (and ＋ grid) the bridged message menu shows;
+  // opts.side = 'right' lines the menu up under an outgoing bubble.
+  let lastPointer = null;
+  document.addEventListener('contextmenu', e => { lastPointer = {x: e.clientX, y: e.clientY, t: performance.now(), mouse: !e.sourceCapabilities?.firesTouchEvents && (e.pointerType ? e.pointerType === 'mouse' : e.button === 2 || e.buttons === 2 || !('ontouchstart' in window))}; }, true);
+  // Coordinates relative to Messenger's own box (inside Wizard it is a window, not the page corner).
+  // A mouse right-click opens the menu at the pointer; on wide screens it sits under the bubble; phones keep the full-width sheet.
+  function placeMenu(panel, card, right, flip = false) {
+    const host = $('messenger').getBoundingClientRect(), r = card.getBoundingClientRect(), H = host.height, W = host.width;
+    const at = !flip && lastPointer && performance.now() - lastPointer.t < 800 && lastPointer.mouse ? lastPointer : null; // flip menus belong to their button
+    if (at || W > 600) { panel.classList.remove('right', 'left'); panel.classList.add('at'); panel.style.right = 'auto'; }
+    const ph = panel.offsetHeight || 300, pw = Math.min(panel.offsetWidth || 300, W - 24);
+    const clampY = y => Math.max(12, Math.min(y, H - ph - 12)), clampX = x => Math.max(12, Math.min(x, W - pw - 12));
+    if (at) { panel.style.left = clampX(at.x - host.left) + 'px'; const y = at.y - host.top; panel.style.top = (y + ph > H - 12 ? clampY(y - ph) : clampY(y)) + 'px'; }
+    else if (W > 600) { panel.style.left = clampX((right ? r.right - pw : r.left) - host.left) + 'px'; panel.style.top = (r.bottom + 4 - host.top + ph > H - 12 ? clampY(r.top - host.top - ph - 4) : clampY(r.bottom + 4 - host.top)) + 'px'; }
+    // flip: a control near the bottom (the phone's filter rows) opens its menu above itself, not over it.
+    else panel.style.top = (flip && r.bottom + 4 - host.top + ph > H - 12 ? clampY(r.top - host.top - ph - 4) : clampY(r.bottom + 4 - host.top)) + 'px';
+  }
+  function actionMenu(card, title, actions, opts = {}) {
     closeOverlay(); lastFocus = document.activeElement; s.overlay = 'Chat';
     const layer = node('div', 'u-overlay u-menu-layer'); layer.id = 'u-overlay';
-    const panel = node('div', 'u-menu left'); panel.setAttribute('role', 'menu'); panel.setAttribute('aria-label', title);
+    const panel = node('div', 'u-menu ' + (opts.side === 'right' ? 'right' : 'left') + (opts.cls ? ' ' + opts.cls : '')); panel.setAttribute('role', 'menu'); panel.setAttribute('aria-label', title);
+    s.menuClosed = opts.onClose || null;
+    const pick = k => { recent = [k, ...recent.filter(x => x !== k)].slice(0, 8); closeOverlay(); opts.quick.pick(k); };
+    if (opts.quick) {
+      const strip = node('div', 'u-quick');
+      for (const k of [...new Set([...recent.slice(0, 2), ...QUICK])].slice(0, 6)) strip.append(button(k, () => pick(k), 'u-qr-btn' + (opts.quick.mine === k ? ' mine' : '')));
+      strip.append(button('＋', () => { const box = node('div', 'u-grid'); for (const k of [...QUICK, ...MORE]) box.append(button(k, () => pick(k), 'u-qr-btn')); panel.replaceChildren(box); }, 'u-qr-btn more'));
+      panel.append(strip);
+    }
     const list = node('div', 'u-actions');
-    for (const a of actions) { const it = button('', () => { closeOverlay(); a.run(); }, 'u-act'); it.setAttribute('role', 'menuitem'); it.append(icon(a.icon), node('span', '', a.label)); list.append(it); }
+    for (const a of actions) {
+      // {head} is a small sentence-case section title; {checked} makes a radio item (Filters, Priority).
+      if (a.head) { const h = node('div', 'u-menu-head', a.head); h.setAttribute('role', 'presentation'); list.append(h); continue; }
+      const it = button('', () => { closeOverlay(); a.run(); }, 'u-act' + (a.danger ? ' danger' : '') + (a.checked ? ' checked' : ''));
+      it.setAttribute('role', 'checked' in a ? 'menuitemradio' : 'menuitem'); if ('checked' in a) it.setAttribute('aria-checked', String(!!a.checked));
+      it.append(icon(a.icon), node('span', '', a.label)); list.append(it);
+    }
     panel.append(list); layer.append(panel);
-    layer.onclick = e => { if (e.target === layer) closeOverlay(); };
+    outsideCloses(layer, panel);
     $('messenger').append(layer);
-    const r = card.getBoundingClientRect(), H = $('messenger').clientHeight;
-    panel.style.top = Math.max(12, Math.min(r.bottom + 4, H - 40 - 50 * actions.length)) + 'px';
-    list.firstChild?.focus(); hold();
+    placeMenu(panel, card, opts.side === 'right', opts.flip);
+    (panel.querySelector('button.checked') || panel.querySelector('button'))?.focus(); hold();
   }
   const muteAction = (muted, run) => ({label: muted ? 'Unmute' : 'Mute', icon: muted ? 'bell' : 'belloff', run});
-  function chatMenu(p, card) { actionMenu(card, p.display_name, [muteAction(p.muted, () => setMuted(p, !p.muted))]); }
+  // Priority (Miguel, 2 Nov 2026): Normal, Medium (listed, never pings) or Low (out of the Inbox). One choice.
+  const priorityOf = p => isLow(p) ? 'low' : isMedium(p) ? 'medium' : 'normal';
+  const PRIORITIES = [['normal', 'Normal'], ['medium', 'Medium'], ['low', 'Low']];
+  const priorityAction = (p, card, side) => ({label: 'Priority: ' + PRIORITIES.find(x => x[0] === priorityOf(p))[1], icon: 'lowpri',
+    run: () => actionMenu(card, 'Priority', PRIORITIES.map(([v, t]) => ({label: t, icon: priorityOf(p) === v ? 'check' : 'none', checked: priorityOf(p) === v, run: () => setPriority(p, v)})), side ? {side} : {})});
+  function chatMenu(p, card) {
+    actionMenu(card, p.display_name, [
+      muteAction(p.muted, () => p.native ? p.setMuted() : setMuted(p, !p.muted)),
+      priorityAction(p, card),
+      ...(p.native ? [] : [{label: 'Labels', icon: 'tag', run: () => labelsSheet(p)}]),
+      ...(p.native || listKey(p) === 'groups' ? [] : [{label: 'Merge with…', icon: 'merge', run: () => mergePicker(p)}]),
+      ...(contacts.ok && !p.native && listKey(p) !== 'groups' && !p.contact && p.accounts?.length ? [{label: 'Add to Contacts', icon: 'compose', run: () => action(async () => { const r = await saveToContacts(p); if (r) { toast('Added to Contacts'); drawList(); } })}] : []),
+      ...(p.native || !p.last ? [] : [p.unread ? {label: 'Mark as read', icon: 'check', run: () => setUnread(p, false)} : {label: 'Mark as unread', icon: 'unread', run: () => setUnread(p, true)}]),
+    ]);
+  }
+  // Unread again stays on this Messenger only; opening the chat reads it as usual.
+  async function setUnread(p, on) {
+    const flip = v => { for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if (x.id === p.id) x.unread = v; p.unread = v; drawList(); syncBadge(); };
+    const before = p.unread; flip(on ? Math.max(1, before || 0) : 0);
+    try { await call('people/' + encodeURIComponent(p.id) + (on ? '/unread' : '/read'), on ? {} : {timestamp: p.last?.timestamp || Date.now()}); }
+    catch (e) { flip(before); error(e); }
+  }
+  // The row leaves the list in place (no extra screen); hold it again in the other folder to move it back.
+  async function setPriority(p, level) {
+    const low = level === 'low', medium = level === 'medium', before = priorityOf(p);
+    if (before === level) return;
+    const said = low ? 'Moved to Low priority' : medium ? 'Medium priority: listed, never notifies' : before === 'low' ? 'Moved to Inbox' : 'Normal priority';
+    if (p.twin) { if (!!p.twin.low_priority !== low) p.twin.setLowPriority(low); if (!!p.twin.medium_priority !== medium) p.twin.setMediumPriority?.(medium); Object.assign(p.twin, {low_priority: low, medium_priority: medium}); }
+    if (p.native) { p.setLowPriority(low); p.setMediumPriority?.(medium); Object.assign(p, {low_priority: low, medium_priority: medium}); syncBadge(); drawList(); toast(said); return; }
+    const flip = v => { const set = {low_priority: v === 'low', medium_priority: v === 'medium'}; for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if (x.id === p.id) Object.assign(x, set); Object.assign(p, set); drawList(); syncBadge(); };
+    flip(level);
+    try { await call('people/' + encodeURIComponent(p.id), {low_priority: low, medium_priority: medium}); toast(said); persist(); }
+    catch (e) { flip(before); toast(e.message || 'Could not change priority', 3000); }
+  }
   async function setMuted(p, muted) {
+    if (p.twin && !!p.twin.muted !== muted) { p.twin.setMuted(); p.twin.muted = muted; }
     const flip = v => { for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if (x.id === p.id) x.muted = v; p.muted = v; drawList(); syncBadge(); };
     flip(muted);
     try { await call('people/' + encodeURIComponent(p.id), {muted}); toast(muted ? 'Muted' : 'Unmuted'); persist(); }
@@ -383,6 +1335,11 @@
 
   // ---------- conversation ----------
   const view = {};  // live DOM handles for the open thread
+  // Only an explicit tap in THIS document can authorize a live voice panel. Never persist this token.
+  const voiceTapSession = uid();
+  const voiceKept = new Map();
+  const voiceQueued = new Set();
+  let voiceRecoveryWork = null;
   const els = new Map(); // message key -> bubble element (keyed render)
   // Voice playback goes through Web Audio, not an <audio> element: media elements take the phone's audio focus
   // and pause the owner's music; Web Audio plays alongside it, like a notification sound.
@@ -413,7 +1370,7 @@
     return out;
   }
   const player = (() => {
-    let ctx = null, src = null, box = null, key = null, buf = null, startedAt = 0, offset = 0, timer = 0;
+    let ctx = null, src = null, box = null, key = null, buf = null, startedAt = 0, offset = 0, timer = 0, el = null;
     // Speed, like Telegram's 1x / 1.5x / 2x: one choice for every note, remembered on this device.
     const RATES = [1, 1.5, 2]; let rate = RATES.includes(+localStorage.getItem('messenger.voice.rate')) ? +localStorage.getItem('messenger.voice.rate') : 1;
     const fast = new WeakMap(); // AudioBuffer -> Map(rate -> stretched AudioBuffer)
@@ -434,17 +1391,20 @@
     // Wizard lowers Wizard Music while a note plays (shell-owned ducking) and brings it back after a short beat,
     // so pause/seek/next note doesn't pump the volume.
     let ducked = false, undock = 0;
+    // iPhone: Web Audio defaults to the "ambient" session, which the silent switch mutes, so a note looked like it
+    // played but made no sound. While a note plays, ask for the "playback" session (Safari 16.4+), then hand it back.
+    const session = type => { try { if (navigator.audioSession && navigator.audioSession.type !== type) navigator.audioSession.type = type; } catch { /* unsupported */ } };
     const music = on => {
       clearTimeout(undock);
-      if (on) { if (!ducked) { ducked = true; window.WizardApp?.audio?.duck(true); } return; }
-      undock = setTimeout(() => { if (ducked && !src) { ducked = false; window.WizardApp?.audio?.duck(false); } }, 600);
+      if (on) { session('playback'); if (!ducked) { ducked = true; window.WizardApp?.audio?.duck(true); } return; }
+      undock = setTimeout(() => { if (!src && !el) session('auto'); if (ducked && !src && !el) { ducked = false; window.WizardApp?.audio?.duck(false); } }, 600);
     };
     const paint = () => {
       if (!box || !buf) return; const at = pos(), f = Math.min(1, at / buf.duration);
       for (const i of box.querySelectorAll('.u-wave i')) i.classList.toggle('on', f > 0 && +i.dataset.at < f);
       const t = box.querySelector('.u-dur'); if (t) t.textContent = fmtDur((src || offset ? buf.duration - at : buf.duration) * 1000);
     };
-    const halt = () => { if (src) { src.onended = null; try { src.stop(); } catch { /* already stopped */ } src.disconnect(); src = null; } clearInterval(timer); music(false); };
+    const halt = () => { if (src) { src.onended = null; try { src.stop(); } catch { /* already stopped */ } src.disconnect(); src = null; } if (el) { el.onended = el.ontimeupdate = null; el.pause(); el = null; } clearInterval(timer); music(false); };
     const fetchNote = url => {
       if (!fetched.has(url)) {
         fetched.set(url, fetch(url, {credentials: 'same-origin'}).then(r => { if (!r.ok) throw new Error('media ' + r.status); noteTypes.set(url, r.headers.get('Content-Type')); return r.arrayBuffer(); }));
@@ -470,6 +1430,15 @@
       src.onended = () => { src = null; clearInterval(timer); offset = 0; box?.classList.remove('playing'); paint(); music(false); };
       timer = setInterval(paint, 100); paint();
     };
+    async function element(url, b) {
+      const a = new Audio(localAudio.has(url) ? URL.createObjectURL(localAudio.get(url)) : url);
+      a.preservesPitch = true; a.playbackRate = rate; el = a;
+      const dur = () => (isFinite(a.duration) ? a.duration : 0);
+      const draw = () => { if (box !== b) return; const f = dur() ? a.currentTime / dur() : 0; for (const i of b.querySelectorAll('.u-wave i')) i.classList.toggle('on', f > 0 && +i.dataset.at < f); const t = b.querySelector('.u-dur'); if (t && dur()) t.textContent = fmtDur((dur() - a.currentTime) * 1000); };
+      a.ontimeupdate = draw; a.onended = () => { el = null; offset = 0; b.classList.remove('playing'); music(false); };
+      if (offset) a.currentTime = offset;
+      await a.play(); b.classList.add('playing'); music(true); draw();
+    }
     return {
       rateLabel,
       async blob(url, type) { if (localAudio.has(url)) return localAudio.get(url); const bytes = await fetchNote(url); return new Blob([bytes], {type: type || noteTypes.get(url) || 'application/octet-stream'}); },
@@ -478,89 +1447,353 @@
         const at = pos(); rate = RATES[(RATES.indexOf(rate) + 1) % RATES.length];
         try { localStorage.setItem('messenger.voice.rate', String(rate)); } catch { /* private mode */ }
         for (const el of document.querySelectorAll('.u-speed')) el.textContent = rateLabel();
+        if (el) el.playbackRate = rate;
         if (src) { offset = at; start(); }
       },
       preload(url) { if (!localAudio.has(url)) fetchNote(url).catch(() => {}); },
-      playing: b => b === box && !!src,
-      busy: () => !!src || !!view.recording,
+      playing: b => b === box && !!(src || el),
+      busy: () => !!src || !!el || !!view.recording,
       // A re-rendered bubble (older page loaded, server copy replaced the saved one) picks the playback back up.
       adopt(b, k) { if (k !== key || b === box) return; box = b; if (src) b.classList.add('playing'); paint(); },
       async toggle(b, url, k) {
         ctx ||= new (window.AudioContext || window.webkitAudioContext)();
-        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+        session('playback'); // inside the tap, before anything awaits (iOS)
+        if (ctx.state !== 'running') ctx.resume().catch(() => {}); // 'suspended', or iOS 'interrupted' after a call or the lock screen
+        if (b === box && el) { offset = el.currentTime; halt(); b.classList.remove('playing'); paint(); return; }
         if (b === box && src) { offset = pos(); halt(); b.classList.remove('playing'); paint(); return; }
         if (b !== box) { halt(); if (box) { box.classList.remove('playing'); const old = box; box = null; for (const i of old.querySelectorAll('.u-wave i')) i.classList.remove('on'); } box = b; key = k; buf = null; offset = 0; }
         b.classList.add('playing');
         try { const got = await load(url); if (key !== k) return; buf = got; start(); }
-        catch { if (key === k) { box.classList.remove('playing'); box = null; key = null; } error(new Error('Could not play this voice message')); }
+        catch {
+          if (key !== k) return;
+          // This browser cannot decode the note for Web Audio: play it with a plain audio element instead.
+          try { await element(url, b); }
+          catch { if (key === k) { box?.classList.remove('playing'); box = null; key = null; } error(new Error('Could not play this voice message')); }
+        }
       },
-      seek(b, f) { if (b !== box || !buf) return; offset = buf.duration * f; if (src) start(); else paint(); },
+      seek(b, f) { if (b === box && el && isFinite(el.duration)) { el.currentTime = el.duration * f; return; } if (b !== box || !buf) return; offset = buf.duration * f; if (src) start(); else paint(); },
       stop() { halt(); box?.classList.remove('playing'); box = key = buf = null; offset = 0; },
     };
   })();
 
   async function openPerson(id, hint) {
-    view.selection?.clear(); s.person = id; const epoch = ++s.epoch; inChat(true); els.clear(); view.reply = view.edit = view.attach = null;
+    view.selection?.clear();
+    if (split.on && s.native) native?.close?.(); // the native Wizard thread on the right gives way
+    const fromList = !split.on && !s.person ? $('unified-inbox')?.querySelector(':scope > .u-list') : null;
+    if (fromList) split.listTop = fromList.scrollTop;
+    // Where to start reading: taken before anything can mark the chat read, kept until the owner leaves the chat.
+    // Reopening the chat that is already on screen (wake, reset, rename) keeps the divider it had.
+    const again = s.person === id && view.id === id && view.unread?.settled ? view.unread : null;
+    // Still reading above the bottom (wake, reset, rename): park on the divider again instead of the newest.
+    const reading = !!again && !!view.scroll?.isConnected && !nearBottom();
+    s.person = id; const epoch = ++s.epoch, gen = ++split.threadGen; inChat(true); els.clear(); view.reply = view.edit = view.attach = null;
+    if (split.on) { if (!hasListPane()) renderList(); markSelected(); }
     const cached = store.threads[id];
+    view.unread = again ? (reading ? {...again, settled: false, parked: false} : {...again, parked: true}) : unreadSnapshot(id, hint, cached);
     buildThread(id, cached?.person || hint || {display_name: '', identities: []});
+    if (fromList) slideIn();
     savedOrder = [id, ...savedOrder.filter(x => x !== id)];
-    if (cached) { paintThread(true); if (!cached.stale) { markRead(); persist(); return; } }
+    if (cached) { paintThread(true); if (!cached.stale) { await landUnread(id); persist(); return; } }
     else view.scroll.append(skeleton(6, 'bubbles'));
-    if (!s.ready) return;
+    if (!s.ready) { if (cached) landUnread(id); return; }
     try {
       const r = await call('people/' + id + '?limit=60');
-      store.threads[id] = {person: r.person, messages: r.messages, has_more: r.has_more, warning: r.history_warning};
+      store.threads[id] = {person: r.person, messages: r.messages.map(m => pendingReactions(id, m)), has_more: r.has_more, next_cursor: r.next_cursor, warning: r.history_warning};
       store.typing[id] = r.typing || [];
       if (!store.seq) { store.seq = r.seq || 0; feed(); }
       persist();
-      if (s.epoch !== epoch) return;
+      if (split.on ? gen !== split.threadGen || s.person !== id : s.epoch !== epoch) return;
       if (cached) { paintHead(); paintThread(); } else { buildThread(id, r.person); paintThread(true); }
-      markRead();
-    } catch (e) { error(e); }
+      await landUnread(id);
+    } catch (e) { error(e); if (view.id === id && store.threads[id]) landUnread(id); }
+  }
+  // The list row's unread count is the server's own count (incoming, not deleted, newer than each account's read
+  // mark), so it also places the divider right in merged chats. Without a row, fall back on last_read_ts.
+  function unreadSnapshot(id, hint, cached) {
+    const row = store.lists[kindById[id] || 'people']?.find(x => x.id === id) || ['people', 'groups'].map(k => store.lists[k]?.find(x => x.id === id)).find(Boolean);
+    const count = [row?.unread, hint?.unread, unreadById[id]].find(v => typeof v === 'number');
+    const ts = row?.last_read_ts ?? hint?.last_read_ts ?? cached?.person?.last_read_ts;
+    return {count, ts, settled: false, parked: false, from: null, n: 0};
+  }
+  // First unread message: null = nothing unread, undefined = it is older than what is loaded.
+  function firstUnread(t, u) {
+    const incoming = t.messages.filter(m => !m.outgoing && !m.pending && !m.deleted && m.id);
+    const more = t.has_more && t.next_cursor;
+    if (typeof u.count === 'number') {
+      if (u.count <= 0) return null;
+      if (incoming.length >= u.count) return {id: incoming[incoming.length - u.count].id, n: u.count};
+      return more ? undefined : incoming.length ? {id: incoming[0].id, n: u.count} : null;
+    }
+    const ts = u.ts ?? t.person.last_read_ts;
+    if (typeof ts !== 'number') return null;
+    const fresh = incoming.filter(m => m.timestamp > ts);
+    if (!fresh.length) return null;
+    if (fresh.length === incoming.length && more) return undefined;
+    return {id: fresh[0].id, n: fresh.length};
+  }
+  const UNREAD_PAGES = 5; // at most 300 older messages fetched to reach the first unread
+  async function landUnread(id) {
+    const u = view.unread, t = store.threads[id];
+    if (!u || u.settled || view.id !== id || !t) return;
+    let first = firstUnread(t, u);
+    for (let i = 0; first === undefined && i < UNREAD_PAGES; i++) {
+      try { if (!await fetchOlder(t, id, call)) break; } catch { break; }
+      if (view.id !== id || view.unread !== u || store.threads[id] !== t) return;
+      first = firstUnread(t, u);
+    }
+    const exact = first !== undefined; // false: the unread run is longer than the divider could reach, so it cannot mark where to start
+    if (first === undefined) { const top = t.messages.find(m => !m.outgoing && !m.pending && !m.deleted && m.id); first = top ? {id: top.id, n: u.count} : null; }
+    Object.assign(u, {settled: true, from: first?.id || null, n: first?.n || 0, exact});
+    paintThread(true);
+  }
+  function unreadDivider() {
+    const u = view.unread;
+    if (!view.divider) { view.divider = node('p', 'u-unread-divider'); view.divider.setAttribute('role', 'separator'); view.divider.append(node('span')); }
+    view.divider.firstChild.textContent = u.n > 0 ? u.n + (u.n === 1 ? ' new message' : ' new messages') : 'New messages';
+    view.divider.setAttribute('aria-label', view.divider.firstChild.textContent);
+    return view.divider;
+  }
+  // ---------- Catch me up (James, 6 Nov 2026) ----------
+  // A private summary of what you missed, written by Tinfoil (never a public model, never an agent). The first tap per
+  // chat asks; the answer is kept per chat (this once / 24 hours / always) and can be turned off in the chat's info
+  // sheet or Settings. Every unread message is read: a long chat is read in parts and merged, and the sheet says so.
+  const CU_KINDS = {for_you: 'For you', decision: 'Decision', question: 'Open question', said: ''};
+  const CU_MODELS = {'glm-5-3': 'GLM 5.3', 'deepseek-v4-1-flash': 'DeepSeek V4.1 Flash'};
+  const CU_BASIS = {unread: 'Your unread messages', since: 'Since the new-messages marker', last_sent: 'Since you last wrote here', all: 'The whole chat history'};
+  const cuPath = (id, tail = '') => 'people/' + encodeURIComponent(id) + '/catch-up' + tail;
+  // Where "what I missed" starts. The divider only reaches back 300 messages, so past that it is not trusted: the
+  // read mark from when the chat opened is used instead, and with neither the server works it out itself. Never a cap.
+  function cuSince(id) {
+    const u = view.id === id ? view.unread : null; if (!u?.settled) return undefined;
+    const m = u.exact && u.from ? store.threads[id]?.messages.find(x => x.id === u.from) : null;
+    if (m) return m.timestamp;
+    return typeof u.ts === 'number' ? u.ts + 1 : undefined;
+  }
+  function catchUpRow() {
+    if (!view.cuRow) { view.cuRow = node('p', 'u-unread-catchup'); view.cuRow.append(button('Summarize these', () => catchUp(view.id, {run: true}), 'u-unread-catchup-btn')); }
+    return view.cuRow;
+  }
+  async function showSource(id, ref) {
+    closeOverlay();
+    const t = store.threads[id]; if (view.id !== id || !t) return;
+    if (!t.messages.some(m => m.id === ref) && t.has_more) toast('Finding that message…', 2400);
+    for (let i = 0; i < 400 && view.id === id && !t.messages.some(m => m.id === ref) && t.has_more; i++) {
+      try { if (!await fetchOlder(t, id, call)) break; } catch (e) { error(e); break; }
+    }
+    if (view.id !== id) return;
+    view.anchor = true; paintThread();
+    setTimeout(() => { if (view.id === id && !view.scroll?.querySelector('[data-id="' + CSS.escape(ref) + '"]')) toast('That message is no longer here'); else jumpTo(ref); }, 60);
+  }
+  function catchUp(id, opts = {}) {
+    if (!id) return;
+    const sheet = overlay('Catch me up'); sheet.classList.add('u-catchup');
+    const body = node('div', 'u-cu-body'); sheet.append(body);
+    const alive = () => sheet.isConnected;
+    let st = {grant: null, cached: null, job: null}, running = false;
+    const note = text => { const el = $('u-error'); if (el) el.textContent = text || ''; };
+    function ask() {
+      body.replaceChildren();
+      body.append(node('p', 'u-cu-lead', 'Catch me up reads this chat’s messages with Tinfoil, a private AI service, and writes a short summary.'),
+        node('p', 'helper', 'It does not let any agent read, draft or send anything. You can turn it off for this chat any time in the chat’s info or in Settings.'));
+      const choose = (mode, label, cls) => body.append(button(label, () => pick(mode), 'wide ' + cls));
+      choose('once', 'Just this once', 'primary'); choose('day', 'This chat for 24 hours', 'u-cu-choice'); choose('always', 'This chat always', 'u-cu-choice');
+      body.querySelector('button')?.focus();
+    }
+    async function pick(mode) {
+      running = true; paintRunning({count: 0});
+      try { await call(cuPath(id, '/grant'), {mode}); } catch (e) { running = false; ask(); error(e); return; }
+      running = false; go();
+    }
+    function paintRunning(job) {
+      body.replaceChildren();
+      const line = node('p', 'u-cu-running', job.count ? 'Reading ' + job.count + (job.count === 1 ? ' message' : ' messages') + '…' : 'Starting…');
+      line.setAttribute('role', 'status'); body.append(line);
+      if (job.total > 1) body.append(node('p', 'helper', 'This chat is long, so it is read in ' + (job.total - 1) + ' parts and then merged. Part ' + Math.min(job.done + 1, job.total) + ' of ' + job.total + '.'));
+      body.append(node('div', 'u-cu-bar'));
+    }
+    async function poll() {
+      while (alive()) {
+        await sleep(1100);
+        if (!alive()) return;
+        try { st = await call(cuPath(id)); } catch (e) { note(e.message); return; }
+        const job = st.job;
+        if (!job || job.state === 'running') { if (job) paintRunning(job); continue; }
+        if (job.state === 'error') { show(); note(job.error); return; }
+        show(); return;
+      }
+    }
+    async function go() { // run now (the grant is in place)
+      running = true; paintRunning({count: 0}); note('');
+      try { const r = await call(cuPath(id), {since: opts.since ?? cuSince(id)}); paintRunning(r.job); }
+      catch (e) {
+        running = false;
+        if (e.code === 'catchup_not_allowed') { ask(); return; }
+        show(); note(e.message); return;
+      }
+      running = false; poll();
+    }
+    function show() {
+      body.replaceChildren();
+      const c = st.cached;
+      if (!c) { body.append(node('p', 'helper', 'No summary yet.')); body.append(button('Catch me up', () => (st.grant ? go() : ask()), 'primary wide')); return; }
+      body.append(node('p', 'u-cu-basis', (CU_BASIS[c.basis] || '') + ' · ' + c.count + (c.count === 1 ? ' message' : ' messages')));
+      const list = node('ul', 'u-cu-list'); list.setAttribute('aria-label', 'Summary');
+      for (const b of c.bullets) {
+        const li = node('li'), kind = CU_KINDS[b.kind];
+        const row = b.refs?.length ? button('', () => showSource(id, b.refs[0]), 'u-cu-bullet ' + b.kind) : node('div', 'u-cu-bullet plain ' + b.kind);
+        if (kind) row.append(node('span', 'u-cu-kind', kind));
+        row.append(node('span', 'u-cu-text', b.text));
+        if (b.refs?.length) row.setAttribute('aria-label', (kind ? kind + ': ' : '') + b.text + '. Open the message');
+        li.append(row); list.append(li);
+      }
+      if (!c.bullets.length) list.append(node('li', 'helper', 'Nothing stood out.'));
+      body.append(list);
+      const foot = node('p', 'u-cu-foot', 'Summarized ' + c.count + (c.count === 1 ? ' message' : ' messages') + (c.parts > 1 ? ' in ' + c.parts + ' parts' : '') + '.');
+      body.append(foot);
+      if (c.parts > 1) body.append(node('p', 'helper u-cu-parts', 'Too long to read at once, so it was read in ' + c.parts + ' parts and merged. Nothing was left out.'));
+      body.append(node('p', 'helper', 'Written privately by ' + (CU_MODELS[c.model] || c.model) + ' on Tinfoil · ' + when(c.created * 1000)));
+      body.append(button('Refresh', () => (st.grant ? go() : ask()), 'u-cu-refresh wide'));
+    }
+    // Paint first, reconcile after: the sheet is up this frame; the status arrives behind it.
+    body.append(node('p', 'helper', 'Checking…'));
+    call(cuPath(id)).then(r => {
+      if (!alive()) return; st = r;
+      if (r.job?.state === 'running') { paintRunning(r.job); poll(); }
+      else if (opts.run || !r.cached) { if (r.grant) go(); else ask(); }
+      else show();
+    }).catch(e => { if (alive()) { body.replaceChildren(); note(e.message); } });
+  }
+  // Chat info sheet: what Catch me up may do in this chat, and how to take it back.
+  function catchUpInfo(p) {
+    const box = node('section', 'u-cu-info');
+    const paint = st => {
+      box.replaceChildren(node('h3', '', 'Catch me up'));
+      const g = st.grant;
+      box.append(node('p', 'helper', !g ? 'Asks before it summarizes this chat.' : g.mode === 'always' ? 'Allowed for this chat, always. Tinfoil only; no agent can read, draft or send because of it.'
+        : 'Allowed for this chat until ' + new Date(g.until).toLocaleString([], {weekday: 'short', hour: 'numeric', minute: '2-digit'}) + '. Tinfoil only; no agent can read, draft or send because of it.'));
+      const off = async clear => { try { paint(await call(cuPath(p.id, '/revoke'), {clear})); toast(clear ? 'Turned off and summary cleared' : 'Turned off for this chat'); } catch (e) { error(e); } };
+      if (g) box.append(button('Turn off for this chat', () => off(false), 'wide'));
+      if (g || st.cached) box.append(button(g ? 'Turn off and clear saved summary' : 'Clear saved summary', () => off(true), 'wide danger'));
+    };
+    call(cuPath(p.id)).then(st => { if (box.isConnected) paint(st); }).catch(() => {});
+    return box;
+  }
+  // Settings: the summary model and every standing permission.
+  function catchUpSettings(sheet) {
+    const box = node('section', 'u-cu-settings'); box.hidden = true; sheet.append(box);
+    const paint = st => {
+      box.hidden = false; box.replaceChildren(node('h3', '', 'Catch me up'));
+      const pickModel = node('select'); pickModel.setAttribute('aria-label', 'Summary model');
+      for (const m of st.models) { const o = node('option', '', (CU_MODELS[m] || m) + (m === st.default ? ' (recommended)' : '')); o.value = m; pickModel.append(o); }
+      pickModel.value = st.model;
+      pickModel.onchange = () => action(async () => { paint({...st, ...(await call('catch-up/settings', {model: pickModel.value}))}); });
+      const label = node('label', '', 'Summary model'); label.append(pickModel); box.append(label, node('p', 'helper', 'Both run privately on Tinfoil. Only these models can be used.'));
+      box.append(node('h3', '', 'Chats allowed to be summarized'));
+      if (!st.grants.length) box.append(node('p', 'helper', 'None. Catch me up asks first in each chat.'));
+      for (const g of st.grants) {
+        const row = node('div', 'u-cu-grant'); row.append(node('span', '', g.name + ' · ' + (g.mode === 'always' ? 'always' : 'until ' + new Date(g.until).toLocaleString([], {weekday: 'short', hour: 'numeric', minute: '2-digit'}))));
+        row.append(button('Turn off', () => action(async () => { await call(cuPath(g.person_id, '/revoke'), {clear: false}); paint({...st, grants: st.grants.filter(x => x.person_id !== g.person_id)}); }), 'u-cu-off'));
+        box.append(row);
+      }
+    };
+    call('catch-up/settings').then(st => { if (box.isConnected) paint(st); }).catch(() => {});
   }
   function reviewedOf(p) { return !!p.language && p.language !== 'en'; }
   function subtitle(p) {
     if ((store.typing[p.id] || []).length) return 'typing…';
     const langName = {th: 'Thai', ja: 'Japanese', zh: 'Chinese', es: 'Spanish', fr: 'French', de: 'German'}[p.language] || p.language;
-    return reviewedOf(p) ? 'Auto-translate · ' + langName : networksOf(p).map(cap).join(' · ');
+    const group = (p.identities || []).some(i => i.kind === 'group');
+    return reviewedOf(p) ? 'Auto-translate · ' + langName : (group ? 'Group · ' : '') + networksOf(p).map(netLabel).join(' · ');
   }
   function paintHead() {
     const t = store.threads[s.person]; if (!t || !view.sub) return;
     view.sub.textContent = subtitle(t.person); view.sub.classList.toggle('typing', (store.typing[s.person] || []).length > 0);
   }
   function buildThread(id, p) {
-    const root = threadBase(p.display_name || ' ', subtitle(p), p.id ? () => editPerson(store.threads[id]?.person || p) : null);
+    const root = threadBase(p.display_name || ' ', subtitle(p), p.id ? () => editPerson(store.threads[id]?.person || p) : null, networksOf(p)[0], pictureURL(p.id, p.avatar));
+    // Header ⋯: the everyday chat actions, same as long-pressing the chat in the list.
+    view.menu = anchor => { const cur = store.threads[id]?.person || p; actionMenu(anchor, cur.display_name, [
+      {label: 'Contact info', icon: 'compose', run: () => editPerson(cur)},
+      {label: 'Mark as unread', icon: 'unread', run: async () => { await setUnread(cur, true); back(); }},
+      {label: 'Merge with…', icon: 'merge', run: () => mergePicker(cur)},
+      muteAction(cur.muted, () => setMuted(cur, !cur.muted)),
+      priorityAction(cur, anchor, 'right'),
+      ...(cur.native ? [] : [{label: 'Labels', icon: 'tag', run: () => labelsSheet(cur)}]),
+    ], {side: 'right'}); };
+    if (p.id) { // Catch me up: next to the chat options, never replaces them
+      const head = root.querySelector('.u-thread-head'), more = head?.querySelector('[aria-label="Chat options"]'), cu = iconButton('sparkle', 'Catch me up', () => catchUp(id), 'u-catchup-btn');
+      if (more) head.insertBefore(cu, more); else head?.append(cu);
+    }
     view.sub = root.querySelector('.u-who-text span') || node('span'); if (!view.sub.parentNode) root.querySelector('.u-who-text').append(view.sub);
     const t = store.threads[id];
     const scroll = node('div', 'u-timeline'); scroll.setAttribute('role', 'log'); scroll.tabIndex = 0;
-    scroll.oncontextmenu = e => { if (!view.selection?.active && e.target.closest('.u-message')) e.preventDefault(); };
+    scroll.oncontextmenu = e => { if (!view.selection?.active && e.target.closest('.u-message') && !e.target.closest('.u-textsel')) e.preventDefault(); };
     scroll.onscroll = () => { const near = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80; view.bottom = near; view.pill.hidden = near; if (near) markRead(); if (scroll.scrollTop < 400) older(); };
     const pill = iconButton('down', 'Scroll to newest', () => scroll.scrollTo({top: scroll.scrollHeight, behavior: 'smooth'}), 'u-down'); pill.hidden = true;
     const wrap = node('div', 'u-thread-body'); wrap.append(scroll, pill); root.append(wrap);
     Object.assign(view, {root, scroll, pill, id});
     root.append(composer(id, p));
-    view.selection = messageSelection(root, () => (store.threads[id]?.messages || []).map(message => ({message, node: els.get(message.client_id || message.id)})));
+    view.selection = messageSelection(root, () => albumPosts(store.threads[id]?.messages || []).map(message => ({message, node: els.get(message.client_id || message.id)})));
+  }
+  // Network-neutral projection: only adjacent parts with the same source and sender join.
+  function albumPosts(messages) {
+    const posts = [];
+    for (const m of messages) {
+      const last = posts[posts.length - 1];
+      if (m.album && m.msgtype === 'm.image' && last?.msgtype === 'm.image' && last?.album === m.album && last.sender === m.sender && last.identity_id === m.identity_id && last.network === m.network && last.outgoing === m.outgoing) {
+        last.photos.push(m);
+        last.deleted = last.photos.every(p => p.deleted);
+      } else posts.push(m.album && m.msgtype === 'm.image' ? {...m, photos: [m]} : m);
+    }
+    for (const post of posts) if (post.photos) {
+      // Explicit native ordinals, never event-ID or time-window guesses. Telegram
+      // retains its existing timeline order. Incomplete/delayed albums stay usable.
+      if (post.network === 'signal' && post.photos.every(p => Number.isInteger(p.media?.album_index))) {
+        post.photos.sort((a, b) => a.media.album_index - b.media.album_index);
+      }
+      const photos = post.photos;
+      Object.assign(post, photos[0], {photos});
+      post.deleted = photos.every(p => p.deleted);
+      // Keep every distinct caption, in tile order, rather than silently taking
+      // the first. Canonical per-part originals remain untouched for the viewer.
+      post.original = [...new Set(photos.filter(p => !p.deleted).map(p => p.original).filter(Boolean))].join('\n\n');
+      if (photos.filter(p => !p.deleted && p.original).length > 1) post.translated = null;
+      post.links = photos.filter(p => !p.deleted).flatMap(p => p.links || []);
+      const reactions = new Map();
+      for (const photo of post.photos) for (const reaction of photo.reactions || []) {
+        const current = reactions.get(reaction.key) || {key: reaction.key, count: 0, mine: false};
+        if (reaction.reactors) current.reactors = [...new Map([...(current.reactors || []),...reaction.reactors].map(u => [u.id,u])).values()];
+        current.count += reaction.count; current.mine ||= reaction.mine; reactions.set(reaction.key, current);
+      }
+      post.reactions = [...reactions.values()];
+    }
+    return posts;
   }
   function nearBottom() { const sc = view.scroll; return sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80; }
-  function paintThread(toBottom = false) {
+  // hold: a rebuilt chat that will be put back where the owner was reading (never followed to the bottom, never read).
+  function paintThread(toBottom = false, hold = false) {
     const t = store.threads[view.id], scroll = view.scroll; if (!t || !scroll) return;
-    const follow = toBottom || nearBottom(), p = t.person, auto = reviewedOf(p), multi = networksOf(p).length > 1, group = (p.identities || []).some(i => i.kind === 'group');
+    const follow = !hold && (toBottom || nearBottom()), p = t.person, auto = reviewedOf(p), multi = networksOf(p).length > 1, group = (p.identities || []).some(i => i.kind === 'group') || new Set(t.messages.filter(m => !m.outgoing && m.sender).map(m => m.sender)).size > 1;
     const kids = [node('div', 'u-spacer')];
     if (t.has_more) kids.push(node('p', 'u-older', 'Loading earlier messages…'));
     let day = '';
     const side = m => (m.outgoing ? 'o' : 'i' + (m.sender || ''));
-    t.messages.forEach((m, i) => {
+    const posts = albumPosts(t.messages);
+    const u = view.unread, from = u?.settled && u.from;
+    let divider = null;
+    posts.forEach((m, i) => {
       const label = dayLabel(m.timestamp);
       if (label !== day) { day = label; kids.push(node('p', 'u-day', label)); }
-      const prev = t.messages[i - 1], next = t.messages[i + 1];
+      if (from && !divider && (m.id === from || m.photos?.some(x => x.id === from))) { kids.push(divider = unreadDivider()); kids.push(catchUpRow()); }
+      const prev = posts[i - 1], next = posts[i + 1];
       const jp = prev && dayLabel(prev.timestamp) === day && side(prev) === side(m) && m.timestamp - prev.timestamp < 3e5;
       const jn = next && dayLabel(next.timestamp) === day && side(next) === side(m) && next.timestamp - m.timestamp < 3e5;
       const pos = jp && jn ? 'mid' : jp ? 'last' : jn ? 'first' : 'single';
       const read = m.outgoing && p.peer_read_ts >= m.timestamp;
       const key = m.client_id || m.id;
-      const sig = JSON.stringify([m.id, m.original, m.translated, m.transcript, m.translation_error, m.edited, m.deleted, m.reactions, m.pending, m.failed, pos, read, shown[m.id], m.reply?.text, auto, multi, group]);
+      const sig = JSON.stringify([group && !m.outgoing ? p.faces?.[nameOf(m.sender)] : 0, m.id, m.original, m.translated, m.transcript, m.translation_error, m.edited, m.deleted, m.mentions, m.mentioned, m.reactions, m.pending, m.failed, pos, read, shown[m.id], m.reply?.text, m.links?.length, auto, multi, group, m.photos?.map(p => [p.id, p.deleted, p.media, p.local, p.pending])]);
       let el = els.get(key);
-      if (!el || el.dataset.sig !== sig) { el = bubble(m, pos, {auto, multi, group, read}); el.dataset.sig = sig; els.set(key, el); }
+      if (!el || el.dataset.sig !== sig) { el = bubble(m, pos, {auto, multi, group, read, faces: p.faces}); el.dataset.sig = sig; els.set(key, el); }
       kids.push(el);
     });
     if (!t.messages.length) kids.push(node('p', 'u-empty', 'No messages yet. Say hi 👋'));
@@ -569,76 +1802,190 @@
     const before = scroll.scrollHeight - scroll.scrollTop;
     const same = kids.length === scroll.children.length && kids.every((k, i) => k === scroll.children[i] || (i === 0 && scroll.children[0].className === 'u-spacer') || (k.className === 'u-day' && scroll.children[i].className === 'u-day' && k.textContent === scroll.children[i].textContent) || (k.className === 'u-older' && scroll.children[i].className === 'u-older'));
     if (!same) scroll.replaceChildren(...kids);
-    if (follow) scroll.scrollTop = scroll.scrollHeight;
+    // First paint after the read position is known: park the divider near the top when the unread run is taller
+    // than the window (the sticky day chip sits above it), otherwise show the newest as always.
+    let park = false;
+    if (toBottom && u?.settled && !u.parked) {
+      u.parked = true;
+      if (divider) {
+        const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+        const top = divider.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop - rem * 3;
+        if (scroll.scrollHeight - top > scroll.clientHeight + 2) { scroll.scrollTop = Math.max(0, top); park = true; }
+      }
+    }
+    if (park) { view.bottom = nearBottom(); if (view.pill) view.pill.hidden = view.bottom; }
+    else if (follow) scroll.scrollTop = scroll.scrollHeight;
     else if (view.anchor) { scroll.scrollTop = scroll.scrollHeight - before; }
     view.anchor = false;
     view.selection?.paint();
-    if (follow) markRead();
+    const mentioned = t.messages.filter(m => m.mentioned && !m.outgoing && !m.deleted);
+    const head = scroll.parentElement.querySelector('.u-thread-head');
+    if (head && mentioned.length && !head.querySelector('.u-jump-mention')) {
+      let cursor = 0;
+      const jump = button('@',() => { const target = mentioned[cursor++ % mentioned.length]; els.get(target.client_id || target.id)?.scrollIntoView({block:'center',behavior:'smooth'}); },'u-jump-mention u-badge');
+      jump.setAttribute('aria-label','Jump to mentions of you'); head.append(jump);
+    }
+    if (follow || park) markRead();
   }
   async function older() {
     const t = store.threads[view.id]; if (!t || !t.has_more || view.loadingOlder) return;
-    const first = t.messages.find(m => !m.pending); if (!first) return;
     view.loadingOlder = true; const id = view.id;
     try {
-      const r = await call('people/' + id + '?limit=60&before=' + first.timestamp);
-      const known = new Set(t.messages.map(m => m.id));
-      t.messages = [...r.messages.filter(m => !known.has(m.id)), ...t.messages]; t.has_more = r.has_more;
+      await fetchOlder(t, id, call);
       if (view.id === id) { view.anchor = true; paintThread(); }
     } catch (e) { error(e); } finally { view.loadingOlder = false; }
   }
   function markRead() {
     const t = store.threads[view.id]; if (!t || document.hidden || !view.scroll || !nearBottom()) return;
+    if (view.unread && !view.unread.settled) return; // the divider's read position is not known yet
     const last = [...t.messages].reverse().find(m => !m.outgoing && !m.pending);
-    if (!last || last.timestamp <= (t.person.last_read_ts || 0) || view.reading === last.timestamp) return;
-    view.reading = last.timestamp; t.person.last_read_ts = last.timestamp;
-    const row = store.lists[listKey(t.person)]?.find(x => x.id === view.id); if (row) row.unread = 0;
-    unreadById[view.id] = 0; syncBadge();
+    const row = store.lists[listKey(t.person)]?.find(x => x.id === view.id);
+    // A merged chat can still count unread on one account below the newest read mark of another.
+    const counted = (row?.unread || unreadById[view.id] || 0) > 0;
+    // The thread's own person record has no read mark; the list row's is the server's.
+    const mark = Math.max(t.person.last_read_ts || 0, row?.last_read_ts || 0);
+    // Keyed by chat: two chats can share a newest timestamp (Telegram's are whole seconds), and the second must still read.
+    const reading = view.id + ' ' + last?.timestamp;
+    if (!last || (last.timestamp <= mark && !counted) || view.reading === reading) return;
+    view.reading = reading; t.person.last_read_ts = Math.max(mark, last.timestamp); if (row) row.last_read_ts = t.person.last_read_ts;
+    if (row) row.unread = 0;
+    unreadById[view.id] = 0; syncBadge(); if (split.on && s.tab !== 'messenger') drawList();
     call('people/' + view.id + '/read', {timestamp: last.timestamp}).catch(() => {});
   }
   const URL_RE = /\bhttps?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]]/g;
-  function richText(cls, text) {
+  // Bubble text, built as nodes (never innerHTML): @mention chips, links, and the light formatting the networks
+  // write as plain text (**bold** / *bold*, _italic_, ~strike~, `code`, ```blocks```).
+  const INLINE = /```([\s\S]+?)```|`([^`\n]+)`|\[([^\]\n]{1,300})\]\((https?:\/\/[^)\s]+)\)|(\bhttps?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]])|\*\*([^*\n]+?)\*\*|(^|[^\w*])\*([^\s*][^*\n]*?)\*(?![\w*])|(^|[^\w_])_([^\s_][^_\n]*?)_(?![\w_])|~~([^~\n]+?)~~|(^|[^\w~])~([^\s~][^~\n]*?)~(?![\w~])/g;
+  const TG_USER = /(^|[\s(])(@[A-Za-z][A-Za-z0-9_]{3,31})(?![\w@])/g;
+  function contactName(net, acc) { try { return contacts.map.get(accKey(net, acc))?.name || ''; } catch { return ''; } }
+  function mentionMarks(text, m) {
+    const marks = []; let at = 0;
+    for (const x of (Array.isArray(m) ? m : m?.mentions) || []) {
+      if (Number.isInteger(x?.start) && Number.isInteger(x?.end) && x.start >= 0 && x.end > x.start && x.end <= text.length) {
+        marks.push({start:x.start, end:x.end, label:text.slice(x.start,x.end), id:x.id, me:!!x.me});
+        continue;
+      }
+      if (!x?.text) continue;
+      const i = text.indexOf(x.text, at); if (i < 0) continue;
+      const saved = x.acc && !x.me && contactName(x.net, x.acc);
+      marks.push({start: i, end: i + x.text.length, label: saved && !x.text.startsWith('@' + saved) && !/^@[A-Za-z0-9_]+$/.test(x.text) ? '@' + saved : x.text, me: !!x.me});
+      at = i + x.text.length;
+    }
+    if (m?.network === 'telegram') for (const x of text.matchAll(TG_USER)) {
+      const start = x.index + x[1].length, end = start + x[2].length;
+      if (!marks.some(k => start < k.end && end > k.start)) marks.push({start, end, label: x[2], me: false});
+    }
+    return marks.sort((a, b) => a.start - b.start);
+  }
+  function inline(parent, text, depth) {
+    let at = 0;
+    for (const x of text.matchAll(INLINE)) {
+      const pre = x[8] != null ? x[7] : x[10] != null ? x[9] : x[13] != null ? x[12] : '';
+      const inner = x[8] ?? x[10] ?? x[13] ?? x[6] ?? x[11];
+      if (inner != null && /\s$/.test(inner)) continue;
+      parent.append(text.slice(at, x.index) + pre); at = x.index + x[0].length;
+      let el;
+      if (x[1] != null) el = node('code', 'u-code-block', x[1].replace(/^\n/, ''));
+      else if (x[2] != null) el = node('code', 'u-code', x[2]);
+      else if (x[4] != null) { el = node('a', '', /^https?:\/\//.test(x[3]) ? siteOf(x[4]) : x[3]); el.href = x[4]; }
+      else if (x[5] != null) { el = node('a', '', x[5]); el.href = x[5]; }
+      else {
+        el = node(x[6] != null || x[8] != null ? 'strong' : x[10] != null ? 'em' : 's');
+        if (depth < 2) inline(el, inner, depth + 1); else el.textContent = inner;
+      }
+      if (el.tagName === 'A') { el.target = '_blank'; el.rel = 'noopener noreferrer'; }
+      parent.append(el);
+    }
+    parent.append(text.slice(at));
+  }
+  function richText(cls, text, m) {
     const p = node('p', cls); let at = 0;
-    for (const m of text.matchAll(URL_RE)) { p.append(text.slice(at, m.index)); const a = node('a', '', m[0]); a.href = m[0]; a.target = '_blank'; a.rel = 'noopener noreferrer'; p.append(a); at = m.index + m[0].length; }
-    p.append(text.slice(at)); return p;
+    for (const k of mentionMarks(text || '', m)) {
+      if (k.start < at) continue;
+      inline(p, text.slice(at, k.start), 0);
+      const chip = node(k.id ? 'a' : 'span', 'u-mention' + (k.me ? ' me' : ''), k.label); if (k.me) chip.title = 'Mentions you';
+      if (k.id) { chip.href = 'https://matrix.to/#/' + encodeURIComponent(k.id); chip.target = '_blank'; chip.rel = 'noopener noreferrer'; }
+      p.append(chip); at = k.end;
+    }
+    inline(p, (text || '').slice(at), 0);
+    return p;
+  }
+  // The sender's own link preview (what WhatsApp/Telegram/Signal showed them), as a tidy card.
+  function linkCard(m, l, i) {
+    const a = node('a', 'u-link-card'); a.href = l.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    if (l.image && !m.pending) { const img = document.createElement('img'); img.className = 'u-link-img'; img.alt = ''; img.loading = 'lazy'; img.src = mediaURL(m.id, 'link' + i); img.onerror = () => img.remove(); if (l.w && l.h && l.w / l.h < 1.3) a.classList.add('side'); a.append(img); }
+    const t = node('span', 'u-link-text');
+    let host = ''; try { host = new URL(l.url).hostname.replace(/^www\./, ''); } catch { /* keep blank */ }
+    t.append(node('small', 'u-link-site', l.site || host));
+    if (l.title) t.append(node('strong', 'u-link-title', l.title));
+    if (l.desc) t.append(node('span', 'u-link-desc', l.desc));
+    a.append(t); return a;
   }
   function bubble(m, pos, ctx) {
-    const row = node('div', 'u-row' + (m.outgoing ? ' outgoing' : '') + ' pos-' + pos); row.dataset.id = m.id;
+    // Direction comes only from message.outgoing: own messages sit right in the accent colour and never carry a name.
+    const row = node('div', 'u-row' + (m.outgoing ? ' outgoing' : ' incoming') + ' pos-' + pos + (ctx.group && !m.outgoing ? ' in-group' : '')); row.dataset.id = m.id; row.dataset.direction = m.outgoing ? 'out' : 'in';
+    if (ctx.group && !m.outgoing && (pos === 'last' || pos === 'single')) { const who = nameOf(m.sender), tag = ctx.faces?.[who]; const face = withPicture(avatar(who || '?', 'tiny u-row-av'), pictureURL(view.id, tag, who), 'message:' + view.id + ':' + m.id); face.title = who; row.append(face); }
     const b = node('article', 'u-message' + (m.outgoing ? ' outgoing' : '') + (m.deleted ? ' deleted' : '') + (m.pending ? ' pending' : '') + (m.failed ? ' failed' : ''));
     const visual = !m.deleted && ['m.image', 'm.sticker', 'm.video'].includes(m.msgtype);
     if (visual && !m.original) b.classList.add('bare');
+    if (visual && isSticker(m) && !m.original) b.classList.add('sticker-only');
     if (ctx.group && !m.outgoing && m.sender && (pos === 'first' || pos === 'single')) b.append(node('p', 'u-sender tone-text-' + toneOf(m.sender), nameOf(m.sender)));
     if (m.reply) {
-      const q = button('', () => jumpTo(m.reply.id), 'u-quote');
-      q.append(node('strong', '', m.reply.outgoing ? 'You' : nameOf(m.reply.sender) || 'Them'), node('span', '', m.reply.deleted ? 'Deleted message' : m.reply.voice ? '🎤 Voice message' : m.reply.text || {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.file': '📎 File', 'm.sticker': 'Sticker'}[m.reply.msgtype] || ''));
+      const q = button('', () => jumpTo(m.reply.id), 'u-quote' + (m.reply.outgoing ? ' mine' : ''));
+      q.append(node('strong', '', m.reply.outgoing ? 'You' : nameOf(m.reply.sender) || 'Them'), node('span', '', m.reply.deleted ? 'Deleted message' : m.reply.voice ? '🎤 Voice message' : m.reply.text || (m.reply.gif ? 'GIF' : {'m.image': '📷 Photo', 'm.video': '🎬 Video', 'm.file': '📎 File', 'm.sticker': 'Sticker'}[m.reply.msgtype]) || ''));
       b.append(q);
     }
     if (m.deleted) b.append(node('p', 'u-deleted', m.outgoing ? 'You deleted this message' : 'This message was deleted'));
+    else if (m.unavailable) {
+      const gone = node('p', 'u-unavailable'); gone.append(node('span', '', unavailableLabel(m.unavailable)));
+      gone.append(node('small', '', m.unavailable === 'status' ? '(view it in WhatsApp on your phone)' : m.unavailable === 'waiting' ? '(' + netLabel(m.network) + ' is still sending it)' : m.unavailable === 'undecryptable' ? '(on ' + netLabel(m.network) + ')' : '(expired on ' + netLabel(m.network) + ')'));
+      b.append(gone);
+    }
+    else if (visual && m.photos?.length > 1) {
+      b.classList.add('has-album'); row.dataset.album = m.album;
+      const photos = m.photos.filter(p => !p.deleted);
+      const grid = node('div', 'u-album n-' + photos.length); grid.setAttribute('aria-label', photos.length + ' photos');
+      for (const photo of photos) grid.append(visualMedia(photo));
+      b.append(grid);
+    }
     else if (visual) b.append(visualMedia(m));
     else if (m.msgtype === 'm.audio') b.append(voice(m));
-    else if (m.msgtype === 'm.file') { const a = node('a', 'u-file'); a.href = mediaURL(m.id); a.download = m.media?.filename || 'file'; a.append(node('span', 'u-file-icon', '📎'), node('span', 'u-file-name', m.media?.filename || 'File'), node('span', 'u-file-size', fmtSize(m.media?.size))); b.append(a); }
+    else if (m.msgtype === 'm.file') { const a = node('a', 'u-file'); if (!m.pending && !m.failed) a.href = mediaURL(m.id); a.download = m.media?.filename || 'file'; a.append(node('span', 'u-file-icon', '📎'), node('span', 'u-file-name', m.media?.filename || 'File'), node('span', 'u-file-size', fmtSize(m.media?.size))); b.append(a); }
     else if (m.msgtype === 'm.location') { const geo = /^geo:([-\d.]+),([-\d.]+)/.exec(m.media?.geo || ''); const a = node('a', 'u-file', '📍 ' + (m.original || 'Location')); if (geo) { a.href = 'https://www.openstreetmap.org/?mlat=' + geo[1] + '&mlon=' + geo[2] + '#map=16/' + geo[1] + '/' + geo[2]; a.target = '_blank'; a.rel = 'noopener noreferrer'; } b.append(a); }
-    if (!m.deleted && m.original && m.msgtype !== 'm.location') {
+    const story = !m.deleted && storyOf(m.original, m.outgoing);
+    if (story) {
+      const tag = node(story.url ? 'a' : 'p', 'u-story-tag');
+      tag.append(node('span', 'u-story-label', story.label));
+      if (story.url) { tag.href = story.url; tag.target = '_blank'; tag.rel = 'noopener noreferrer'; tag.append(node('span', 'u-story-open', 'Open on Instagram ›')); }
+      b.insertBefore(tag, b.firstChild && b.firstChild.classList?.contains('u-sender') ? b.firstChild.nextSibling : b.firstChild);
+    }
+    if (!story && !m.deleted && m.original && m.msgtype !== 'm.location') {
       if (ctx.auto || m.outgoing) {
-        b.append(richText('u-text', m.translated || m.original));
+        b.append(richText('u-text', m.translated || m.original, m.translated && m.translated !== m.original ? null : m));
         if (m.translated && m.translated !== m.original) b.append(node('p', 'u-original', m.original));
         if (m.translation_error) b.append(node('p', 'u-original error', m.translation_error));
       } else {
         const translated = shown[m.id] === 'translated' && m.translated;
-        b.append(richText('u-text', translated ? m.translated : m.original));
+        b.append(richText('u-text', translated ? m.translated : m.original, translated ? null : m));
         if (foreignScript(m.original)) b.append(button(translated ? 'Show original' : 'Translate', () => translate(m), 'u-translate link'));
       }
     }
+    if (!m.deleted) for (const photo of m.photos || [m]) if (!photo.deleted && photo.links?.length) for (const [i, l] of photo.links.entries()) b.append(linkCard(photo, l, i));
     const meta = node('footer');
-    if (ctx.multi) meta.append(node('span', 'u-net', cap(m.network)));
+    if (ctx.multi) { const via = node('span', 'u-via'); via.append(netBadge(m.network, 'u-via-icon')); via.title = 'via ' + netLabel(m.network); meta.append(via); }
     if (m.edited && !m.deleted) meta.append(node('span', 'u-edited', 'edited'));
     meta.append(node('time', '', new Date(m.timestamp).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})));
     if (m.outgoing) meta.append(m.failed ? node('span', 'u-status-ic fail', '!') : m.pending ? node('span', 'u-status-ic clock', '◷') : node('span', 'u-status-ic' + (ctx.read ? ' read' : ''), ctx.read ? '✓✓' : '✓'));
     b.append(meta);
+    if (m.mentioned && !m.outgoing) { row.classList.add('u-mentioned'); b.prepend(node('span','u-mention-notice','@ You were mentioned')); }
     row.append(b);
-    if (m.failed) row.append(button(m.failed === true ? 'Not sent · Tap to retry' : 'Not sent · ' + m.failed + ' · Retry', () => m.retry ? m.retry() : null, 'u-retry link'));
+    if (m.failed) {
+      row.append(button(m.failed === true ? 'Not sent · Tap to retry' : 'Not sent · ' + m.failed + ' · Retry', () => m.retry ? m.retry() : null, 'u-retry link'));
+      if (m.saveRecording) row.append(button('Save recording', () => m.saveRecording(), 'u-voice-save link'));
+    }
     if (m.reactions?.length) {
       const strip = node('div', 'u-reactions');
-      for (const r of m.reactions) strip.append(button(r.key + (r.count > 1 ? ' ' + r.count : ''), () => react(m, r.key), 'u-react' + (r.mine ? ' mine' : '')));
+      for (const r of m.reactions) strip.append(reactionChip(r, m.reactions, {pid:view.id, toggle:() => react(m,r.key)}));
       row.append(strip);
     }
     if (!m.pending && !m.deleted) gestures(row, b, m);
@@ -661,7 +2008,17 @@
     const count = node('strong', '', '0 selected'), cancel = button('Cancel', () => clear(), 'secondary');
     const forward = button('Forward to Wizard', () => send(), 'primary'); bar.append(cancel, count, forward); head.after(bar);
     let active = false, sending = false, holdAt = 0, queue = null, cursor = 0;
-    function paint() {
+    // Entering/leaving selection adds a check column that reflows every bubble (and swaps the header for the bar);
+    // keep the touched message (or the one mid-screen) at the same place on screen, like Telegram.
+    const scrollerOf = el => { for (let n = el?.parentElement; n; n = n.parentElement) { const o = getComputedStyle(n).overflowY; if ((o === 'auto' || o === 'scroll') && n.scrollHeight > n.clientHeight) return n; } return null; };
+    function middleRow() { let best = null, d = Infinity; const mid = innerHeight / 2; for (const {node: row} of entries()) if (row?.isConnected) { const r = row.getBoundingClientRect(); const k = Math.abs((r.top + r.bottom) / 2 - mid); if (r.bottom > 0 && r.top < innerHeight && k < d) { d = k; best = row; } } return best; }
+    function paint(anchor) {
+      anchor = anchor || (bar.hidden === active ? middleRow() : null);
+      const sc = anchor && scrollerOf(anchor), top0 = anchor?.getBoundingClientRect().top;
+      paintRows();
+      if (sc) sc.scrollTop += anchor.getBoundingClientRect().top - top0;
+    }
+    function paintRows() {
       bar.hidden = !active; head.hidden = active; count.textContent = ids.size + ' selected';
       forward.disabled = !ids.size || sending; cancel.disabled = sending;
       forward.textContent = sending ? 'Forwarding…' : 'Forward to Wizard';
@@ -679,7 +2036,9 @@
       if (!active || !e.target.closest('.u-row,.message') || window.getSelection()?.toString() || (holdAt && performance.now() - holdAt >= 450)) return;
       e.preventDefault(); e.stopImmediatePropagation(); if (sending) return;
       const found = entries().find(x => x.node?.contains(e.target)); if (!found || found.message.deleted || found.message.pending) return;
-      const id = found.message.id; if (ids.has(id)) ids.delete(id); else ids.add(id); queue = null; cursor = 0; paint();
+      const id = found.message.id; if (ids.has(id)) ids.delete(id); else ids.add(id); queue = null; cursor = 0;
+      if (!ids.size) return clear(); // unselecting the last message leaves selection, like Cancel
+      paint();
     }, true);
     const line = m => (m.outgoing ? 'You' : nameOf(m.sender) || 'Sender') + ' (' + new Date(m.timestamp).toLocaleString() + '): ' + (m.original || '') + (m.transcript ? '\nTranscript: ' + m.transcript : '');
     async function send() {
@@ -688,7 +2047,7 @@
         if (window.WizardApp?.share?.wizard) {
           const files = [], texts = [];
           for (const {message: m} of entries().filter(x => ids.has(x.message.id))) {
-            if (m.media && ['m.audio','m.image','m.video','m.file','m.sticker'].includes(m.msgtype)) files.push(await forwardFile(m));
+            if (m.media && ['m.audio','m.image','m.video','m.file','m.sticker'].includes(m.msgtype)) for (const photo of m.photos || [m]) if (!photo.deleted) files.push(await forwardFile(photo));
             if (m.original || m.transcript) texts.push(line(m));
           }
           const receipt = await WizardApp.share.wizard({files, text: texts.join('\n\n'), title: 'Forwarded from Messenger'});
@@ -699,7 +2058,7 @@
           queue = []; let texts = [];
           const flush = () => { if (texts.length) queue.push({text: texts.join('\n\n')}); texts = []; };
           for (const {message: m} of entries().filter(x => ids.has(x.message.id))) {
-            if (m.media && ['m.audio','m.image','m.video','m.file','m.sticker'].includes(m.msgtype)) { flush(); queue.push({message: m}); if (m.original || m.transcript) texts.push(line(m)); }
+            if (m.media && ['m.audio','m.image','m.video','m.file','m.sticker'].includes(m.msgtype)) { flush(); for (const photo of m.photos || [m]) if (!photo.deleted) queue.push({message: photo}); if (m.original || m.transcript) texts.push(line(m)); }
             else texts.push(line(m));
           }
           flush(); cursor = 0;
@@ -718,38 +2077,65 @@
       } catch (e) { toast((e.message || 'Could not forward') + ' · Try Forward again', 4500); }
       finally { sending = false; paint(); }
     }
-    return {get active() { return active; }, forward(selected) { if (sending) return; ids.clear(); for (const id of selected) ids.add(id); active = true; queue = null; cursor = 0; return send(); }, begin(id) { active = true; ids.add(id); queue = null; cursor = 0; paint(); }, paint, clear};
+    return {get active() { return active; }, forward(selected) { if (sending) return; ids.clear(); for (const id of selected) ids.add(id); active = true; queue = null; cursor = 0; return send(); }, begin(id) { const anchor = entries().find(x => x.message.id === id)?.node; active = true; ids.add(id); queue = null; cursor = 0; paint(anchor); }, paint, clear};
   }
 
   function toneOf(name) { let h = 0; for (const ch of name || '?') h = (h * 31 + ch.codePointAt(0)) >>> 0; return h % TONES; }
+  // Bridged GIFs (WhatsApp/Telegram send them as short looping videos) and animated stickers play by themselves,
+  // muted and inline, only while on screen; with reduced motion they hold the first frame until tapped.
+  const isSticker = m => m.msgtype === 'm.sticker' || (m.msgtype === 'm.video' && !!m.media?.sticker);
+  const stillMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const loopSeen = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+    for (const e of entries) {
+      const v = e.target.querySelector('video'); if (!v) continue;
+      if (e.isIntersecting && !e.target.dataset.still) v.play().catch(() => {}); else v.pause();
+    }
+  }, {threshold: 0.15}) : null;
   function visualMedia(m) {
-    const box = node('button', 'u-media'); box.type = 'button'; box.setAttribute('aria-label', m.msgtype === 'm.video' ? 'Play video' : 'Open photo');
+    const box = node('button', 'u-media'); box.type = 'button';
+    const sticker = isSticker(m), loop = m.msgtype === 'm.video' && (m.media?.gif || m.media?.sticker);
+    box.setAttribute('aria-label', sticker ? 'Sticker' : m.media?.gif ? 'GIF' : m.msgtype === 'm.video' ? 'Play video' : 'Open photo');
     const w = m.media?.w, h = m.media?.h;
     if (w && h) box.style.aspectRatio = w + ' / ' + h; else box.classList.add('unsized');
+    let v = null;
     if (m.msgtype === 'm.video') {
-      const v = node('video'); v.preload = 'metadata'; v.playsInline = true; v.src = m.local || mediaURL(m.id); v.muted = true; box.append(v, node('span', 'u-play', '▶'));
-      if (m.media?.duration) box.append(node('span', 'u-vdur', fmtDur(m.media.duration)));
+      v = node('video'); v.playsInline = true; v.muted = true; v.setAttribute('muted', ''); v.setAttribute('playsinline', '');
+      if (m.media?.thumb && !m.local) v.poster = mediaURL(m.id, 'thumb');
+      if (loop) {
+        const still = stillMotion();
+        v.loop = true; v.preload = 'auto'; v.disablePictureInPicture = true; v.autoplay = !still;
+        v.src = m.local || mediaURL(m.id) + (still && !m.media?.thumb ? '#t=0.001' : '');
+        box.classList.add(sticker ? 'sticker' : 'gif'); box.append(v);
+        if (!sticker) box.append(node('span', 'u-gif-tag', 'GIF'));
+        if (still) { box.dataset.still = '1'; box.append(node('span', 'u-play', '▶')); }
+        if (sticker && m.media?.thumb) v.onerror = () => { const img = node('img', 'in'); img.alt = 'Sticker'; img.src = mediaURL(m.id, 'thumb'); v.replaceWith(img); };
+        loopSeen?.observe(box);
+      } else {
+        v.preload = 'metadata'; v.src = m.local || mediaURL(m.id) + (m.media?.thumb ? '' : '#t=0.1'); box.append(v, node('span', 'u-play', '▶'));
+        if (m.media?.duration) box.append(node('span', 'u-vdur', fmtDur(m.media.duration)));
+      }
     } else {
-      const img = node('img'); img.alt = m.original || 'Photo'; img.decoding = 'async'; img.loading = 'lazy';
+      const img = node('img'); img.alt = m.original || (sticker ? 'Sticker' : 'Photo'); img.decoding = 'async'; img.loading = 'lazy';
       img.onload = () => { img.classList.add('in'); if (!w && view.scroll && nearBottom()) view.scroll.scrollTop = view.scroll.scrollHeight; };
       img.onerror = () => { box.classList.add('broken'); box.append(node('span', 'u-broken', 'Photo unavailable')); };
       img.src = m.local || mediaURL(m.id, 'thumb'); box.append(img);
-      if (m.msgtype === 'm.sticker') box.classList.add('sticker');
+      if (sticker) box.classList.add('sticker');
+      else if (m.media?.mime === 'image/gif') { box.classList.add('gif'); box.append(node('span', 'u-gif-tag', 'GIF')); }
     }
-    if (!m.pending) box.onclick = () => viewer(m); else box.append(node('span', 'u-spin'));
+    box.message = m;
+    if (!m.pending) box.onclick = () => {
+      if (box.dataset.still && v) { delete box.dataset.still; box.querySelector('.u-play')?.remove(); v.play().catch(() => {}); return; }
+      if (!sticker) viewer(m, box); // stickers are part of the conversation, not photos to open
+    }; else box.append(node('span', 'u-spin'));
     return box;
   }
-  function viewer(m) {
-    closeOverlay(); lastFocus = document.activeElement; s.overlay = 'Photo';
-    const layer = node('div', 'u-overlay u-viewer'); layer.id = 'u-overlay'; layer.setAttribute('role', 'dialog'); layer.setAttribute('aria-label', 'Photo');
-    const bar = node('header'); const save = node('a', 'icon-button u-save'); save.href = mediaURL(m.id); save.download = ''; save.setAttribute('aria-label', 'Save'); save.append(icon('download'));
-    bar.append(iconButton('close', 'Close', closeOverlay), node('span', 'u-viewer-who', m.outgoing ? 'You' : nameOf(m.sender)), save);
-    let media;
-    if (m.msgtype === 'm.video') { media = node('video'); media.controls = true; media.autoplay = true; media.playsInline = true; media.src = mediaURL(m.id); }
-    else { media = node('img'); media.alt = m.original || 'Photo'; media.src = mediaURL(m.id); }
-    layer.append(bar, media); if (m.original) layer.append(node('p', 'u-viewer-cap', m.original));
-    layer.onclick = e => { if (e.target === layer || e.target === media && media.tagName === 'IMG') closeOverlay(); };
-    $('messenger').append(layer); hold();
+  // Tapping a photo or video opens Wizard's own media viewer, the one Chats uses: pinch and double-tap zoom, pan,
+  // swipe through every photo in this chat, Save/Share, Back closes (James, 26 Oct 2026). Messenger keeps no viewer.
+  function viewer(m, box) {
+    const boxes = [...(box.closest('.u-thread-body') || document).querySelectorAll('.u-media')].filter(b => b.message && !b.message.pending && !isSticker(b.message));
+    const list = boxes.map(b => b.message), at = Math.max(0, list.indexOf(m));
+    const who = x => (x.outgoing ? 'You' : nameOf(x.sender) || 'Photo') + (x.original ? ' · ' + x.original : '');
+    window.WizardApp?.media?.view(list.map(x => ({url: mediaURL(x.id), kind: x.msgtype === 'm.video' ? 'video' : 'image', name: who(x)})), at);
   }
   function voice(m) {
     const box = node('div', 'u-voice'); box.style.setProperty('--p', '0');
@@ -788,7 +2174,7 @@
     return wrap;
   }
   const transcriptionText = new Map(); // retain a successful result if saving failed: Retry only saves, never bills twice
-  function jumpTo(id) { const el = view.scroll?.querySelector('[data-id="' + CSS.escape(id) + '"]'); if (el) { el.scrollIntoView({block: 'center', behavior: 'smooth'}); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1200); } }
+  function jumpTo(id) { const post = albumPosts(store.threads[view.id]?.messages || []).find(m => m.id === id || m.photos?.some(p => p.id === id)); const el = view.scroll?.querySelector('[data-id="' + CSS.escape(post?.id || id) + '"]'); if (el) { el.scrollIntoView({block: 'center', behavior: 'smooth'}); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1200); } }
   function translate(m) {
     action(async () => {
       if (shown[m.id] !== 'translated' && !m.translated) { const r = await call('messages/' + encodeURIComponent(m.id) + '/translate', {}); if (r.error) throw new Error(r.error); m.translated = r.translated; }
@@ -797,23 +2183,50 @@
   }
 
   // Shared by both message renderers. Chat-row holdToMenu deliberately stays separate.
-  function messageGestures(row, bubble, {selection, id, menu, reply}) {
+  function messageGestures(row, bubble, {selection, id, menu, reply, album}) {
     const interactive = 'a,button,input,textarea,select,img,video,audio,.u-media,.u-reply,.u-wave,.reply-quote';
-    let timer = null, x0 = 0, y0 = 0, dx = 0, swiping = false, firstHold = false, suppressTap = false;
+    // A photo, video, GIF or sticker IS the message when it has no caption (16.16 drew them without bubble chrome), so
+    // holding or right-clicking it must reach the same menu, reactions first (Miguel, 5 Nov 2026: "I couldn't react
+    // to a GIF"). A tap still opens the viewer / plays a held GIF. Albums keep their hold-to-select.
+    const holdInteractive = album ? 'a,button:not(.u-media),input,textarea,select,video,audio,.u-reply,.u-wave,.reply-quote'
+      : 'a,button:not(.u-media),input,textarea,select,audio,.u-reply,.u-wave,.reply-quote';
+    const onMedia = e => !album && !!e.target.closest('.u-media');
+    let timer = null, x0 = 0, y0 = 0, dx = 0, swiping = false, firstHold = false, suppressTap = false, touch = false, heldMenu = false;
+    // Text is selectable like any page (Miguel, 30 Oct 2026): a mouse drag highlights part of any bubble, sent or
+    // received, and a plain click never opens a menu (right-click does). A phone's hold still picks messages, so its
+    // menu offers "Select text": that bubble then takes native selection handles, preselected, ready to Copy.
+    const selectText = () => {
+      const text = bubble.querySelector('.u-text,.bubble-text') || bubble;
+      row.classList.add('u-textsel'); bubble.classList.add('u-textsel');
+      requestAnimationFrame(() => { const range = document.createRange(); range.selectNodeContents(text); const sel = window.getSelection(); sel?.removeAllRanges(); sel?.addRange(range); });
+      // Leaves text mode once the selection is gone (tap elsewhere, Copy from the native bar, Back).
+      let seen = false;
+      const watch = () => { const sel = window.getSelection(), inside = sel && !sel.isCollapsed && bubble.contains(sel.anchorNode);
+        if (inside) seen = true; else if (seen || !bubble.isConnected) { row.classList.remove('u-textsel'); bubble.classList.remove('u-textsel'); document.removeEventListener('selectionchange', watch); } };
+      document.addEventListener('selectionchange', watch);
+    };
+    const textMode = () => bubble.classList.contains('u-textsel');
+    const select = () => { window.getSelection()?.removeAllRanges(); selection()?.begin(id); };
+    const open = () => menu(touch ? {selectText} : {select});
+    const openMedia = () => menu(touch ? {select, selectText} : {select});
     const cancel = () => { clearTimeout(timer); timer = null; };
-    bubble.addEventListener('selectstart', e => { if (!selection()?.active || firstHold) e.preventDefault(); });
+    // Only a finger's first hold is kept from starting a native selection (it picks messages instead).
+    bubble.addEventListener('selectstart', e => { if (touch && !textMode() && (!selection()?.active || firstHold)) e.preventDefault(); });
     bubble.addEventListener('pointerdown', e => {
-      firstHold = false; suppressTap = false;
-      if (selection()?.active || e.button > 0 || e.target.closest(interactive)) return;
+      firstHold = false; suppressTap = false; heldMenu = false; touch = e.pointerType === 'touch' || e.pointerType === 'pen';
+      if (textMode() || selection()?.active || e.button > 0 || e.target.closest(holdInteractive)) return;
       cancel(); x0 = e.clientX; y0 = e.clientY; dx = 0; swiping = false;
       if (e.pointerType !== 'touch') return;
+      const media = onMedia(e);
       timer = setTimeout(() => {
-        timer = null; firstHold = true; navigator.vibrate?.(10);
-        window.getSelection()?.removeAllRanges(); swallowRelease(); selection()?.begin(id);
+        timer = null; navigator.vibrate?.(10); window.getSelection()?.removeAllRanges(); swallowRelease();
+        // Holding media opens the menu at once (a tap there belongs to the viewer); Select is in it.
+        if (media) { heldMenu = true; openMedia(); return; }
+        firstHold = true; selection()?.begin(id);
       }, 450);
     });
     bubble.addEventListener('pointermove', e => {
-      if (selection()?.active || e.target.closest(interactive)) return;
+      if (textMode() || selection()?.active || e.target.closest(holdInteractive)) return;
       const mx = e.clientX - x0, my = e.clientY - y0;
       if (Math.hypot(mx, my) > 8) cancel();
       if (reply && e.pointerType === 'touch' && (swiping || (mx > 12 && Math.abs(my) < 10))) {
@@ -825,50 +2238,56 @@
       if (swiping) { row.style.transform = ''; row.classList.remove('arm'); suppressTap = true; if (dx > 56) reply(); swiping = false; }
     };
     for (const type of ['pointerup','pointercancel','pointerleave']) bubble.addEventListener(type, end);
+    // A swipe-to-reply that started on a photo must not also open the viewer (its own click handler runs first).
+    bubble.addEventListener('click', e => { if (suppressTap && onMedia(e)) { suppressTap = false; e.preventDefault(); e.stopPropagation(); } }, true);
     bubble.addEventListener('click', e => {
       if (suppressTap) { suppressTap = false; e.preventDefault(); e.stopPropagation(); return; }
-      if (selection()?.active || e.target.closest(interactive)) return;
-      e.stopPropagation(); menu();
+      if (selection()?.active || textMode() || e.target.closest(interactive)) return;
+      // Mouse: a click (or the release of a drag that highlighted text) is just a click; menus open on right-click.
+      if (!touch || !window.getSelection()?.isCollapsed) return;
+      e.stopPropagation(); open();
     });
     bubble.addEventListener('contextmenu', e => {
       // The first hold selects messages; the next hold is left entirely to native text selection.
-      if (selection()?.active && !firstHold) return;
-      if (e.target.closest(interactive)) return;
+      if (heldMenu) { e.preventDefault(); return; } // the hold already opened it
+      if ((selection()?.active && !firstHold) || textMode()) return;
+      if (e.target.closest(holdInteractive)) return;
       e.preventDefault(); cancel();
-      if (!selection()?.active) menu();
+      if (!selection()?.active) (onMedia(e) ? openMedia : open)();
     });
   }
   function gestures(row, b, m) {
-    messageGestures(row, b, {selection: () => view.selection, id: m.id, menu: () => menu(m, b), reply: () => startReply(m)});
+    messageGestures(row, b, {selection: () => view.selection, id: m.id, album: !!m.album, menu: o => menu(m, b, o), reply: () => startReply(m)});
   }
-  function menu(m, b) {
+  function menu(m, b, opts = {}) {
     const t = store.threads[view.id]; if (!t) return;
     closeOverlay(); lastFocus = document.activeElement; s.overlay = 'Message';
     const layer = node('div', 'u-overlay u-menu-layer'); layer.id = 'u-overlay';
     const panel = node('div', 'u-menu'); panel.setAttribute('role', 'menu');
-    const telegram = m.network === 'telegram';
+    const telegram = bridged(m.network);
     if (telegram) {
       const strip = node('div', 'u-quick');
       const mine = m.reactions?.find(r => r.mine)?.key;
       for (const k of [...new Set([...recent.slice(0, 2), ...QUICK])].slice(0, 6)) strip.append(button(k, () => { closeOverlay(); react(m, k); }, 'u-qr-btn' + (mine === k ? ' mine' : '')));
-      strip.append(button('＋', () => { panel.replaceChildren(grid(m)); }, 'u-qr-btn more'));
+      const more = button('＋', () => { panel.replaceChildren(grid(m)); placeMenu(panel, b, m.outgoing); panel.querySelector('button')?.focus(); }, 'u-qr-btn more');
+      more.setAttribute('aria-label', 'More reactions'); strip.append(more);
       panel.append(strip);
     }
     const list = node('div', 'u-actions');
     const item = (label, ic, fn, cls = '') => { const it = button('', () => { closeOverlay(); fn(); }, 'u-act ' + cls); it.setAttribute('role', 'menuitem'); it.append(icon(ic), node('span', '', label)); list.append(it); };
-    if (!m.deleted) item('Forward to Wizard', 'reply', () => view.selection.forward([m.id]));
+    if (!m.deleted) item('Forward to Wizard', 'forward', () => view.selection.forward([m.id]));
     if (!m.deleted) item('Reply', 'reply', () => startReply(m));
     if (m.original && !m.deleted) item('Copy', 'copy', () => navigator.clipboard?.writeText(m.translated && shown[m.id] === 'translated' ? m.translated : m.original)?.then(() => toast('Copied')).catch(() => toast('Copy is not available here')));
-    if (m.media && !m.deleted) item('Save', 'download', () => { const a = node('a'); a.href = mediaURL(m.id); a.download = m.media.filename || ''; a.click(); });
+    if (m.media && !m.deleted) item(m.photos?.length > 1 ? 'Save photos' : 'Save', 'download', () => { for (const photo of m.photos || [m]) if (!photo.deleted) { const a = node('a'); a.href = mediaURL(photo.id); a.download = photo.media?.filename || ''; a.click(); } });
     if (m.outgoing && telegram && m.msgtype === 'm.text' && !m.deleted) item('Edit', 'compose', () => startEdit(m));
+    if (opts.selectText && m.original && !m.deleted) item('Select text', 'textsel', opts.selectText);
+    if (opts.select && !m.deleted && !m.pending) item('Select', 'check', opts.select);
     item('Delete for me', 'trash', () => del(m, false), 'danger');
     if (m.outgoing && telegram && !m.deleted) item('Delete for everyone', 'trash', () => del(m, true), 'danger');
     panel.append(list); layer.append(panel);
-    layer.onclick = e => { if (e.target === layer) closeOverlay(); };
+    outsideCloses(layer, panel);
     $('messenger').append(layer);
-    const r = b.getBoundingClientRect(), H = $('messenger').clientHeight;
-    panel.style.top = Math.max(12, Math.min(r.bottom + 8, H - 16 - (telegram ? 380 : 320))) + 'px';
-    panel.classList.add(m.outgoing ? 'right' : 'left');
+    panel.classList.add(m.outgoing ? 'right' : 'left'); placeMenu(panel, b, m.outgoing);
     b.closest('.u-row')?.classList.add('lifted'); layer.addEventListener('remove', () => {}); view.lifted = b.closest('.u-row');
     panel.querySelector('button')?.focus(); hold();
   }
@@ -887,116 +2306,976 @@
       panel.append(node('p', 'helper', body), pair); pair.lastChild.focus();
     });
   }
+  const reactionEdits = new Map();
+  const reactionSlot = (pid, id) => JSON.stringify([pid, id]);
+  function toggledReactions(reactions, key) {
+    const had = reactions.some(r => r.mine && r.key === key);
+    // Copy every entry: increasing an existing count must not mutate the rollback snapshot.
+    const next = reactions.map(r => ({...r, count: r.count - (r.mine ? 1 : 0), mine: false, ...(r.reactors ? {reactors:r.reactors.filter(u => !u.mine)} : {})})).filter(r => r.count > 0);
+    if (!had) { const r = next.find(r => r.key === key); if (r) { r.count++; r.mine = true; } else next.push({key, count: 1, mine: true}); }
+    return next;
+  }
+  function pendingReactions(pid, message) {
+    const edit = reactionEdits.get(reactionSlot(pid, message.id));
+    if (!edit || edit.threads !== store.threads) return message;
+    return {...message, reactions: edit.queue.reduce((rs, op) => toggledReactions(rs, op.key), edit.confirmed)};
+  }
   async function react(m, key) {
+    const pid = view.id, t = store.threads[pid]; if (!t) return;
     recent = [key, ...recent.filter(k => k !== key)].slice(0, 8);
-    const t = store.threads[view.id]; const before = m.reactions;
-    // Optimistic: one reaction per person, tapping your own again removes it.
-    const others = (m.reactions || []).map(r => r.mine ? {...r, count: r.count - 1, mine: false} : r).filter(r => r.count > 0);
-    const had = (m.reactions || []).some(r => r.mine && r.key === key);
-    if (!had) { const e = others.find(r => r.key === key); if (e) { e.count++; e.mine = true; } else others.push({key, count: 1, mine: true}); }
-    m.reactions = others; paintThread();
-    try { const r = await call('messages/' + encodeURIComponent(m.id) + '/react', {key}); mergeMessages(view.id, [r.message]); paintThread(); }
-    catch (e) { m.reactions = before; paintThread(); error(e); }
+    // Album posts are projections, not store rows. Change the canonical part, including
+    // an own reaction on a later photo, so paintThread's next projection sees it now.
+    const parts = (m.photos || [m]).map(p => t.messages.find(row => row.id === p.id)).filter(Boolean);
+    const target = parts.find(p => reactionEdits.has(reactionSlot(pid, p.id))) || parts.find(p => p.reactions?.some(r => r.mine && r.key === key)) || parts.find(p => p.reactions?.some(r => r.mine)) || parts[0];
+    if (!target) return;
+    const slot = reactionSlot(pid, target.id);
+    let edit = reactionEdits.get(slot);
+    if (!edit || edit.threads !== store.threads) {
+      edit = {threads: store.threads, confirmed: target.reactions || [], queue: []}; reactionEdits.set(slot, edit);
+    }
+    const done = new Promise(resolve => edit.queue.push({key, resolve}));
+    target.reactions = pendingReactions(pid, target).reactions;
+    paintThread(); // Before the first await or HTTP call, even on a slow bridge.
+    if (edit.queue.length > 1) return done;
+    while (edit.queue.length) {
+      const op = edit.queue[0]; let failure;
+      try {
+        const r = await call('messages/' + encodeURIComponent(target.id) + '/react', {key: op.key});
+        edit.confirmed = r.message.reactions || [];
+        if (edit.threads === store.threads) mergeMessages(pid, [r.message]);
+      } catch (e) { failure = e; }
+      if (edit.threads !== store.threads) {
+        if (reactionEdits.get(slot) === edit) reactionEdits.delete(slot);
+        for (const queued of edit.queue) queued.resolve();
+        return done; // Sign-out/reset must not send queued reactions into a new session.
+      }
+      edit.queue.shift();
+      if (reactionEdits.get(slot) === edit && !edit.queue.length) reactionEdits.delete(slot);
+      if (edit.threads === store.threads) {
+        const row = store.threads[pid]?.messages.find(row => row.id === target.id);
+        if (row) row.reactions = edit.queue.reduce((rs, next) => toggledReactions(rs, next.key), edit.confirmed);
+        // A late completion belongs to its original thread, never the thread now open.
+        if (view.id === pid && s.person === pid) { paintThread(); if (failure) error(failure); }
+      }
+      op.resolve();
+    }
+    return done;
   }
   async function del(m, everyone) {
-    if (everyone && !confirm('Delete this message for everyone?')) return;
-    try { const r = await call('messages/' + encodeURIComponent(m.id) + '/delete', {everyone}); mergeMessages(view.id, [r.message]); paintThread(); } catch (e) { error(e); }
+    // Never window.confirm: the Mac app's web view has no confirm panel, so it silently answers no.
+    if (everyone && !await ask({title: 'Delete for everyone?', body: 'It is removed from the chat for both of you.', yes: 'Delete', no: 'Keep'})) return;
+    try { const r = await call('messages/' + encodeURIComponent(m.id) + '/delete', {everyone}); mergeMessages(view.id, r.messages || [r.message]); paintThread(); } catch (e) { error(e); }
   }
-  function startReply(m) { view.edit = null; view.reply = m; view.paintBar?.(); view.draft?.focus(); }
+  function startReply(m) { view.edit = null; view.reply = m; if (m.network) view.useNetwork?.(m.network); view.paintBar?.(); view.draft?.focus(); }
   function startEdit(m) { view.reply = null; view.edit = m; view.draft.value = m.original; view.grow?.(); view.paintBar?.(); view.draft.focus(); }
 
+  // ---------- server drafts: the composer IS the draft ----------
+  // Whatever is typed or attached in a chat's composer autosaves to one server-side draft, so an agent with
+  // Draft-only access can see it, extend it or attach files, and the owner keeps editing and sends from the same
+  // composer. Agents never send. Edits are fenced by revision: a change made elsewhere is never overwritten silently.
+  const SD_SAVE_MS = 700, SD_POLL_MS = 6000;
+  async function draftRaw(path, method, blob, query) {
+    const response = await fetch(path + '?' + new URLSearchParams(query), {method, credentials: 'same-origin', cache: 'no-store',
+      headers: {'Content-Type': blob.type || 'application/octet-stream', 'X-Messenger-CSRF': csrf(), Accept: 'application/json'}, body: blob});
+    let env = {}; try { env = await response.json(); } catch { /* gateway errors are not JSON */ }
+    if (!response.ok || !env.ok) { const e = new Error(env.error?.message || 'Could not attach that file'); e.code = env.error?.code; throw e; }
+    return env.result;
+  }
+  const draftsFor = (rows, id) => rows.filter(d => d.person_id === id && d.state === 'draft').sort((a, b) => (b.updated || 0) - (a.updated || 0));
+  // One drafts request at a time, shared by the Inbox's draft labels and the open chat's composer poll; nothing
+  // polls while Messenger is hidden or not signed in.
+  // draftWrites counts this screen's own draft writes. A list fetched across one of them may be older than the
+  // write (31 Oct 2026: a poll in flight while Send deleted the draft brought the sent draft back, its picture 404'd
+  // and the attachment warning stuck), so such a list is never reused and callers drop it.
+  let draftsReq = null, draftsAt = 0, draftsRows = null, draftWrites = 0;
+  const closedDrafts = new Set(); // drafts this screen sent or discarded; a late list never revives them
+  const draftWrote = () => { draftWrites++; draftsRows = null; };
+  function fetchDrafts(fresh = false) {
+    if (draftsReq && draftsReq.gen === draftWrites) return draftsReq;
+    if (!fresh && draftsRows && performance.now() - draftsAt < 2000) return Promise.resolve(draftsRows);
+    const gen = draftWrites;
+    const req = api('api/drafts').then(r => { const rows = (r.drafts || []).filter(d => !closedDrafts.has(d.id)); if (gen === draftWrites) { draftsRows = rows; draftsAt = performance.now(); } return rows; })
+      .finally(() => { if (draftsReq === req) draftsReq = null; });
+    req.gen = gen; draftsReq = req;
+    return req;
+  }
+  async function refreshDraftIndex() {
+    if (!s.ready || document.hidden) return;
+    let rows; try { rows = await fetchDrafts(); } catch { return; }
+    rows = rows.filter(d => !closedDrafts.has(d.id));
+    const next = {}; for (const d of rows) if (d.state === 'draft' && (!next[d.person_id] || (d.updated || 0) > (next[d.person_id].updated || 0))) next[d.person_id] = d;
+    const key = JSON.stringify(Object.entries(next).map(([k, d]) => [k, d.revision, d.text, (d.attachments || []).length]));
+    if (key !== s.draftKey) { s.draftKey = key; s.draftIndex = next; if ((!s.person || split.on) && s.tab === 'people') drawList(); }
+  }
+  function serverDraft(id, ui, after = null) {
+    const sd = {id, row: null, saved: null, timer: null, busy: null, conflict: null, alive: true, poll: null, loadError: false, uploadError: false, epoch: 0, closing: null, late: null};
+    const by = row => row?.updated_by || row?.created_by;
+    const byAgent = row => by(row) && by(row).id !== 'owner';
+    const dirty = () => sd.row ? ui.draft.value !== sd.saved || ui.channel.value !== sd.row.identity_id : !!ui.draft.value.trim();
+    const alive = () => sd.alive && ui.form.isConnected && s.person === id && view.sd === sd;
+    // The global tray belongs to the currently visible composer, not to a suspended save.
+    // Keep this controller's handles (including an in-flight PUT's mutable sid) across navigation.
+    let attachments = [...(view.attach || [])], saveGeneration = 0;
+    const note = () => {
+      if (sd.conflict) {
+        const box = node('div', 'u-draft-note conflict');
+        box.append(node('span', '', (by(sd.conflict)?.name || 'Someone') + ' changed this draft while you were typing.'),
+          button('Use theirs', () => { const r = sd.conflict; sd.conflict = null; apply(r); }, 'secondary'),
+          button('Keep mine', () => action(async () => { const mine = ui.draft.value, row = sd.conflict; await apply(row); ui.draft.value = mine; s.drafts[id] = mine; saveDrafts(); ui.grow(); ui.paintBar(); await save(); }), 'secondary'));
+        return box;
+      }
+      if (sd.loadError || sd.uploadError) return node('div', 'u-draft-note conflict', 'An attachment could not be saved or opened. Remove it or reload the draft before sending.');
+      if (sd.row && byAgent(sd.row) && !dirty()) {
+        const box = node('div', 'u-draft-note');
+        box.append(node('span', '', 'Drafted by ' + (by(sd.row).name || 'your Wizard') + ' · not sent. Edit it here and send when ready.'),
+          iconButton('close', 'Discard draft', () => action(async () => {
+            if (!await ask({title: 'Discard this draft?', body: 'Nothing is sent.', yes: 'Discard', no: 'Keep'})) return;
+            await clear(); ui.draft.value = ''; s.drafts[id] = ''; saveDrafts(); view.attach = null; ui.grow(); ui.paintBar();
+          })));
+        return box;
+      }
+      return null;
+    };
+    async function itemFor(a, rid) {
+      const r = await fetch('api/drafts/' + rid + '/attachments/' + a.id, {credentials: 'same-origin', cache: 'no-store'});
+      if (!r.ok) throw new Error('Could not load ' + a.name);
+      const blob = await r.blob(); const f = new File([blob], a.name, {type: a.mime});
+      return /^image\/(jpeg|png|gif|webp)$/.test(a.mime) ? {...await preparePhoto(f), key: 'a' + uid(), name: a.name, bytes: a.bytes, sid: a.id}
+        : {file: true, blob: f, key: 'a' + uid(), name: a.name, bytes: a.bytes, sid: a.id};
+    }
+    async function apply(row) {
+      sd.row = row; sd.saved = row.text; sd.conflict = null; sd.loadError = false;
+      if (!view.edit) { ui.draft.value = row.text; s.drafts[id] = row.text; saveDrafts(); }
+      if (row.identity_id && [...ui.channel.options].some(o => o.value === row.identity_id)) { ui.channel.value = row.identity_id; ui.paintVia(); }
+      await loadItems(row);
+    }
+    // Keep failed downloads in the same tray: they must be removable, never silently omitted from a send.
+    const errorsInTray = () => {
+      if (!alive()) return;
+      sd.loadError = (view.attach || []).some(it => it.unavailable || it.removeFailed);
+      sd.uploadError = (view.attach || []).some(it => it.uploadFailed);
+      ui.grow(); ui.paintBar();
+    };
+    async function loadItems(row) {
+      const want = row.attachments || [], gen = draftWrites, epoch = sd.epoch, loaded = [];
+      for (const a of want) if (!(view.attach || []).some(it => it.sid === a.id && !it.unavailable)) {
+        try { loaded.push(await itemFor(a, row.id)); }
+        catch { loaded.push({file: true, unavailable: true, key: 'a' + uid(), sid: a.id, name: a.name, bytes: a.bytes}); }
+      }
+      // A slow download must not revive a removed/sent item or replace another conversation's tray.
+      if (!alive() || sd.epoch !== epoch || gen !== draftWrites || sd.row?.id !== row.id || sd.row.revision !== row.revision) {
+        for (const it of loaded) if (it.url) URL.revokeObjectURL(it.url);
+        return;
+      }
+      const tray = (view.attach || []).filter(it => !it.sid || want.some(a => a.id === it.sid));
+      for (const it of loaded) {
+        const at = tray.findIndex(old => old.sid === it.sid);
+        if (at < 0) tray.push(it); else if (tray[at].unavailable) tray[at] = it;
+        else if (it.url) URL.revokeObjectURL(it.url);
+      }
+      attachments = tray; view.attach = tray.length ? tray : null; errorsInTray();
+    }
+    function save() {
+      clearTimeout(sd.timer); sd.timer = null; draftWrote();
+      // Freeze the originating composer before any await. A navigation flush may arrive after
+      // openPerson cleared the global tray; only the old controller's retained handles apply then.
+      if (alive()) attachments = [...(view.attach || [])];
+      const snapshot = {text: ui.draft.value, identity_id: ui.channel.value, attachments: [...attachments],
+        editing: alive() && !!view.edit, epoch: sd.epoch, generation: ++saveGeneration};
+      const saving = saveSnapshot(snapshot);
+      sd.saving = saving;
+      return saving.finally(() => { if (sd.saving === saving) sd.saving = null; });
+    }
+    async function saveSnapshot(snapshot) {
+      const fresh = () => sd.epoch === snapshot.epoch && saveGeneration === snapshot.generation;
+      await sd.uploading?.catch(() => {});
+      if (!fresh()) return;
+      if (sd.closing) { await sd.closing; if (!fresh() || sd.timer) return; } // a just-sent draft is deleted first; new text starts a new one
+      if (sd.busy) { await sd.busy.catch(() => {}); if (!fresh() || sd.timer) return; }
+      if (snapshot.editing || sd.conflict) return;
+      const run = (async () => {
+        const {text, identity_id} = snapshot, items = snapshot.attachments.filter(it => !it.removed);
+        // Server metadata is authoritative after the queue: a later batch may have persisted too.
+        const files = (sd.row?.attachments || []).length || items.some(it => it.sid);
+        if (!identity_id) return;
+        if (!sd.row) {
+          if (!text.trim()) return;
+          const r = await api('api/drafts', {method: 'POST', body: {person_id: id, identity_id, text}});
+          sd.row = r.draft; sd.saved = text;
+        } else if (!text.trim() && !files && !items.length) {
+          await api('api/drafts/' + sd.row.id, {method: 'DELETE', body: {revision: sd.row.revision}}); sd.row = null; sd.saved = null;
+        } else if (text !== sd.row.text || identity_id !== sd.row.identity_id) {
+          const r = await api('api/drafts/' + sd.row.id, {method: 'POST', body: {revision: sd.row.revision, person_id: id, identity_id, text}});
+          sd.row = r.draft; sd.saved = text;
+        }
+      })();
+      sd.busy = run;
+      try { await run; }
+      catch (e) {
+        if (e.code === 'draft_exists') { try { const rows = (await api('api/drafts')).drafts || []; sd.conflict = draftsFor(rows, id)[0] || null; } catch { /* next poll */ } }
+        else if (e.code === 'draft_changed') { try { sd.conflict = (await api('api/drafts/' + sd.row.id)).draft; } catch { /* next poll */ } }
+        else if (e.code === 'not_found' || e.code === 'draft_closed') { sd.row = null; sd.saved = null; }
+        else if (e.code !== 'server_restarting') error(e);
+      } finally { if (sd.busy === run) sd.busy = null; draftWrote(); }
+      if (alive()) { ui.paintBar(); if (!sd.conflict && dirty()) schedule(); } refreshDraftIndex();
+    }
+    const schedule = () => { clearTimeout(sd.timer); sd.timer = setTimeout(save, SD_SAVE_MS); };
+    async function ensure() {
+      if (!sd.row) {
+        const text = ui.draft.value;
+        const r = await api('api/drafts', {method: 'POST', body: {person_id: id, identity_id: ui.channel.value, text}});
+        sd.row = r.draft; sd.saved = text;
+      }
+      return sd.row;
+    }
+    // Picker, paste, removal and autosave share revisions. Queue whole batches, not just their last promise:
+    // two selections before the first PUT returns otherwise race with the same revision and poison the draft.
+    function attachmentWork(work) {
+      const before = sd.uploading, closing = sd.closing;
+      sd.attachmentPending = (sd.attachmentPending || 0) + 1;
+      const run = Promise.resolve(before).catch(() => {}).then(async () => {
+        await closing; await sd.busy?.catch(() => {});
+        draftWrote();
+        try { return await work(); } finally { sd.attachmentPending--; draftWrote(); errorsInTray(); refreshDraftIndex(); }
+      });
+      sd.uploading = run;
+      return run;
+    }
+    function attach(items) {
+      const epoch = sd.epoch;
+      attachments = [...new Set([...attachments, ...items])];
+      return attachmentWork(async () => {
+        for (const it of items) {
+          if (!alive() || sd.epoch !== epoch) return;
+          if (it.removed || it.sid) continue;
+          try {
+            const row = await ensure();
+            const r = await draftRaw('api/drafts/' + row.id + '/attachments', 'PUT', it.blob, {revision: row.revision, name: it.name || 'Attachment', mime: it.blob.type || 'application/octet-stream'});
+            sd.row = r.draft; it.sid = r.draft.attachments[r.draft.attachments.length - 1].id;
+            it.uploadFailed = false;
+          } catch (e) {
+            if (sd.epoch !== epoch) return;
+            it.uploadFailed = true;
+            if (e.code === 'draft_changed' || e.code === 'draft_exists') {
+              try { sd.conflict = (await fetchDrafts(true)).find(d => d.id === sd.row?.id || d.person_id === id) || null; } catch { /* next poll */ }
+            } else if (alive()) error(e);
+          }
+        }
+      });
+    }
+    function detach(it) {
+      it.removed = true; attachments = attachments.filter(old => old !== it); errorsInTray();
+      return attachmentWork(async () => {
+        if (!it.sid || !sd.row) return;
+        try {
+          const r = await api('api/drafts/' + sd.row.id + '/attachments/' + it.sid, {method: 'DELETE', body: {revision: sd.row.revision}});
+          sd.row = r.draft;
+          if (alive()) { view.attach = (view.attach || []).filter(old => old !== it); if (!view.attach.length) view.attach = null; }
+        } catch (e) {
+          // A refused removal is not a successful removal. Keep its chip and block until reconciled.
+          if (alive()) {
+            it.removed = false; it.removeFailed = true;
+            attachments = [...new Set([...attachments, it])];
+            if (!(view.attach || []).includes(it)) view.attach = [...(view.attach || []), it];
+            if (e.code !== 'not_found') error(e);
+          }
+        }
+        if (alive() && !ui.draft.value.trim() && !(view.attach || []).length) schedule();
+      });
+    }
+    // Sent (or emptied): the draft is done. Delete it so it never comes back.
+    async function clear(quiet = false) {
+      if (!quiet) { clearTimeout(sd.timer); sd.timer = null; } // (after Send, a timer is new text for a new draft)
+      await sd.busy?.catch(() => {});
+      const row = sd.row; sd.row = null; sd.saved = null; sd.conflict = null; sd.loadError = false; if (!row) return true;
+      closedDrafts.add(row.id); draftWrote();
+      let done = true;
+      try { await api('api/drafts/' + row.id, {method: 'DELETE', body: {revision: row.revision}}); }
+      catch (e) {
+        // Someone else changed it after our send: their newer revision stays, and may show again.
+        if (e.code === 'draft_changed') closedDrafts.delete(row.id);
+        else if (e.code !== 'not_found') { if (quiet && offline(e)) { sd.late = row; done = false; } else error(e); } /* never delete someone else's newer revision */
+      }
+      draftWrote(); refreshDraftIndex();
+      return done;
+    }
+    // Send pressed (Miguel, 31 Oct 2026: "when I send a message it shouldn't be a draft anymore"): the draft ends now,
+    // not when the provider answers. The text and tray already went to the send, so nothing waits on a save: drop the
+    // pending autosave, let a write already in flight land (its revision is the one to delete), then delete the server
+    // copy. A send that fails puts the message back (restoreSend). Restarting Messenger: deleted after delivery instead.
+    function closeForSend() {
+      clearTimeout(sd.timer); sd.timer = null; sd.epoch++;
+      const up = sd.uploading, wait = sd.closing;
+      const run = (async () => {
+        await wait; await sd.busy?.catch(() => {}); await Promise.resolve(up).catch(() => {});
+        return clear(true);
+      })();
+      sd.closing = run.finally(() => { if (sd.closing === closing) sd.closing = null; });
+      const closing = sd.closing;
+      // Gone from the Inbox row at once, before the server answers.
+      if (s.draftIndex?.[id]) { const next = {...s.draftIndex}; delete next[id]; s.draftIndex = next; s.draftKey = null; if ((!s.person || split.on) && s.tab === 'people') drawList(); }
+      return closing;
+    }
+    // Delivered after a delete that could not reach Messenger (restarting): delete it now.
+    async function afterSend() { await sd.closing; const row = sd.late; if (!row) return; sd.late = null; try { await api('api/drafts/' + row.id, {method: 'DELETE', body: {revision: row.revision}}); } catch { /* changed or gone: leave it */ } draftWrote(); refreshDraftIndex(); }
+    async function check(first) {
+      if (!alive()) { clearInterval(sd.poll); return; }
+      if (!first && document.hidden) return;
+      const gen = draftWrites;
+      let rows; try { rows = await fetchDrafts(first); } catch { return; }
+      if (!alive() || sd.busy || sd.timer || sd.closing || sd.attachmentPending) return;
+      if (gen !== draftWrites) return check(first); // this screen wrote meanwhile: that list may predate it
+      rows = rows.filter(d => !closedDrafts.has(d.id));
+      const mine = sd.row && rows.find(d => d.id === sd.row.id && d.state === 'draft');
+      const pick = s.bindDraft && rows.find(d => d.id === s.bindDraft && d.person_id === id && d.state === 'draft'); if (pick) s.bindDraft = null;
+      const latest = pick || mine || (!sd.row && draftsFor(rows, id)[0]);
+      if (!latest) {
+        if (sd.loadError) { sd.loadError = false; ui.paintBar(); } // the draft (and the attachment that failed) is gone
+        if (sd.row && !dirty()) { sd.row = null; sd.saved = null; ui.draft.value = ''; s.drafts[id] = ''; saveDrafts(); view.attach = (view.attach || []).filter(it => !it.sid); if (!view.attach.length) view.attach = null; ui.grow(); ui.paintBar(); }
+        else if (first && !sd.row && ui.draft.value.trim()) schedule(); // a draft kept only on this device moves to the server
+        return;
+      }
+      if (sd.row && latest.id === sd.row.id && latest.revision <= sd.row.revision) { // same, or a read from before our own save
+        if (sd.loadError && latest.revision === sd.row.revision) await loadItems(sd.row); // retry what failed to load
+        return;
+      }
+      if (dirty() && !(first && !sd.row && ui.draft.value === latest.text)) { sd.conflict = latest; ui.paintBar(); return; }
+      await apply(latest);
+    }
+    sd.poll = setInterval(() => check(false), SD_POLL_MS);
+    const retry = async () => {
+      await sd.uploading?.catch(() => {});
+      if (!alive() || sd.conflict) return;
+      for (const it of (view.attach || []).filter(it => it.removeFailed)) await detach(it);
+      const unsaved = (view.attach || []).filter(it => !it.sid && !it.removed);
+      if (unsaved.length) await attach(unsaved);
+      if (sd.loadError && sd.row) await loadItems(sd.row);
+      errorsInTray();
+    };
+    Object.assign(sd, {schedule, save, attach, detach, clear, closeForSend, afterSend, note, check, retry, stop: () => { sd.alive = false; clearInterval(sd.poll); clearTimeout(sd.timer); sd.timer = null; }});
+    setTimeout(() => Promise.resolve(after).catch(() => {}).then(() => check(true)), 0);
+    return sd;
+  }
+
   // ---------- composer: text, photo, voice; optimistic and idempotent ----------
+  // Extend the existing textarea and reaction strip: no second composer or sheet.
+  // Escape timeline/composer clipping; coordinates stay local to Messenger.
+  function floatPanel(panel, anchor, dismiss, wide = false) {
+    const root = $('messenger'), home = panel.parentElement || panel.parent;
+    const bounds = anchor.closest('.u-pane-thread') || root;
+    root.append(panel);
+    const place = () => {
+      if (!anchor.isConnected) { dismiss(); return; }
+      const r = root.getBoundingClientRect(), b = bounds.getBoundingClientRect(), a = anchor.getBoundingClientRect();
+      const width = Math.max(0, b.right - b.left - 16), height = Math.max(0, b.bottom - b.top - 16);
+      panel.style.maxWidth = width + 'px'; panel.style.minWidth = '0';
+      panel.style.width = Math.min(wide ? Math.max(260, a.width) : 270, width) + 'px';
+      panel.style.maxHeight = Math.min(wide ? 256 : 300, height) + 'px';
+      const p = floatingBox(a, panel.getBoundingClientRect(), b);
+      panel.style.left = (p.left - r.left) + 'px'; panel.style.top = (p.top - r.top) + 'px';
+      panel.style.right = 'auto'; panel.style.bottom = 'auto';
+    };
+    place();
+    const abort = new AbortController();
+    window.addEventListener('resize', place, {signal:abort.signal});
+    document.addEventListener('scroll', place, {capture:true, signal:abort.signal});
+    const resize = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(place) : null;
+    resize?.observe(bounds); resize?.observe(anchor); resize?.observe(panel);
+    const removed = typeof MutationObserver !== 'undefined' ? new MutationObserver(() => { if (!anchor.isConnected) dismiss(); }) : null;
+    removed?.observe(root, {childList:true, subtree:true});
+    return () => { abort.abort(); resize?.disconnect(); removed?.disconnect(); home?.append(panel); };
+  }
+  function mentionComposer(form, field, draft, members, changed) {
+    view.mentionClose?.();
+    const mirror = node('div','u-mention-mirror'); mirror.setAttribute('aria-hidden','true'); field.prepend(mirror);
+    const picker = node('div','u-mention-picker'); picker.id = 'u-mention-picker'; picker.hidden = true;
+    picker.setAttribute('role','listbox'); picker.setAttribute('aria-label','Mention a group member'); form.append(picker);
+    draft.setAttribute('aria-controls',picker.id); draft.setAttribute('aria-expanded','false'); draft.setAttribute('aria-autocomplete','list');
+    let selected = 0, options = [], query = null, outside = null, unfloat = null;
+    const paint = () => {
+      mirror.replaceChildren(); let at = 0;
+      for (const span of parseMentions(draft.value,members())) { mirror.append(draft.value.slice(at,span.start),node('mark','',draft.value.slice(span.start,span.end))); at = span.end; }
+      mirror.append(draft.value.slice(at) + '\n'); mirror.scrollTop = draft.scrollTop;
+    };
+    const close = () => {
+      const open = !picker.hidden; picker.hidden = true; draft.setAttribute('aria-expanded','false'); draft.removeAttribute('aria-activedescendant');
+      outside?.abort(); outside = null; unfloat?.(); unfloat = null; return open;
+    };
+    view.mentionClose = close;
+    function choose(member) {
+      if (!query) return;
+      const next = insertMention(draft.value,query,member); draft.value = next.text;
+      close(); draft.focus(); draft.setSelectionRange(next.caret,next.caret); changed(); close(); paint();
+    }
+    function draw() {
+      picker.replaceChildren(node('small','helper',options.some(m => m.native !== false) ? 'Mention a group member' : 'Insert a name · plain text on this network'));
+      if (!options.length) picker.append(node('p','helper','No matching members'));
+      for (const [i,m] of options.entries()) {
+        const item = button('',() => choose(m),'u-mention-option'); item.type = 'button'; item.id = 'u-mention-option-' + i;
+        item.setAttribute('role','option'); item.setAttribute('aria-selected',String(i===selected));
+        item.append(withPicture(avatar(m.name,'small'),pictureURL(view.id,m.avatar,m.id)),node('span','',m.label));
+        item.onpointerdown = e => e.preventDefault(); picker.append(item);
+      }
+      if (options.length) { draft.setAttribute('aria-activedescendant','u-mention-option-' + selected); picker.querySelector('[aria-selected="true"]')?.scrollIntoView({block:'nearest'}); }
+    }
+    const update = () => {
+      paint(); const all = members(); query = mentionQuery(draft.value,draft.selectionStart);
+      if (!all.length || !query || view.edit) return close();
+      options = all.filter(m => m.label.toLocaleLowerCase().includes(query.query)).slice(0,50); selected = 0;
+      picker.hidden = false; draft.setAttribute('aria-expanded','true'); draw();
+      unfloat?.(); unfloat = floatPanel(picker, draft, close, true);
+      if (!outside) {
+        outside = new AbortController(); document.addEventListener('pointerdown',e => { if (!form.contains(e.target) && !picker.contains(e.target)) close(); },{capture:true,signal:outside.signal});
+      }
+    };
+    draft.addEventListener('keydown',e => {
+      if (picker.hidden || e.isComposing) return;
+      if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); close(); return; }
+      const next = mentionKey(e.key,selected,options.length); if (!next.handled) return;
+      e.preventDefault(); e.stopImmediatePropagation(); selected = next.index;
+      if (next.select) choose(options[selected]); else draw();
+    },true);
+    draft.addEventListener('click',update); draft.addEventListener('scroll',paint);
+    return {paint,update,close};
+  }
+  function reactorFace(user, pid) {
+    return withPicture(avatar(user.name || user.id,'small'),pictureURL(pid,user.avatar,user.id));
+  }
+  function reactorList(reactions, key, pid) {
+    const sheet = overlay('Reactions'), tabs = node('div','u-reactor-tabs'), list = node('div','u-reactor-list');
+    tabs.setAttribute('role','tablist'); sheet.append(tabs,list); const groups = reactorGroups(reactions);
+    const paint = chosen => {
+      list.replaceChildren();
+      for (const tab of tabs.children) tab.setAttribute('aria-selected',String(tab.dataset.key === chosen));
+      for (const group of groups.filter(g => !chosen || g.key === chosen)) {
+        list.append(node('h3','',group.key + ' · ' + group.count));
+        for (const user of group.reactors) { const row = node('div','u-reactor-row'); row.append(reactorFace(user,pid),node('span','',user.name || user.id)); list.append(row); }
+        if (group.missing) list.append(node('p','helper',group.missing + ' reaction' + (group.missing === 1 ? '' : 's') + ' · This network did not provide who reacted.'));
+      }
+    };
+    for (const [value,label] of [['','All'],...groups.map(g => [g.key,g.key + ' ' + g.count])]) {
+      const tab = button(label,() => paint(value),'secondary'); tab.dataset.key = value; tab.setAttribute('role','tab'); tabs.append(tab);
+    }
+    paint(key); return sheet;
+  }
+  function reactionChip(reaction, reactions, {pid, toggle}) {
+    const chip = button(reaction.key + (reaction.count > 1 ? ' ' + reaction.count : ''),e => {
+      if (chip.dataset.held) { delete chip.dataset.held; return; }
+      if (e.pointerType === 'touch' || matchMedia('(hover: none)').matches) reactorList(reactions,reaction.key,pid);
+      else toggle();
+    },'u-react' + (reaction.mine ? ' mine' : ''));
+    chip.setAttribute('aria-label',reaction.key + ', ' + reaction.count + ' reactions. Hold or right-click to see who reacted.');
+    const tip = node('span','u-reactor-tooltip'); tip.setAttribute('role','tooltip'); tip.hidden = true;
+    const group = reactorGroups([reaction])[0];
+    for (const user of group.reactors.slice(0,8)) { const row = node('span','u-reactor-row'); row.append(reactorFace(user,pid),node('span','',user.name || user.id)); tip.append(row); }
+    if (group.reactors.length > 8) tip.append(node('span','', '+' + (group.reactors.length-8) + ' more · right-click to see all'));
+    if (group.missing) tip.append(node('span','','Who reacted is unavailable for ' + group.missing + ' reaction' + (group.missing===1?'':'s')));
+    let unfloat = null;
+    const hide = () => { tip.hidden = true; unfloat?.(); unfloat = null; };
+    const show = () => { hide(); tip.hidden = false; unfloat = floatPanel(tip, chip, hide); };
+    chip.append(tip); chip.addEventListener('pointerenter',e => { if (e.pointerType !== 'touch') show(); });
+    chip.addEventListener('pointerleave',hide); chip.addEventListener('focus',show); chip.addEventListener('blur',hide);
+    chip.addEventListener('pointerdown',e => { chip.classList.add('pressed'); e.stopPropagation(); });
+    for (const event of ['pointerup','pointercancel','pointerleave']) chip.addEventListener(event,() => chip.classList.remove('pressed'));
+    holdToMenu(chip,() => { hide(); reactorList(reactions,reaction.key,pid); }); return chip;
+  }
   function composer(id, p) {
+    // A retained DOM view is not proof that its physical mic is still running (e.g. notification Stop).
+    if (view.recording?.phase === 'recording') {
+      let own; try { own = window.WizardApp?.capture?.current?.(); } catch (_) {}
+      if (!(own?.active && own.recording && own.phase === 'recording' && own.appId === 'messenger' && own.id === view.recording.session?.id && own.meta?.micSession === voiceTapSession)) {
+        clearInterval(view.recording.tick); clearTimeout(view.recording.deadline); view.recording.off?.(); view.recording.offWarn?.();
+        view.recording = null; hold(); // shared service keeps/stops any orphan below, never discard audio here
+      }
+    }
     const form = node('form', 'u-composer');
     const bar = node('div', 'u-bar'); bar.hidden = true;
     const channel = node('select', 'u-channel'); channel.setAttribute('aria-label', 'Send using channel');
-    for (const i of p.identities || []) { const opt = node('option', '', 'via ' + cap(i.network) + ' · ' + i.label); opt.value = i.id; channel.append(opt); }
-    channel.value = p.preferred_identity || p.identities?.[0]?.id || ''; channel.hidden = (p.identities || []).length < 2;
-    const reviewed = reviewedOf(p), telegramOnly = (p.identities || []).some(i => i.network === 'telegram');
+    for (const i of p.identities || []) { const opt = node('option', '', 'via ' + netLabel(i.network) + ' · ' + i.label); opt.value = i.id; channel.append(opt); }
+    channel.value = p.preferred_identity || p.identities?.[0]?.id || ''; channel.hidden = true;
+    // Merged chats: always say where the reply goes ("Replying on WhatsApp ▾"); tap to pick another network.
+    // Replying to a message switches to the network that message came from.
+    const via = button('', () => {
+      actionMenu(via, 'Reply on', (p.identities || []).map(i => ({label: netLabel(i.network) + ' · ' + i.label + (i.id === channel.value ? '  ✓' : ''), icon: 'send', run: () => { channel.value = i.id; paintVia(); view.sd?.schedule(); }})));
+    }, 'u-via-pick'); via.type = 'button'; via.hidden = (p.identities || []).length < 2;
+    const paintVia = () => {
+      const i = (p.identities || []).find(x => x.id === channel.value) || p.identities?.[0]; if (!i) return;
+      via.replaceChildren(node('span', 'u-via-lead', 'Replying on'), netBadge(i.network, 'u-via-icon'), node('strong', '', netLabel(i.network)), node('span', 'u-via-caret', '▾'));
+      via.setAttribute('aria-label', 'Replying on ' + netLabel(i.network) + '. Change');
+    };
+    view.useNetwork = net => { const i = (p.identities || []).find(x => x.network === net); if (i && i.id !== channel.value) { channel.value = i.id; paintVia(); view.sd?.schedule(); } };
+    paintVia();
+    const reviewed = reviewedOf(p), telegramOnly = (p.identities || []).some(i => bridged(i.network)), canAttach = telegramOnly || (p.identities || []).some(i => i.network === 'messenger');
     const draft = node('textarea'); draft.rows = 1; draft.placeholder = reviewed ? 'Message in English' : 'Message'; draft.setAttribute('aria-label', 'Message'); draft.maxLength = 16384; draft.value = s.drafts[id] || '';
-    const file = node('input'); file.type = 'file'; file.accept = 'image/jpeg,image/png,image/gif,image/webp'; file.multiple = true; file.hidden = true;
-    const attach = iconButton('plus', 'Attach photos', () => file.click(), 'u-attach'); attach.hidden = !telegramOnly;
+    const file = node('input'); file.type = 'file'; file.multiple = true; file.hidden = true; // any file: photos go as photos, the rest as files (James, 26 Oct 2026)
+    const attach = iconButton('plus', 'Attach photos or files', () => file.click(), 'u-attach'); attach.hidden = !canAttach;
     const send = iconButton('send', reviewed ? 'Preview send' : 'Send', () => submit(), 'u-send');
     const mic = iconButton('mic', 'Record voice message', () => record(), 'u-mic'); mic.hidden = !telegramOnly;
     const field = node('div', 'u-field'); field.append(draft);
+    const mentionUI = mentionComposer(form, field, draft, () => composerMembers(store.threads[id]?.person || p, channel.value, store.threads[id]?.messages || []), () => draft.oninput?.());
+    // One button opens Emoji / GIFs / Stickers, like Telegram (Miguel, 5 Nov 2026: "I don't know how to send emojis").
+    const pickerBtn = iconButton('smile', 'Emoji, GIFs and stickers', () => mediaPicker.toggle(), 'u-pick-btn'); pickerBtn.setAttribute('aria-expanded', 'false');
+    field.append(pickerBtn);
+    const mediaPicker = picker({id, draft, button: pickerBtn, form, telegram: () => ((p.identities || []).find(i => i.id === channel.value) || p.identities?.[0])?.network === 'telegram',
+      send: pick => { if (s.person !== id) return; const reply = view.reply; view.reply = null; paintBar(); queueSend(id, {pick, reply, identity_id: channel.value}); }});
     const row = node('div', 'u-compose-row'); row.append(attach, field, send, mic, file);
     const paintBar = () => {
       bar.replaceChildren(); const target = view.edit || view.reply; const a = view.attach || [];
-      bar.hidden = !target && !a.length;
+      const note = view.sd?.note?.(); if (note) bar.append(note);
+      bar.hidden = !target && !a.length && !note;
       if (target) {
         const q = node('div', 'u-quote in-bar'); q.append(node('strong', '', view.edit ? 'Edit message' : target.outgoing ? 'Reply to yourself' : 'Reply to ' + (nameOf(target.sender) || p.display_name)), node('span', '', target.original || snippet({msgtype: target.msgtype, voice: target.media?.voice, text: ''})));
         bar.append(q, iconButton('close', 'Cancel', () => { if (view.edit) { draft.value = s.drafts[id] || ''; grow(); } view.reply = view.edit = null; paintBar(); }));
       }
-      if (a.length) { const strip = node('div', 'u-attach-strip'); for (const ph of a) { const chip = node('div', 'u-attach-chip'); const img = node('img'); img.src = ph.url; img.alt = 'Photo to send'; chip.append(img, iconButton('close', 'Remove photo', () => { URL.revokeObjectURL(ph.url); view.attach = a.filter(x => x !== ph); if (!view.attach.length) view.attach = null; paintBar(); grow(); })); strip.append(chip); } bar.append(strip); }
+      // Each staged photo or file is Wizard's one attachment chip, the same chip Chats' composer shows (WizardApp.attachChip).
+      if (a.length) { const strip = node('div', 'u-attach-strip'); for (const it of a) strip.append(WizardApp.attachChip.node({key: it.key, name: it.name || 'Photo', bytes: it.bytes, kind: it.file ? 'file' : 'image', preview: it.file ? '' : it.url}, {onRemove: () => { if (it.url) URL.revokeObjectURL(it.url); view.attach = (view.attach || []).filter(x => x !== it); if (!view.attach.length) view.attach = null; paintBar(); grow(); view.sd?.detach(it); }})); bar.append(strip); }
+      for (const take of voiceKept.values()) {
+        if (take.meta?.person !== id) continue;
+        bar.hidden = false;
+        const chip = node('div', 'u-unsent-voice');
+        chip.append(node('span', '', 'Unsent voice note'),
+          button('Save recording', () => saveVoiceRecording(take.blob, take.id), 'u-voice-keep-save'),
+          button('Send', () => sendKeptVoice(take), 'u-voice-keep-send'),
+          button('Discard', async () => {
+            try { await window.WizardApp.capture.ack(take.id); voiceKept.delete(take.id); view.paintBar?.(); }
+            catch (_) { voiceNotice('Voice note kept. Try Discard again.'); }
+          }, 'u-voice-keep-discard'));
+        bar.append(chip);
+      }
     };
-    const grow = () => { draft.style.height = 'auto'; draft.style.height = Math.min(draft.scrollHeight, 140) + 'px'; const has = !!draft.value.trim() || !!view.attach?.length; send.hidden = !has && telegramOnly && !view.edit; mic.hidden = !telegramOnly || !send.hidden; send.disabled = !has; };
+    // One tap is one message. Send settles the server draft and uploads before the box empties, so the text stays
+    // visible for a moment; a second tap (or Enter) in that window used to send it twice (James's phone, 31 Oct 2026).
+    let sending = false;
+    const grow = () => { mentionUI.paint(); draft.style.height = 'auto'; draft.style.height = Math.min(draft.scrollHeight, 140) + 'px'; const has = !!draft.value.trim() || !!view.attach?.length; send.hidden = !has && telegramOnly && !view.edit; mic.hidden = !telegramOnly || !send.hidden; send.disabled = !has || sending; send.classList.toggle('busy', sending); send.setAttribute('aria-busy', String(sending)); };
+    // The thread rebuilds its composer once the person loads: keep photos/reply already in the tray visible.
+    if (view.attach?.length || view.reply) queueMicrotask(() => { paintBar(); grow(); });
     let typingAt = 0, idle = null;
     const typing = on => { if (!telegramOnly) return; call('people/' + id + '/typing', {typing: on}).catch(() => {}); };
     draft.oninput = () => {
-      s.drafts[id] = view.edit ? s.drafts[id] : draft.value; grow(); saveDrafts(); hold();
+      mentionUI.update();
+      s.drafts[id] = view.edit ? s.drafts[id] : draft.value; grow(); saveDrafts(); hold(); if (!view.edit) view.sd?.schedule(); else paintBar();
       if (draft.value && Date.now() - typingAt > 4000) { typingAt = Date.now(); typing(true); }
       clearTimeout(idle); idle = setTimeout(() => { if (typingAt) { typingAt = 0; typing(false); } }, 5000);
     };
-    draft.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && matchMedia('(pointer: fine)').matches) { e.preventDefault(); submit(); } };
-    // Several photos at once, like Wizard chats (up to 10, Telegram's album size); each goes as its own photo, the caption on the first.
-    async function stagePhotos(picked) {
-      if (!telegramOnly || !picked.length || view.edit || view.id !== id || !s.ready) return false;
-      const epoch = s.epoch, ready = [], room = 10 - (view.attach?.length || 0);
-      if (picked.length > room) { toast('Up to 10 photos at a time'); return false; }
-      try {
-        for (const f of picked) ready.push(await preparePhoto(f));
-        if (!s.ready || s.epoch !== epoch || view.id !== id || !draft.isConnected || (view.attach?.length || 0) + ready.length > 10) {
-          for (const ph of ready) URL.revokeObjectURL(ph.url); return false;
-        }
-        view.attach = [...(view.attach || []), ...ready]; paintBar(); grow(); draft.focus();
-        return bar.querySelectorAll('.u-attach-chip').length === view.attach.length;
-      } catch (e) { for (const ph of ready) URL.revokeObjectURL(ph.url); error(e); return false; }
-    }
-    file.onchange = () => { const picked = [...file.files]; file.value = ''; return stagePhotos(picked); };
+    // Several selected photos are one post and one Telegram media group (up to 10).
+    // The picker, a paste and a drag-and-drop all fill the same tray, like Chats' composer (James, 25 Oct 2026).
+    const PHOTO = /^image\/(jpeg|png|gif|webp)$/;
+    const addFiles = async picked => { if (!picked.length) return; const room = 10 - (view.attach?.length || 0); if (picked.length > room) toast('Up to 10 attachments at a time'); try { const ready = []; for (const f of picked.slice(0, Math.max(0, room))) { if (f.size > 25 * 1048576) { toast((f.name || 'That file') + ' is over 25 MB'); continue; } ready.push(PHOTO.test(f.type) ? {...await preparePhoto(f), key: 'a' + uid(), name: f.name || 'Photo', bytes: f.size} : {file: true, blob: f, key: 'a' + uid(), name: f.name || 'File', bytes: f.size}); } if (s.person !== id || !ready.length) return; view.attach = [...(view.attach || []), ...ready]; view.paintBar(); view.grow(); view.draft.focus(); if (view.sd) view.sd.uploading = view.sd.attach(ready); } catch (e) { error(e); } };
+    file.onchange = () => { const picked = [...file.files]; file.value = ''; if (!canAttach) return toast('Files can be sent in Wizard, Telegram, WhatsApp and Signal chats'); addFiles(picked); };
+    const takeFiles = files => {
+      if (!files.length || view.edit) return;
+      if (!canAttach) return toast('Files can be sent in Wizard, Telegram, WhatsApp and Signal chats');
+      addFiles(files);
+    };
+    // Paste and drop of files, dictation-safe text paste (Wispr Flow), the drag highlight and Enter / Shift+Enter /
+    // A photo shared from another Wizard app lands in the same tray. True only when it is really staged (never sends).
+    const stageFiles = async picked => {
+      if (!canAttach || !picked.length || view.edit || s.person !== id || !s.ready || !form.isConnected) return false;
+      if (picked.length > 10 - (view.attach?.length || 0)) { toast('Up to 10 attachments at a time'); return false; }
+      const before = view.attach?.length || 0;
+      await addFiles(picked);
+      return s.person === id && form.isConnected && (view.attach?.length || 0) >= before + picked.length;
+    };
+    // Ctrl|Cmd+Enter are Wizard's one composer implementation, the same code as Chats (James, 25 Oct 2026: "one
+    // implementation, shared by many apps"). Messenger only decides what an attached file becomes.
+    window.WizardApp?.composer?.bind(form, {field: 'textarea', zone: form, onFiles: takeFiles, onSubmit: () => submit(), notice: msg => toast(msg)});
     form.onsubmit = e => { e.preventDefault(); submit(); };
-    function submit() {
+    async function submit() {
+      mentionUI.close();
+      if (sending) return;
+      sending = true; grow();
+      try { await submitOnce(); } finally { sending = false; grow(); }
+    }
+    async function submitOnce() {
+      if (view.sd?.conflict) return toast('Choose which draft to keep first');
+      const draftState = view.sd;
+      await draftState?.retry?.();
+      if (s.person !== id || view.sd !== draftState || !form.isConnected) return;
+      if (view.sd?.loadError || view.sd?.uploadError) return toast('An attachment needs attention before sending');
       const text = draft.value.trim(), a = view.attach || [];
       if (!text && !a.length) return;
       if (view.edit) { const m = view.edit; view.edit = null; draft.value = s.drafts[id] || ''; grow(); paintBar(); if (text && text !== m.original) editMsg(m, text); return; }
-      if (reviewed && !a.length) return reviewSend(id, p, text, channel.value);
+      if (view.sd?.conflict) return toast('This draft changed elsewhere. Choose which version to keep.');
+      if (reviewed && !a.length) { await view.sd?.save(); if (view.sd?.conflict) return toast('This draft changed elsewhere. Choose which version to keep.'); return reviewSend(id, p, text, channel.value); }
       if (typingAt) { typingAt = 0; typing(false); }
+      // Sent means sent at once (Miguel, 31 Oct 2026): the box empties, the bubble shows "sending" in the thread, and the
+      // draft ends now (closeForSend), never after the provider answers. A send the server refuses comes back into the
+      // box and the server draft (restoreSend); one cut off by a restart keeps its Retry bubble (same client id).
       draft.value = ''; s.drafts[id] = ''; saveDrafts(); view.attach = null; const reply = view.reply; view.reply = null; paintBar(); grow(); hold();
-      if (!a.length) queueSend(id, {text, photo: null, reply, identity_id: channel.value});
-      else a.forEach((ph, i) => queueSend(id, {text: i ? '' : text, photo: ph, reply: i ? null : reply, identity_id: channel.value}));
+      const sendingDraft = view.sd; sendingDraft?.closeForSend();
+      const photos = a.filter(x => !x.file), files = a.filter(x => x.file);
+      const jobs = [];
+      if (!a.length) jobs.push({text, photo: null, reply, identity_id: channel.value});
+      else if (photos.length === 1) jobs.push({text, photo: photos[0], reply, identity_id: channel.value});
+      else if (photos.length) jobs.push({text, photos, reply, identity_id: channel.value});
+      files.forEach((f, i) => jobs.push({text: !photos.length && !i ? text : '', file: f, reply: !photos.length && !i ? reply : null, identity_id: channel.value}));
+      let delivered = 0;
+      for (const job of jobs) queueSend(id, {...job, onDelivered: () => { if (++delivered === jobs.length) sendingDraft?.afterSend(); }, onFailure: e => restoreSend(id, job, e)});
     }
     // Voice notes record through Wizard's shared capture service (WizardApp.capture): on the Android app that is the
     // native recorder pinned to the phone's own mic with no audio focus, so Bluetooth speakers keep playing music;
     // elsewhere it is the shared browser recorder with the same external-mic guard. Messenger never opens the mic itself.
-    async function record() {
-      if (!window.WizardApp?.capture) return error(new Error('Voice notes need Wizard. Open Messenger from Wizard and try again.'));
-      let session;
-      try { session = await WizardApp.capture.start({kind: 'audio', meta: {purpose: 'messenger-voice', person: id}, maxMs: 15 * 60e3, maxBytes: 24 * 1048576}); }
-      catch (e) { return error(new Error(e?.code === 'busy' ? 'The microphone is busy with another Wizard recording.' : e?.message || 'Could not start recording.')); }
-      const levels = [], started = Date.now(); let done = false;
-      const panel = node('div', 'u-recording'); const clock = node('span', 'u-rec-time', '0:00'); const live = node('div', 'u-wave live');
-      const close = () => { done = true; clearInterval(tick); offLevel?.(); panel.remove(); row.hidden = false; view.recording = null; hold(); };
-      let last = 0; const offLevel = session.onLevel?.(v => { last = v; });
-      const tick = setInterval(() => {
-        const level = Math.round(Math.min(1, last * 1.6) * 1024); levels.push(level); clock.textContent = fmtDur(Date.now() - started);
-        const i = node('i'); i.style.height = Math.max(10, level / 10.24) + '%'; live.append(i); while (live.children.length > 40) live.firstChild.remove();
-      }, 100);
-      const cancel = async () => { if (done) return; close(); try { await session.cancel(); } catch (e) { error(new Error('Could not discard the recording: ' + (e.message || e))); } };
-      const finish = async () => {
-        if (done) return; close();
-        let take; try { take = await session.stop(); } catch (e) { return error(new Error('Recording kept on this device; try again. ' + (e.message || ''))); }
-        const duration = take.durationMs || Date.now() - started;
-        if (duration < 600 || !take.blob?.size) { toast('Hold on a little longer to record'); WizardApp.capture.ack(take.id).catch(() => {}); return; }
-        const step = Math.max(1, levels.length / 64); const waveform = Array.from({length: Math.min(64, levels.length)}, (_, i) => levels[Math.floor(i * step)]);
-        const url = URL.createObjectURL(take.blob); localAudio.set(url, take.blob);
-        const reply = view.reply; view.reply = null; paintBar();
-        queueSend(id, {voice: {blob: take.blob, take: take.id, duration, waveform, url}, reply, identity_id: channel.value});
-      };
-      panel.append(iconButton('trash', 'Cancel recording', cancel, 'u-rec-cancel'), node('span', 'u-rec-dot'), clock, live, iconButton('send', 'Send voice message', finish, 'u-send'));
-      row.hidden = true; form.append(panel); view.recording = {stop: finish, cancel}; hold();
+    // The recorder is state, not a promise's old DOM closure: openPerson builds this form twice.
+    // Voice-note start budget. Wizard's shared capture gives up on a hung start after ~10 s and frees the mic;
+    // Messenger hands the composer back sooner and waits (bounded) for that release on the next tap.
+    const VOICE_START_MS = 8000, VOICE_PRIOR_MS = 3000;
+    const VOICE_START_FAILED = 'The microphone didn\'t start. Tap the mic to try again.';
+    const notice = node('p', 'u-voice-notice'); notice.setAttribute('role', 'alert');
+    let panel;
+    const paintRecording = () => {
+      panel?.remove(); panel = null;
+      notice.textContent = view.voiceNotice || ''; notice.hidden = !notice.textContent;
+      const r = view.recording?.person === id ? view.recording : null; row.hidden = !!r; mic.disabled = !!view.recording;
+      if (!r) return;
+      panel = node('div', 'u-recording'); panel.setAttribute('role', 'status');
+      const clock = node('span', 'u-rec-time', r.phase === 'starting' ? 'Starting…' : r.phase === 'stopping' ? 'Stopping…' : fmtDur(Date.now() - r.started));
+      const live = node('div', 'u-wave live');
+      for (const level of r.levels.slice(-40)) { const i = node('i'); i.style.height = Math.max(10, level / 10.24) + '%'; live.append(i); }
+      const cancel = iconButton('trash', 'Discard recording', () => r.cancel(), 'u-rec-cancel'); cancel.title = 'Cancel recording'; cancel.disabled = r.phase === 'stopping';
+      panel.append(cancel, node('span', 'u-rec-dot'), clock, live);
+      if (r.phase === 'recording') panel.append(iconButton('send', 'Send voice message', () => r.stop(), 'u-send'));
+      form.append(panel);
+    };
+    const voiceNotice = message => { view.voiceNotice = message; view.paintRecording?.(); };
+    function sendKeptVoice(take) {
+      if (!voiceKept.has(take.id)) return;
+      voiceKept.delete(take.id); voiceQueued.add(take.id); view.paintBar?.();
+      const url = URL.createObjectURL(take.blob); localAudio.set(url, take.blob);
+      queueSend(take.meta.person, {voice: {blob: take.blob, take: take.id, duration: take.durationMs, waveform: [], url}, identity_id: take.meta.identity});
     }
-    Object.assign(view, {draft, grow, paintBar, stagePhotos});
-    form.append(bar, channel, row); grow(); paintBar();
+    // Without WebCodecs (Safari before 26, the Mac app) record plain PCM WAV through the shared recorder: Messenger's
+    // server turns it into Ogg Opus. Safari's fragmented MP4 lost its header on long takes (Miguel, 3 Nov 2026:
+    // a 1:40 note failed with "(moof)"), and its WebM did not rewrap either.
+    // How much audio a take really holds: PCM WAV is 32 bytes per ms after its 44-byte header. Other formats carry
+    // the recorder's own clock, which cannot show lost audio, so they are not checked.
+    function captured(take) {
+      const wav = take?.mime === 'audio/wav' || take?.blob?.type === 'audio/wav';
+      return wav && take.blob?.size > 44 ? Math.round((take.blob.size - 44) / 32) : null;
+    }
+    // While recording, compare captured audio with the clock and note when the window was hidden or unfocused,
+    // so a stalled microphone is shown at once and the notice can name the likely cause.
+    function watchCapture(r) {
+      const now = Date.now(), step = now - (r.seen || now); r.seen = now;
+      if (document.visibilityState === 'hidden') r.hiddenMs = (r.hiddenMs || 0) + step;
+      else if (!document.hasFocus()) r.blurMs = (r.blurMs || 0) + step;
+      if (!r.pcm || r.stallShown || now - (r.checked || 0) < 1000) return;
+      r.checked = now;
+      let got; try { got = r.session?.getInfo?.()?.durationMs; } catch { got = null; }
+      if (typeof got !== 'number') return;
+      const wall = now - r.started;
+      if (wall - got > 3000) { r.stallShown = true; voiceNotice('The microphone stopped reaching Wizard ' + fmtDur(got) + ' in.' + captureCause(r) + ' Keep Wizard in front while you record.'); }
+    }
+    function captureCause(r) {
+      if ((r.hiddenMs || 0) > 2000) return ' Wizard was out of sight for ' + fmtDur(r.hiddenMs) + '.';
+      if ((r.blurMs || 0) > 2000) return ' Another app was in front for ' + fmtDur(r.blurMs) + '.';
+      return '';
+    }
+    function voiceMime() {
+      if (window.AudioEncoder) return {};
+      // Safari's WebM recorder keeps recording while Wizard is hidden; its Web Audio (the shared recorder's PCM mode)
+      // stops then (WebKit bug 231105), which clipped a 2-minute note to 7 s. Messenger's server rewraps WebM.
+      const has = m => { try { return !!window.MediaRecorder?.isTypeSupported?.(m); } catch { return false; } };
+      if (has('audio/webm;codecs=opus') || has('audio/webm')) return {};
+      let pcm = false; try { pcm = !!window.WizardApp?.capture?.capabilities?.({kind: 'audio', pcm: true})?.pcm; } catch { pcm = false; }
+      if (pcm) return {pcm: true};
+      const mime = ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4'].find(has);
+      return mime ? {mime} : {};
+    }
+    function recoverVoice() {
+      const capture = window.WizardApp?.capture;
+      if (!capture || voiceRecoveryWork || view.recording) return;
+      let own; try { own = capture.current?.(); } catch (_) { return; }
+      const keep = own?.active && own.recording && own.phase === 'recording' && own.appId === 'messenger' && own.meta?.micSession === voiceTapSession ? own.id : null;
+      // Old shells have no stop-only salvage. Do not call attach as a fallback (it may start a mic).
+      voiceRecoveryWork = Promise.resolve().then(() => capture.settle ? capture.settle(keep) : capture.pending?.() || []).then(async takes => {
+        for (const take of takes) {
+          if (take.meta?.captureRecovery?.resumable) continue; // uncertain native custody must never be acknowledged
+          if (take.durationMs <= 600 || !take.blob?.size) { await capture.ack(take.id).catch(() => {}); continue; }
+          // Preserve destination: an unidentifiable orphan stays safely in shared custody, never sends to this chat.
+          if (take.meta?.purpose === 'messenger-voice' && take.meta.person && !voiceQueued.has(take.id)) voiceKept.set(take.id, take);
+        }
+        view.paintBar?.();
+      }).catch(() => { /* shared custody is retained; next open retries without a recording panel */ })
+        .finally(() => { voiceRecoveryWork = null; });
+    }
+    async function record(recoverOnly = false) {
+      if (view.recording) return;
+      const capture = window.WizardApp?.capture;
+      if (!capture) { if (!recoverOnly) voiceNotice('Voice recording is unavailable. Reload Messenger and try again.'); return; }
+      let own;
+      try { own = capture.current?.(); } catch (e) { if (!recoverOnly) voiceNotice(e.message); return; }
+      // Synchronous, positive proof BEFORE touching the composer. attach() is not a state probe: on
+      // Android it can wait for recovery and even resume an old native take. A saved take is not a mic tap.
+      const liveOwnTap = !!(own?.active && own.recording && own.phase === 'recording' && own.appId === 'messenger' && own.meta?.micSession === voiceTapSession);
+      if (recoverOnly && (!liveOwnTap || own.meta.person !== id)) return;
+      if (!recoverOnly && own && !liveOwnTap) { recoverVoice(); return; }
+      const r = {phase: recoverOnly ? 'recording' : 'starting', person: id, levels: [], started: own?.startedAt || Date.now(), cancelled: false};
+      view.recording = r; view.voiceNotice = ''; hold();
+      const close = () => { clearTimeout(r.deadline); clearInterval(r.tick); r.off?.(); r.offWarn?.(); if (view.recording === r) view.recording = null; view.paintRecording?.(); hold(); };
+      // An abandoned start may settle long after a newer recording began: it never paints a notice again.
+      const failed = e => { if (!r.abandoned) voiceNotice(e?.message || 'Could not start recording. Try again.'); };
+      const discardFailure = e => 'Could not discard the recording: ' + e.message + ' Try Discard again.';
+      // A start that has not answered gives the composer back at once (James's phone, 31 Oct 2026: the old path
+      // waited on "Stopping…" for a start that never settled, hiding the composer and disabling the mic). The
+      // pending start is cancelled in the background when, and if, it ever settles.
+      const abandon = (message, discarded = false) => {
+        if (r.abandoned) return;
+        r.abandoned = r.cancelled = true; r.discarded = discarded; close();
+        if (message) voiceNotice(message);
+      };
+      r.cancel = async () => {
+        if (r.phase === 'stopping' || r.abandoned) return;
+        if (!r.session) { abandon('', true); return; } // Discard while Starting
+        r.cancelled = true; r.phase = 'stopping'; view.paintRecording?.();
+        try { await r.session.cancel(); close(); }
+        catch (e) { r.phase = 'recording'; r.cancelled = false; failed(new Error(discardFailure(e))); }
+      };
+      r.stop = async () => {
+        if (r.phase !== 'recording') return;
+        r.phase = 'stopping'; view.paintRecording?.();
+        const wall = Date.now() - r.started;
+        let take;
+        try { take = await r.session.stop(); }
+        catch (e) { r.phase = 'recording'; failed(new Error('Recording kept on this device. Try Send or Discard again. ' + e.message)); return; }
+        close();
+        const duration = take.durationMs || Date.now() - r.started;
+        if (duration < 600 || !take.blob?.size) { voiceNotice('Hold on a little longer to record'); capture.ack(take.id).catch(() => {}); return; }
+        // Never send a clipped note (Miguel, 3 Nov 2026: a 2-minute note from the Mac app reached James as its last
+        // 7 seconds). Keep it as an unsent voice note and say how much was captured; Send there still sends it.
+        const got = captured(take);
+        if (got != null && wall - got > 3000 && got < wall * 0.9) {
+          voiceKept.set(take.id, {...take, meta: {...take.meta, purpose: 'messenger-voice', person: r.person, identity: r.identity}});
+          voiceNotice('Only ' + fmtDur(got) + ' of your ' + fmtDur(wall) + ' recording reached Wizard, so it was not sent.' + captureCause(r) + ' It is kept below if you still want to send it.');
+          view.paintBar?.(); return;
+        }
+        const step = Math.max(1, r.levels.length / 64), waveform = Array.from({length: Math.min(64, r.levels.length)}, (_, i) => r.levels[Math.floor(i * step)]);
+        const url = URL.createObjectURL(take.blob); localAudio.set(url, take.blob);
+        queueSend(r.person, {voice: {blob: take.blob, take: take.id, duration, waveform, url}, reply: r.reply, identity_id: r.identity});
+      };
+      // A late session is ours to cancel only if this attempt started it, or the owner pressed Discard on it.
+      // A recovered take that arrives after the deadline stays in Wizard's pending custody, not a live panel.
+      const dropLate = attached => { if (r.session && (!attached || r.discarded)) r.session.cancel().catch(() => {}); };
+      const begin = async () => {
+        let attached = null;
+        try {
+          attached = liveOwnTap && capture.attach ? await capture.attach() : null;
+          if (r.abandoned) { r.session = attached; dropLate(true); return; }
+          own = capture.current?.() || own;
+          if (!attached && recoverOnly) { close(); return; } // recovery never falls through to start
+          r.person = own?.meta?.person || id; r.identity = own?.meta?.identity || channel.value; r.reply = view.reply;
+          const mode = attached ? {} : voiceMime(); r.pcm = !!mode.pcm;
+          r.session = attached || await capture.start({kind: 'audio', ...mode, meta: {purpose: 'messenger-voice', person: id, identity: channel.value, micSession: voiceTapSession}, maxMs: 15 * 60e3, maxBytes: 24 * 1048576});
+          if (r.abandoned) { dropLate(!!attached); return; }
+          if (!r.session) throw new Error('That recording has already stopped. Tap the microphone to start again.');
+          clearTimeout(r.deadline);
+          r.phase = 'recording';
+          const info = r.session.getInfo?.(); r.started = info?.startedAt || Date.now() - (info?.durationMs || 0);
+          let last = 0; r.off = r.session.onLevel?.(v => { last = v; });
+          r.offWarn = r.session.onWarn?.(message => { if (!r.abandoned) voiceNotice(message); });
+          if (info?.warning) voiceNotice(info.warning);
+          r.tick = setInterval(() => {
+            if (r.phase !== 'recording') return;
+            const level = Math.round(Math.min(1, last * 1.6) * 1024); r.levels.push(level);
+            if (r.levels.length > 9600) r.levels.splice(0, 3200);
+            view.paintRecordingTick?.(r, level);
+            watchCapture(r);
+          }, 100);
+          view.paintRecording?.();
+        } catch (e) {
+          if (r.abandoned) { dropLate(!!attached); return; }
+          // Listener/bridge setup can throw after start succeeded: keep custody but stop the physical mic.
+          if (r.session) { try { await r.session.stop(); } catch (_) { r.phase = 'recording'; failed(e); return; } }
+          close(); failed(e);
+        }
+      };
+      view.paintRecording?.();
+      r.deadline = setTimeout(() => abandon(recoverOnly ? '' : VOICE_START_FAILED), VOICE_START_MS);
+      // A start abandoned a moment ago may still hold Wizard's microphone until Wizard gives up on it: let it settle
+      // (bounded) so this tap starts cleanly instead of reporting Messenger itself as the busy recorder.
+      const prior = view.voiceStartPending;
+      const attempt = (async () => { if (prior) await Promise.race([prior, new Promise(res => setTimeout(res, VOICE_PRIOR_MS))]); if (!r.abandoned) await begin(); })();
+      view.voiceStartPending = attempt;
+      try { await attempt; } finally { if (view.voiceStartPending === attempt) view.voiceStartPending = null; }
+    }
+    const paintRecordingTick = (r, level) => {
+      if (!panel?.isConnected) return;
+      panel.querySelector('.u-rec-time').textContent = fmtDur(Date.now() - r.started);
+      const wave = panel.querySelector('.u-wave'), i = node('i'); i.style.height = Math.max(10, level / 10.24) + '%'; wave.append(i);
+      while (wave.children.length > 40) wave.firstChild.remove();
+    };
+    Object.assign(view, {draft, grow, paintBar, paintRecording, paintRecordingTick, stageFiles});
+    form.append(bar, via, channel, mediaPicker.panel, row, notice); grow(); paintBar(); paintRecording();
+    // Switching chats in the split (or redrawing on resize) must not drop a save that is still waiting.
+    const prev = view.sd, flushing = prev?.timer ? prev.save() : prev?.saving || prev?.busy;
+    prev?.stop?.(); view.sd = serverDraft(id, {form, draft, channel, grow, paintBar, paintVia}, prev?.id === id ? flushing : null);
+    queueMicrotask(() => { if (!form.isConnected) return; if (!view.recording) record(true); recoverVoice(); });
     return form;
+  }
+  // ---------- Emoji / GIFs / Stickers (Miguel, 5 Nov 2026) ----------
+  // One panel above the box, opened by the smiley in the box. Emoji go in at the caret (the box stays as typed);
+  // GIFs and stickers are the owner's own Telegram ones (saved GIFs, @gif search, recent/favourite stickers and
+  // installed packs, listed by the Telegram bridge) and send at once, through the same queue as every message.
+  // The full emoji set is Wizard's shared one (WosTopicEmoji, the Chats topic picker); the reaction grid is the fallback.
+  const EMOJI_RECENT = 'messenger-emoji-recent-v1';
+  let emojiKit = null;
+  function loadEmojiKit() {
+    if (window.WosTopicEmoji?.categories?.length) return Promise.resolve(window.WosTopicEmoji);
+    if (emojiKit) return emojiKit;
+    const load = src => new Promise((resolve, reject) => { const el = document.createElement('script'); el.src = src; el.async = false; el.onload = resolve; el.onerror = reject; document.head.append(el); });
+    emojiKit = (window.WosTopicEmojiData ? Promise.resolve() : load('/wizard-os-home/core/chat-topic-emojis-data.js'))
+      .then(() => window.WosTopicEmoji || load('/wizard-os-home/core/chat-topic-emojis.js'))
+      .then(() => window.WosTopicEmoji?.categories?.length ? window.WosTopicEmoji : null).catch(() => null);
+    return emojiKit;
+  }
+  const emojiRecent = () => { try { const v = JSON.parse(localStorage.getItem(EMOJI_RECENT) || '[]'); return Array.isArray(v) ? v.filter(x => typeof x === 'string').slice(0, 24) : []; } catch { return []; } };
+  function rememberEmoji(k) {
+    const list = [k, ...emojiRecent().filter(x => x !== k)].slice(0, 24);
+    try { localStorage.setItem(EMOJI_RECENT, JSON.stringify(list)); } catch { /* private mode: recent stays for this session */ }
+    recent = [k, ...recent.filter(x => x !== k)].slice(0, 8); // the reaction strip leads with the same recent picks
+  }
+  const pickerCache = {stickers: null, packs: Object.create(null), gifs: Object.create(null)};
+  const pickURL = (pid, full) => 'api/unified/picker/media/' + encodeURIComponent(pid) + (full ? '?kind=full' : '');
+  function picker(o) {
+    const panel = node('div', 'u-picker'); panel.hidden = true; panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', 'Emoji, GIFs and stickers');
+    const tabs = node('div', 'u-pick-tabs'); tabs.setAttribute('role', 'tablist');
+    const body = node('div', 'u-pick-body');
+    panel.append(tabs, body);
+    const state = {open: false, tab: 'emoji', start: null, end: null, gen: 0};
+    const touch = () => matchMedia('(pointer: coarse)').matches;
+    // The caret survives the box losing focus (the phone keyboard goes down while the panel is open).
+    const keep = () => { state.start = o.draft.selectionStart; state.end = o.draft.selectionEnd; };
+    for (const ev of ['select', 'keyup', 'pointerup', 'input', 'blur']) o.draft.addEventListener(ev, keep);
+    o.draft.addEventListener('focus', () => { if (state.open && touch()) close(); }); // tapping the box brings the keyboard back, like Telegram
+    function insert(k) {
+      const v = o.draft.value, a = Math.min(state.start ?? v.length, v.length), b = Math.max(a, Math.min(state.end ?? a, v.length));
+      o.draft.value = v.slice(0, a) + k + v.slice(b);
+      o.draft.dispatchEvent(new Event('input', {bubbles: true}));
+      state.start = state.end = a + k.length;
+      if (!touch()) { o.draft.focus(); o.draft.setSelectionRange(state.start, state.end); }
+      rememberEmoji(k);
+    }
+    function tab(name, label) {
+      const t = button(label, () => show(name), 'u-pick-tab' + (state.tab === name ? ' on' : '')); t.setAttribute('role', 'tab'); t.setAttribute('aria-selected', String(state.tab === name)); t.dataset.tab = name; return t;
+    }
+    function paintTabs() {
+      const tg = o.telegram(); if (!tg && state.tab !== 'emoji') state.tab = 'emoji';
+      tabs.replaceChildren(tab('emoji', 'Emoji'), ...(tg ? [tab('gifs', 'GIFs'), tab('stickers', 'Stickers')] : []));
+    }
+    function show(name) { state.tab = name; state.gen++; paintTabs(); body.replaceChildren(); body.scrollTop = 0; ({emoji: emojiTab, gifs: gifTab, stickers: stickerTab})[name](state.gen); }
+    function section(title, cls) { const h = node('h3', 'u-pick-head', title); const g = node('div', cls); body.append(h, g); return g; }
+    function emojiButton(k) { const b = button(k, () => insert(k), 'u-emo'); b.setAttribute('aria-label', k); return b; }
+    function emojiTab(gen) {
+      const search = node('input', 'u-pick-search'); search.type = 'search'; search.placeholder = 'Search emoji'; search.setAttribute('aria-label', 'Search emoji'); search.enterKeyHint = 'search';
+      const list = node('div', 'u-pick-list');
+      body.append(search, list);
+      const paint = kit => {
+        if (gen !== state.gen) return;
+        list.replaceChildren();
+        const add = (title, emoji) => { if (!emoji.length) return; const g = node('div', 'u-emo-grid'); for (const k of emoji) g.append(emojiButton(k)); list.append(node('h3', 'u-pick-head', title), g); };
+        const q = search.value.trim();
+        if (!q) add('Recent', emojiRecent());
+        const groups = kit ? kit.search(q) : [{label: 'Smileys', emoji: [...QUICK, ...MORE].filter(k => !q || k.includes(q))}];
+        for (const c of groups) add(c.label, [...c.emoji]);
+        if (!list.childElementCount) list.append(node('p', 'u-pick-empty', 'No emoji found'));
+      };
+      paint(window.WosTopicEmoji?.categories?.length ? window.WosTopicEmoji : null);
+      loadEmojiKit().then(kit => { if (kit) { search.oninput = () => paint(kit); paint(kit); } });
+      search.oninput = () => paint(null);
+    }
+    // A tile is a small preview; a GIF plays only while on screen (reduced motion keeps the still).
+    const playing = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+      for (const e of entries) {
+        const tile = e.target; if (!e.isIntersecting || tile.dataset.live || stillMotion()) continue;
+        tile.dataset.live = '1'; playing.unobserve(tile);
+        const v = node('video'); v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.setAttribute('muted', '');
+        v.src = pickURL(tile.pick.id, true); v.oncanplay = () => { tile.classList.add('live'); v.play().catch(() => {}); }; v.onerror = () => v.remove();
+        tile.append(v);
+      }
+    }, {root: body, threshold: 0.3}) : null;
+    function tile(item, kind) {
+      const b = node('button', 'u-pick-tile ' + kind); b.type = 'button'; b.pick = item;
+      b.setAttribute('aria-label', kind === 'gif' ? 'Send GIF' : 'Send sticker ' + (item.emoji || ''));
+      if (item.w && item.h && kind === 'gif') b.style.aspectRatio = item.w + ' / ' + item.h;
+      if (item.thumb) { const img = node('img'); img.alt = ''; img.loading = 'lazy'; img.decoding = 'async'; img.src = pickURL(item.id); b.append(img); }
+      else b.append(node('span', 'u-pick-alt', item.emoji || (kind === 'gif' ? 'GIF' : '🙂')));
+      b.onclick = () => { close(); o.send({id: item.id, kind, w: item.w, h: item.h, preview: item.thumb ? pickURL(item.id) : null}); };
+      if (kind === 'gif' && item.mime?.startsWith('video/')) playing?.observe(b);
+      return b;
+    }
+    const loading = () => { const p = node('p', 'u-pick-empty'); p.append(node('span', 'spinner'), node('span', '', ' Loading…')); return p; };
+    const failed = (box, e, retry) => { box.replaceChildren(node('p', 'u-pick-empty', e?.message && e.message.length < 90 ? e.message : 'Telegram did not answer'), button('Try again', retry, 'secondary u-pick-retry')); };
+    function gifTab(gen) {
+      const search = node('input', 'u-pick-search'); search.type = 'search'; search.placeholder = 'Search GIFs'; search.setAttribute('aria-label', 'Search GIFs'); search.enterKeyHint = 'search';
+      const grid = node('div', 'u-gif-grid');
+      body.append(search, grid);
+      let timer = null, more = null;
+      const run = async (q, offset = '') => {
+        const key = q + '\n' + offset, mine = ++state.gen; gen = mine;
+        if (!offset) grid.replaceChildren(loading());
+        try {
+          const r = pickerCache.gifs[key] || (pickerCache.gifs[key] = await api('api/unified/picker/gifs?' + new URLSearchParams(offset ? {q, offset} : {q})).catch(e => { delete pickerCache.gifs[key]; throw e; }));
+          if (mine !== state.gen) return;
+          if (!offset) grid.replaceChildren();
+          more?.remove(); more = null;
+          for (const it of r.items) grid.append(tile(it, 'gif'));
+          if (!grid.childElementCount) grid.append(node('p', 'u-pick-empty', q ? 'No GIFs found' : 'Your saved GIFs show here. Search to find more.'));
+          if (r.next && q) { more = button('More GIFs', () => run(q, r.next), 'secondary u-pick-more'); grid.after(more); }
+        } catch (e) { if (mine === state.gen) failed(grid, e, () => run(q, offset)); }
+      };
+      search.oninput = () => { clearTimeout(timer); timer = setTimeout(() => run(search.value.trim()), 450); };
+      search.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); run(search.value.trim()); } };
+      run('');
+    }
+    function stickerTab(gen) {
+      const packs = node('div', 'u-pack-row'); const grid = node('div', 'u-sticker-list');
+      body.append(packs, grid);
+      const paintPack = async (pack, chip) => {
+        for (const c of packs.children) c.classList.toggle('on', c === chip);
+        const mine = ++state.gen; grid.replaceChildren(loading());
+        try {
+          const r = pickerCache.packs[pack.id] || (pickerCache.packs[pack.id] = await api('api/unified/picker/stickers/' + encodeURIComponent(pack.id)).catch(e => { delete pickerCache.packs[pack.id]; throw e; }));
+          if (mine !== state.gen) return;
+          const g = node('div', 'u-sticker-grid'); for (const it of r.stickers) g.append(tile(it, 'sticker'));
+          grid.replaceChildren(node('h3', 'u-pick-head', r.title), g);
+        } catch (e) { if (mine === state.gen) failed(grid, e, () => paintPack(pack, chip)); }
+      };
+      const paintMine = (r, chip) => {
+        for (const c of packs.children) c.classList.toggle('on', c === chip);
+        state.gen++; grid.replaceChildren();
+        for (const [title, list] of [['Recent', r.recent], ['Favorites', r.favorites]]) {
+          if (!list.length) continue;
+          const g = node('div', 'u-sticker-grid'); for (const it of list) g.append(tile(it, 'sticker'));
+          grid.append(node('h3', 'u-pick-head', title), g);
+        }
+        if (!grid.childElementCount) grid.append(node('p', 'u-pick-empty', r.packs.length ? 'Choose a sticker pack above.' : 'Stickers you use or add in Telegram show here.'));
+      };
+      const load = async () => {
+        grid.replaceChildren(loading());
+        try {
+          const r = pickerCache.stickers || (pickerCache.stickers = await api('api/unified/picker/stickers').catch(e => { pickerCache.stickers = null; throw e; }));
+          if (gen !== state.gen) return;
+          const mineChip = button('Recent', () => paintMine(r, mineChip), 'u-pack');
+          packs.replaceChildren(mineChip, ...r.packs.map(pack => { const c = button(pack.title, () => paintPack(pack, c), 'u-pack'); return c; }));
+          paintMine(r, mineChip);
+        } catch (e) { if (gen === state.gen) failed(grid, e, load); }
+      };
+      load();
+    }
+    function open() {
+      if (state.open) return;
+      if (document.activeElement === o.draft) keep(); state.open = true; panel.hidden = false; o.button.classList.add('on'); o.button.setAttribute('aria-expanded', 'true'); o.form.classList.add('picking');
+      if (touch()) o.draft.blur(); // the panel takes the keyboard's place
+      show(state.tab);
+    }
+    function close() {
+      if (!state.open) return false;
+      state.open = false; state.gen++; panel.hidden = true; body.replaceChildren(); o.button.classList.remove('on'); o.button.setAttribute('aria-expanded', 'false'); o.form.classList.remove('picking');
+      return true;
+    }
+    panel.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); o.draft.focus(); } });
+    const handle = {panel, close, toggle: () => state.open ? close() : open(), get isOpen() { return state.open; }};
+    view.picker = handle;
+    return handle;
   }
   // WebM (Matroska) Opus -> Ogg Opus, packet for packet (RFC 7845). Throws on anything it does not understand.
   function webmToOgg(b) {
@@ -1005,10 +3284,13 @@
     const vint = keep => { const f = b[at]; let n = 1; while (n <= 8 && !(f & (0x80 >> (n - 1)))) n++; if (n > 8 || at + n > b.length) throw new Error('bad vint');
       let v = keep ? f : f & (0xff >> n), all = (f & (0xff >> n)) === (0xff >> n); for (let i = 1; i < n; i++) { v = v * 256 + b[at + i]; if (b[at + i] !== 0xff) all = false; } at += n; return keep ? v : (all ? -1 : v); };
     const MASTER = new Set([0x18538067, 0x1654AE6B, 0xAE, 0xE1, 0x1F43B675, 0xA0]);
+    // Safari's WebM can end in a cut-off element or carry unknown sizes: keep every whole Opus packet read so far.
     while (at < b.length) {
-      const id = vint(true), size = vint(false);
+      let id, size;
+      try { id = vint(true); size = vint(false); } catch (e) { if (packets.length) break; throw e; }
       if (MASTER.has(id)) continue;
-      if (size < 0 || at + size > b.length) { if (id === 0xA3 || id === 0xA1) break; throw new Error('bad size'); }
+      if (size < 0) { if (packets.length) break; throw new Error('bad size'); }
+      if (at + size > b.length) { if (packets.length) break; throw new Error('bad size'); }
       const body = b.subarray(at, at + size); at += size;
       if (id === 0x86) codec = new TextDecoder().decode(body);
       else if (id === 0x63A2) head = body;
@@ -1057,8 +3339,24 @@
   async function toOggOpus(blob) {
     const bytes = new Uint8Array(await blob.arrayBuffer());
     if (bytes[0] === 0x4f && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53) return new Blob([bytes], {type: 'audio/ogg'});
-    if (bytes[0] === 0x1a && bytes[1] === 0x45) { try { return new Blob([webmToOgg(bytes)], {type: 'audio/ogg'}); } catch { /* re-encode below */ } }
-    if (!window.AudioEncoder) throw new Error('This device cannot prepare voice notes for Telegram yet');
+    if (bytes[0] === 0x1a && bytes[1] === 0x45) {
+      try { return new Blob([webmToOgg(bytes)], {type: 'audio/ogg'}); }
+      catch { if (!window.AudioEncoder) return new Blob([bytes], {type: 'audio/webm'}); } // Messenger's server rewraps it
+    }
+    // Telegram also plays M4A (AAC in MP4) as a voice note (Bot API sendVoice: Ogg Opus, MP3 or M4A). Safari before 26,
+    // including the Mac app's web view, records M4A and has no WebCodecs AudioEncoder: send its take as it is rather
+    // than refusing it (Miguel, 3 Nov 2026: a 2:33 voice note to James failed with "cannot prepare voice notes").
+    // PCM WAV (the shared recorder's pcm mode) goes up as is; Messenger's server encodes it to Ogg Opus.
+    if (bytes.length > 44 && String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.subarray(8, 12)) === 'WAVE') return new Blob([bytes], {type: 'audio/wav'});
+    const m4a = bytes.length > 12 && String.fromCharCode(...bytes.subarray(4, 8)) === 'ftyp';
+    if (m4a && !window.AudioEncoder) return new Blob([bytes], {type: 'audio/mp4'});
+    if (window.AudioEncoder) { try { return await encodeOggOpus(bytes); } catch (e) { if (m4a) return new Blob([bytes], {type: 'audio/mp4'}); } }
+    // No WebCodecs encoder (Safari before 26, the Mac app): new takes are recorded as M4A (voiceMime), so only an
+    // older take that is neither Ogg, rewrappable WebM nor M4A ends here. Name its format so a report is actionable.
+    const head = bytes[0] === 0x1a ? 'WebM' : String.fromCharCode(...bytes.subarray(4, 8)).replace(/[^ -~]/g, '?');
+    throw new Error('This device cannot prepare voice notes for Telegram yet (' + head + ')');
+  }
+  async function encodeOggOpus(bytes) {
     const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
     const decoded = await new AC(1, 48000, 48000).decodeAudioData(bytes.buffer.slice(0));
     // Mix to mono at 48 kHz.
@@ -1074,21 +3372,63 @@
     await enc.flush(); enc.close(); if (err) throw err; if (!packets.length) throw new Error('Voice note was empty');
     return new Blob([oggFromOpus(packets, 1)], {type: 'audio/ogg'});
   }
-  function saveDrafts() { try { sessionStorage.setItem('messenger-unified-drafts', JSON.stringify(s.drafts)); } catch { /* drafts stay in memory */ } }
+  // Unsent drafts survive closing Messenger or a reload, like Chats' drafts: per person, newest 50, kept 30 days.
+  const DRAFTS_KEY = 'messenger-drafts-v2', DRAFT_DAYS = 30, DRAFTS_KEPT = 50;
+  let draftAt = {};
+  function saveDrafts() {
+    const now = Date.now();
+    for (const [k, v] of Object.entries(s.drafts)) { if (v) draftAt[k] = draftAt[k] && draftAt[k].text === v ? draftAt[k] : {text: v, at: now}; else delete draftAt[k]; }
+    for (const k of Object.keys(draftAt)) if (!s.drafts[k]) delete draftAt[k];
+    draftAt = Object.fromEntries(Object.entries(draftAt).sort((x, y) => y[1].at - x[1].at).slice(0, DRAFTS_KEPT));
+    try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(draftAt)); } catch { /* storage full or blocked: drafts stay in memory */ }
+  }
+  function loadDrafts() {
+    let kept = {}; try { kept = JSON.parse(localStorage.getItem(DRAFTS_KEY) || '{}') || {}; } catch { kept = {}; }
+    const fresh = Date.now() - DRAFT_DAYS * 864e5; draftAt = {};
+    for (const [k, v] of Object.entries(kept)) if (v?.text && v.at > fresh) draftAt[k] = v;
+    // One-time move from the old per-tab drafts.
+    try { const old = JSON.parse(sessionStorage.getItem('messenger-unified-drafts') || '{}') || {}; for (const [k, v] of Object.entries(old)) if (v && !draftAt[k]) draftAt[k] = {text: v, at: Date.now()}; sessionStorage.removeItem('messenger-unified-drafts'); } catch { /* none */ }
+    return Object.fromEntries(Object.entries(draftAt).map(([k, v]) => [k, v.text]));
+  }
   async function preparePhoto(f) {
     if (f.size > 25 * 1048576) throw new Error('Photos up to 25 MB can be sent');
-    if (f.type === 'image/gif') { const bmp = await createImageBitmap(f); return {blob: f, url: URL.createObjectURL(f), w: bmp.width, h: bmp.height}; }
+    // Albums use still JPEG photos, including the first frame of an animated image.
     // Downscale like Signal's "standard" quality: long edge 2048, JPEG.
     const bmp = await createImageBitmap(f, {imageOrientation: 'from-image'});
     const scale = Math.min(1, 2048 / Math.max(bmp.width, bmp.height)), w = Math.round(bmp.width * scale), h = Math.round(bmp.height * scale);
     const canvas = node('canvas'); canvas.width = w; canvas.height = h; canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
     const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.85));
-    return {blob, url: URL.createObjectURL(blob), w, h};
+    bmp.close();
+    // Preserve single animated photos; albums explicitly use their still preview.
+    const original = f.type === 'image/gif' ? f : blob;
+    return {blob: original, albumBlob: blob, url: URL.createObjectURL(original), w, h};
   }
-  async function upload(id, kind, blob) {
+  async function saveVoiceRecording(blob, take) {
+    // Start sharing inside the tap: no fetch/conversion before shared gesture handling.
+    try {
+      const ext = /webm/i.test(blob.type) ? 'webm' : /mp4/i.test(blob.type) ? 'm4a' : /wav/i.test(blob.type) ? 'wav' : /ogg/i.test(blob.type) ? 'ogg' : 'bin';
+      const file = new File([blob], 'recording-' + String(take || 'unsent').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60) + '.' + ext, {type: blob.type || 'application/octet-stream'});
+      const outcome = await WizardApp.share.file(file, {title: 'Save recording'});
+      toast(outcome === 'shared' ? 'Recording shared. The unsent note is still kept.' : outcome === 'cancelled' ? 'Save cancelled. Recording kept.' : 'File sharing unavailable. Recording kept.');
+    } catch (_) { toast('Could not save recording. Recording kept.'); }
+  }
+  async function archiveVoiceOriginal(voice) {
+    const blob = voice.blob;
+    const query = new URLSearchParams({take: voice.take || 'unsent', duration: String(voice.duration || 0), mime: blob.type || '', size: String(blob.size)});
+    const response = await fetch('api/view/voice-original?' + query, {method: 'PUT', credentials: 'same-origin', cache: 'no-store', headers: {'Content-Type': 'application/octet-stream', 'X-Messenger-CSRF': csrf()}, body: blob});
+    let env = {}; try { env = await response.json(); } catch (_) { /* keep original on every failure */ }
+    if (!response.ok || !env.ok) throw new Error(env.error?.message || 'Original recording not saved. Use Save recording.');
+    const proof = await fetch('api/view/voice-original/' + encodeURIComponent(env.result.id), {credentials: 'same-origin', cache: 'no-store'});
+    if (!proof.ok) throw new Error('Original recording readback failed. Use Save recording.');
+    const original = new Uint8Array(await blob.arrayBuffer()), saved = new Uint8Array(await proof.arrayBuffer());
+    if (original.length !== saved.length || original.some((v, i) => v !== saved[i])) throw new Error('Original recording readback differs. Use Save recording.');
+    // Custody is diagnostic only: do not ack, clear the bubble, or infer delivery.
+    return env.result;
+  }
+  async function upload(id, kind, blob, name = '') {
     // Telegram takes voice notes only as Ogg Opus. Retries convert again from the kept original.
     if (kind === 'voice') blob = await toOggOpus(blob);
-    const response = await fetch('api/unified/people/' + encodeURIComponent(id) + '/upload?kind=' + kind, {method: 'PUT', credentials: 'same-origin', cache: 'no-store',
+    const response = await fetch('api/unified/people/' + encodeURIComponent(id) + '/upload?kind=' + kind + (name ? '&name=' + encodeURIComponent(name) : ''), {method: 'PUT', credentials: 'same-origin', cache: 'no-store',
       headers: {'Content-Type': blob.type || 'application/octet-stream', 'X-Messenger-CSRF': csrf(), Accept: 'application/json'}, body: blob});
     let env = {}; try { env = await response.json(); } catch { /* gateway errors are not JSON */ }
     if (!response.ok || !env.ok) throw new Error(env.error?.message || 'Upload failed. Tap to retry.');
@@ -1100,20 +3440,31 @@
     const t = store.threads[id]; if (!t) return;
     const client_id = 'w' + uid();
     const m = {id: 'pending:' + client_id, client_id, outgoing: true, pending: true, original: job.text || '', timestamp: Date.now(), network: t.person.identities?.[0]?.network || 'telegram',
-      msgtype: job.photo ? 'm.image' : job.voice ? 'm.audio' : 'm.text', reactions: [], reply_to: job.reply?.id || null,
+      msgtype: job.pick ? (job.pick.kind === 'sticker' ? 'm.sticker' : 'm.image') : job.photo || job.photos ? 'm.image' : job.voice ? 'm.audio' : job.file ? 'm.file' : 'm.text', reactions: [], reply_to: job.reply?.id || null,
       reply: job.reply ? {id: job.reply.id, sender: job.reply.sender, outgoing: job.reply.outgoing, text: job.reply.original, msgtype: job.reply.msgtype, voice: job.reply.media?.voice} : null};
+    if (job.photos) { m.album = 'pending:' + client_id; m.photos = job.photos.map((photo, i) => ({...m, photos: undefined, id: m.id + ':' + i, original: i ? '' : m.original, local: photo.url, media: {w: photo.w, h: photo.h, mime: 'image/jpeg'}})); m.media = m.photos[0].media; }
     if (job.photo) { m.local = job.photo.url; m.media = {w: job.photo.w, h: job.photo.h, mime: 'image/jpeg'}; }
-    if (job.voice) { m.local = job.voice.url; m.media = {voice: true, duration: job.voice.duration, waveform: job.voice.waveform.map(v => Math.round(v / 10.24))}; }
+    // A picked sticker or GIF shows its preview while Telegram receives the real one.
+    if (job.pick) { m.local = job.pick.preview || null; m.media = {w: job.pick.w, h: job.pick.h, mime: job.pick.kind === 'gif' ? 'image/gif' : 'image/webp'}; }
+    if (job.file) m.media = {filename: job.file.name, size: job.file.bytes, mime: job.file.blob.type || 'application/octet-stream'};
+    if (job.voice) { m.saveRecording = () => saveVoiceRecording(job.voice.blob, job.voice.take); m.local = job.voice.url; m.media = {voice: true, duration: job.voice.duration, waveform: job.voice.waveform.map(v => Math.round(v / 10.24))}; }
     t.messages.push(m); store.pending++; hold();
     if (s.person === id) paintThread(true);
     const run = async () => {
       m.pending = true; m.failed = false; if (s.person === id) paintThread();
       try {
-        let upload_id, media;
+        let upload_id, upload_ids, media;
+        if (job.photos) {
+          upload_ids = []; media = [];
+          for (const photo of job.photos) { upload_ids.push((await upload(id, 'image', photo.albumBlob || photo.blob)).upload_id); media.push({w: photo.w, h: photo.h}); }
+        }
         if (job.photo) { upload_id = (await upload(id, 'image', job.photo.blob)).upload_id; media = {w: job.photo.w, h: job.photo.h}; }
-        if (job.voice) { upload_id = (await upload(id, 'voice', job.voice.blob)).upload_id; media = {duration: job.voice.duration, waveform: job.voice.waveform}; }
-        const r = await call('people/' + id + '/send', {text: job.text || '', client_id, reply_to: job.reply?.id || null, identity_id: job.identity_id || null, upload_id, media});
-        if (r.message) mergeMessages(id, [r.message]);
+        if (job.file) upload_id = (await upload(id, 'file', job.file.blob, job.file.name)).upload_id;
+        if (job.voice) { await archiveVoiceOriginal(job.voice); upload_id = (await upload(id, 'voice', job.voice.blob)).upload_id; media = {duration: job.voice.duration, waveform: job.voice.waveform}; }
+        const r = await call('people/' + id + '/send', job.pick ? {pick: job.pick.id, client_id, reply_to: job.reply?.id || null, identity_id: job.identity_id || null}
+          : {text: job.text || '', client_id, reply_to: job.reply?.id || null, identity_id: job.identity_id || null, upload_id, upload_ids, media});
+        if (r.message) mergeMessages(id, r.messages || [r.message]);
+        job.onDelivered?.();
         if (job.voice?.take) WizardApp.capture.ack(job.voice.take).catch(() => {}); // sent: release the shared recorder's kept copy
         if (r.state === 'queued') toast('Queued in Messenger, not yet published');
         store.pending--; hold();
@@ -1128,11 +3479,38 @@
         }
         m.waited = 0;
         m.pending = false; m.failed = offline(e) ? 'Messenger was restarting' : e.message && e.message.length < 80 ? e.message : true; m.retry = () => { store.pending++; hold(); queues[id] = (queues[id] || Promise.resolve()).then(run); };
-        store.pending--; hold(); // failed: shown with Retry; no longer blocks updates
+        store.pending--; hold(); // failed: no longer blocks updates
+        // Refused by Messenger (never sent): the message goes back into the box, so the bubble leaves the thread.
+        // Anything else keeps its Retry bubble, which resends with the same client id (never a second copy).
+        if (job.onFailure?.(e) === true) { t.messages = t.messages.filter(x => x !== m); }
       }
       if (s.person === id) paintThread();
     };
     queues[id] = (queues[id] || Promise.resolve()).then(run);
+  }
+  // A send Messenger refused comes back as the chat's draft: into the open box (with its photos and files) when that
+  // box is empty, else as the server draft so it is there on every device. Returns true when nothing was lost.
+  function restoreSend(id, job, e) {
+    // Refused (4xx) or an upload that never finished: certainly not sent. Restarts and 5xx may still land, so they keep
+    // the Retry bubble, which resends with the same client id.
+    if (offline(e) || e?.status >= 500) return false;
+    const items = job.photos || (job.photo ? [job.photo] : job.file ? [job.file] : []);
+    const text = job.text || '', who = store.threads[id]?.person?.display_name || 'this chat';
+    const reason = e?.message && e.message.length < 80 ? e.message : 'Not sent';
+    const here = s.person === id && view.draft?.isConnected && view.sd?.id === id && !view.edit;
+    if (here && !view.draft.value.trim() && !(view.attach || []).length) {
+      for (const it of items) delete it.sid;
+      view.draft.value = text; s.drafts[id] = text; saveDrafts();
+      if (items.length) { view.attach = [...items]; view.sd.uploading = view.sd.attach(items); } else view.sd.schedule();
+      if (job.reply && !view.reply) view.reply = job.reply;
+      view.grow(); view.paintBar(); toast(reason + '. Your message is back in the box.');
+      return true;
+    }
+    if (items.length || !text || (s.drafts[id] || '').trim()) { toast(reason + '. Tap the message to retry.'); return false; }
+    s.drafts[id] = text; saveDrafts();
+    api('api/drafts', {method: 'POST', body: {person_id: id, identity_id: job.identity_id, text}}).then(() => refreshDraftIndex(), () => {});
+    toast(reason + '. Kept as a draft in ' + who + '.');
+    return true;
   }
   async function editMsg(m, text) {
     const before = m.original; m.original = text; m.edited = true; paintThread();
@@ -1144,12 +3522,12 @@
       const preview = await call('people/' + id + '/preview', {text, identity_id});
       if (s.person !== id) return;
       const sheet = overlay('Review before sending');
-      sheet.append(node('p', 'helper', cap(p.identities.find(i => i.id === preview.identity_id).network) + ' → ' + p.display_name), node('p', 'u-preview', preview.translated), node('p', 'u-original', preview.original));
+      sheet.append(node('p', 'helper', netLabel(p.identities.find(i => i.id === preview.identity_id).network) + ' → ' + p.display_name), node('p', 'u-preview', preview.translated), node('p', 'u-original', preview.original));
       if (preview.error) sheet.append(node('p', 'error', preview.error));
       const reply = view.reply;
       const confirmSend = original => action(async () => {
         const r = await call('people/' + id + '/send', {preview_id: preview.id, send_original: original, reply_to: reply?.id || null, client_id: 'w' + uid()});
-        if (s.drafts[id] === preview.original || (s.drafts[id] || '').trim() === preview.original) { s.drafts[id] = ''; saveDrafts(); if (view.draft) { view.draft.value = ''; view.grow(); } }
+        if (s.drafts[id] === preview.original || (s.drafts[id] || '').trim() === preview.original) { s.drafts[id] = ''; saveDrafts(); if (view.draft) { view.draft.value = ''; view.grow(); } view.sd?.clear(); }
         view.reply = null; view.paintBar?.(); closeOverlay();
         if (r.message) { mergeMessages(id, [r.message]); paintThread(true); }
         if (r.state === 'queued') toast('Queued in Messenger, not yet published');
@@ -1158,20 +3536,198 @@
       if (preview.error || preview.translated !== preview.original) sheet.append(button('Send English original instead', () => confirmSend(true), 'secondary wide'));
     });
   }
+  // ---- Contacts app (same Wizard address, /contacts/): names, Add to Contacts, merge hints. Optional: absent app = no-op. ----
+  const CONTACTS = '/contacts/';
+  const contacts = {ok: null, map: new Map(), byId: new Map(), at: 0};
+  const accKey = (n, v) => n + '\n' + v;
+  async function loadContacts(force) {
+    if (contacts.ok === false && !force) return;
+    if (!force && Date.now() - contacts.at < 60000) return;
+    contacts.at = Date.now();
+    try {
+      const r = await fetch(CONTACTS + 'api/contacts', {credentials: 'same-origin'}); if (!r.ok) throw new Error();
+      const data = await r.json(); contacts.ok = true; contacts.map = new Map(); contacts.byId = new Map();
+      for (const c of data.contacts || []) { contacts.byId.set(c.id, c); for (const a of c.accounts || []) contacts.map.set(accKey(a.network, a.value), c); }
+      applyContacts(); if ((!s.person || split.on) && s.ready) drawList();
+      if (!sharedMine) call('qr-codes').then(shareToContacts).catch(() => {});
+    } catch { contacts.ok = contacts.ok === true; }
+  }
+  // A chat whose account is saved in Contacts shows the contact's name.
+  function applyContacts() {
+    for (const k of ['people', 'groups']) for (const p of store.lists[k] || []) {
+      const c = (p.accounts || []).map(a => contacts.map.get(accKey(a.network, a.value))).find(Boolean);
+      if (c) { p.messenger_name ??= p.display_name; p.contact = {id: c.id, name: c.name}; p.display_name = c.name; }
+      else if (p.contact) { p.display_name = p.messenger_name || p.display_name; delete p.contact; }
+    }
+  }
+  const listed = p => (store.lists.people || []).find(x => x.id === p.id) || p;
+  async function saveToContacts(p) {
+    p = listed(p);
+    const accounts = (p.accounts || []).map(a => ({network: a.network, value: a.value, label: a.label || p.display_name}));
+    const phones = accounts.filter(a => a.network === 'whatsapp' && /^\d{8,15}$/.test(a.value)).map(a => ({value: '+' + a.value, label: 'WhatsApp'}));
+    if (!accounts.length) { toast('This chat has no account Contacts can keep yet'); return null; }
+    let photo = '';
+    const url = pictureURL(p.id, p.avatar);
+    if (url) try { const b = await (await fetch(url)).blob(); if (b.size < 380000 && /^image\/(jpeg|png|webp)$/.test(b.type)) photo = await new Promise(r => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(b); }); } catch { /* no photo */ }
+    const r = await fetch(CONTACTS + 'api/save', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: p.messenger_name || p.display_name, accounts, phones, ...(photo ? {photo} : {})})});
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'Contacts could not save this person');
+    await loadContacts(true); return data;
+  }
+  // The owner's own codes also fill My card in Contacts, so both apps share the same QR list. Optional: no Contacts app, no-op.
+  let sharedMine = '';
+  async function shareToContacts(data) {
+    const accounts = (data.codes || []).filter(c => c.auto).map(c => ({network: c.network === 'messenger' ? 'wizard' : c.network === 'x' ? 'twitter' : c.network, value: c.value}))
+      .filter(a => a.network !== 'phone');
+    const body = JSON.stringify({name: data.name || '', accounts}); if (body === sharedMine) return; sharedMine = body;
+    try { await fetch(CONTACTS + 'api/me/connected', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body}); } catch { /* Contacts absent */ }
+  }
+  function openContacts() { if (WizardApp?.nav?.openApp?.('contacts')) return; window.open(CONTACTS, '_blank', 'noopener'); }
+  function contactsRow(p) {
+    if (contacts.ok !== true || !p.identities.every(i => i.kind === 'person')) return null;
+    p = listed(p);
+    const box = node('div', 'u-contact-link');
+    if (p.contact) {
+      box.append(node('span', '', 'Saved in Contacts as ' + p.contact.name));
+      box.append(button('Open Contacts', openContacts, 'c-link'));
+    } else {
+      box.append(node('span', '', 'Not in your Contacts yet'));
+      box.append(button('Add to Contacts', () => action(async () => { const r = await saveToContacts(p); if (r) { toast(r.created ? 'Added to Contacts' : 'Added to ' + r.contact.name + ' in Contacts'); closeOverlay(); drawList(); } }), 'secondary'));
+    }
+    return box;
+  }
+
+  // ---------- Labels: your own groups of chats ----------
+  // A label is a name you make once ("WizardOS") and tick on any chat, from any network, person or group.
+  // Choosing it in the Inbox filters then shows those chats together. The catalogue lives on the box, so an empty label exists.
+  const labelCat = {names: [], counts: {}, rev: -1, ok: false, loading: null};
+  const sameLabel = (a, b) => a.toLowerCase() === b.toLowerCase();
+  const canonLabel = n => labelCat.names.find(x => sameLabel(x, n)) || null;
+  function takeCatalog(r) {
+    if (!r || !Array.isArray(r.labels)) return;
+    labelCat.names = r.labels.filter(x => x && typeof x === 'object').map(x => x.name); labelCat.counts = Object.fromEntries(r.labels.filter(x => x && typeof x === 'object').map(x => [x.name, x.chats | 0]));
+    if (typeof r.rev === 'number') labelCat.rev = r.rev; labelCat.ok = true;
+  }
+  function loadLabelCatalog(force = false) {
+    if (labelCat.loading) return labelCat.loading;
+    if (labelCat.ok && !force) return Promise.resolve();
+    labelCat.loading = call('labels').then(takeCatalog).catch(() => {}).then(() => { labelCat.loading = null; if (s.ready && s.tab === 'people' && (!s.person || split.on)) drawList(); });
+    return labelCat.loading;
+  }
+  const labelNames = all => { const seen = new Map(); for (const n of [...labelCat.names, ...all.flatMap(p => p.labels || [])]) if (!seen.has(n.toLowerCase())) seen.set(n.toLowerCase(), n); return [...seen.values()].sort((a, b) => a.localeCompare(b)); };
+  const labelProblem = e => { if (errorBox()) error(e); else toast(e.message || 'Could not save labels', 3000); };
+  let labelQueue = Promise.resolve();
+  // Tap registers at once (the tick and the list repaint), the box catches up after.
+  function saveChatLabels(p, names) {
+    const put = list => { for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if (x.id === p.id) x.labels = list; p.labels = list; if (store.threads[p.id]) store.threads[p.id].person.labels = list; drawList(); };
+    const before = p.labels || []; put(names);
+    labelQueue = labelQueue.then(async () => {
+      try { const r = await call('people/' + encodeURIComponent(p.id) + '/labels', {labels: names}); takeCatalog({labels: r.catalog, rev: r.rev}); put(r.labels); persist(); }
+      catch (e) { put(before); labelProblem(e); }
+    });
+    return labelQueue;
+  }
+  // Checkbox list of every label plus a "New label" box. Used in the chat info sheet and the chat menu's Labels sheet.
+  function labelPicker(p) {
+    const box = node('div', 'u-labels');
+    box.append(node('p', 'helper u-labels-help', 'A label is your own group of chats. Tick one to put this chat in it; then choose that label in the Inbox filters to see all its chats from every network.'));
+    const list = node('div', 'u-label-list'); list.setAttribute('role', 'group'); list.setAttribute('aria-label', 'Labels for this chat');
+    const form = node('form', 'u-label-new'); const input = node('input'); input.placeholder = 'New label, e.g. WizardOS'; input.maxLength = 64; input.setAttribute('aria-label', 'New label');
+    const add = node('button', 'secondary', 'Add'); add.type = 'submit'; form.append(input, add);
+    const has = n => (p.labels || []).some(x => sameLabel(x, n));
+    const paint = () => {
+      list.replaceChildren();
+      const names = labelNames([p]);
+      if (!names.length) list.append(node('p', 'helper u-label-none', 'No labels yet. Make one below.'));
+      for (const n of names) {
+        const on = has(n), row = button('', () => {
+          const next = has(n) ? (p.labels || []).filter(x => !sameLabel(x, n)) : [...(p.labels || []), n];
+          saveChatLabels(p, next); paint();
+        }, 'u-label-row' + (on ? ' on' : ''));
+        row.setAttribute('role', 'checkbox'); row.setAttribute('aria-checked', String(on));
+        const mark = node('span', 'u-check'); if (on) mark.append(icon('check'));
+        row.append(mark, node('span', 'u-label-name', n)); list.append(row);
+      }
+    };
+    form.onsubmit = e => {
+      e.preventDefault(); const raw = input.value.replace(/\s+/g, ' ').trim(); if (!raw) return;
+      if (raw.length > 64) return labelProblem(new Error('Label names are up to 64 characters'));
+      const name = canonLabel(raw) || raw; if (!canonLabel(raw)) labelCat.names = [...labelCat.names, name].sort((a, b) => a.localeCompare(b));
+      input.value = ''; if (!has(name)) saveChatLabels(p, [...(p.labels || []), name]); paint();
+    };
+    paint(); box.append(list, form);
+    loadLabelCatalog(true).then(() => { if (box.isConnected) paint(); });
+    return box;
+  }
+  // The row and thread menus' Labels: the same picker on its own small sheet.
+  function labelsSheet(p) {
+    const sheet = overlay('Labels'); sheet.append(node('p', 'u-labels-chat', p.display_name), labelPicker(p));
+    sheet.append(button('Manage labels', () => manageLabels(p), 'secondary wide'));
+  }
+  // Create, rename and delete labels. Deleting a label never touches the chats in it.
+  function manageLabels(from = null) {
+    const sheet = overlay('Manage labels'); view.manageFrom = from; sheet.classList.add('u-manage-labels');
+    sheet.append(node('p', 'helper', 'Labels are your own groups of chats, such as WizardOS. Add a chat to one from its info sheet or by holding it in the list. Deleting a label never deletes the chats.'));
+    const list = node('div', 'u-label-list');
+    const form = node('form', 'u-label-new'); const input = node('input'); input.placeholder = 'New label, e.g. WizardOS'; input.maxLength = 64; input.setAttribute('aria-label', 'New label name');
+    const add = node('button', 'primary', 'Create'); add.type = 'submit'; form.append(input, add);
+    let editing = null, confirming = null;
+    const refreshList = () => { if (s.ready && s.tab === 'people' && (!s.person || split.on)) drawList(); };
+    const mutate = async (optimistic, path, body) => {
+      optimistic(); paint(); refreshList();
+      try { takeCatalog(await call(path, body)); } catch (e) { error(e); await loadLabelCatalog(true); }
+      if (s.overlay === 'Manage labels') paint(); refreshList();
+    };
+    function paint() {
+      list.replaceChildren();
+      const all = labelNames([...(store.lists.people || []), ...(store.lists.groups || [])]);
+      if (!all.length) list.append(node('p', 'helper u-label-none', 'No labels yet. Make your first one below.'));
+      for (const n of all) {
+        const row = node('div', 'u-label-manage'), count = labelCat.counts[n] ?? [...(store.lists.people || []), ...(store.lists.groups || [])].filter(x => (x.labels || []).includes(n)).length;
+        if (editing === n) {
+          const f = node('form', 'u-label-new'); const i = node('input'); i.value = n; i.maxLength = 64; i.setAttribute('aria-label', 'Rename ' + n);
+          const ok = node('button', 'primary', 'Save'); ok.type = 'submit';
+          f.append(i, ok, button('Cancel', () => { editing = null; paint(); }, 'secondary'));
+          f.onsubmit = e => { e.preventDefault(); const to = i.value.replace(/\s+/g, ' ').trim(); editing = null; if (!to || to === n) return paint();
+            if (filterState.label === n) setNarrowQuiet('label', canonLabel(to) || to);
+            mutate(() => { labelCat.names = labelCat.names.filter(x => x !== n); if (!canonLabel(to)) labelCat.names.push(to); for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if ((x.labels || []).includes(n)) x.labels = [...new Set(x.labels.map(l => l === n ? (canonLabel(to) || to) : l))].sort(); }, 'labels/rename', {from: n, to}); };
+          row.append(f); setTimeout(() => i.focus(), 0);
+        } else {
+          const name = node('span', 'u-label-name'); name.append(node('strong', '', n), node('small', '', count === 1 ? '1 chat' : count + ' chats'));
+          row.append(name, button('Rename', () => { editing = n; confirming = null; paint(); }, 'secondary u-label-act'));
+          row.append(confirming === n
+            ? button('Delete label?', () => { confirming = null; mutate(() => { labelCat.names = labelCat.names.filter(x => x !== n); for (const k of ['people', 'groups']) for (const x of store.lists[k] || []) if ((x.labels || []).includes(n)) x.labels = x.labels.filter(l => l !== n); }, 'labels/delete', {name: n}); }, 'secondary danger u-label-act')
+            : button('Delete', () => { confirming = n; paint(); }, 'secondary u-label-act'));
+        }
+        list.append(row);
+      }
+    }
+    form.onsubmit = e => {
+      e.preventDefault(); const name = input.value.replace(/\s+/g, ' ').trim(); if (!name) return;
+      if (name.length > 64) return error(new Error('Label names are up to 64 characters'));
+      input.value = ''; if (canonLabel(name)) return toast('That label already exists');
+      mutate(() => { labelCat.names = [...labelCat.names, name].sort((a, b) => a.localeCompare(b)); }, 'labels', {name});
+    };
+    sheet.append(list, form); paint();
+    loadLabelCatalog(true).then(() => { if (s.overlay === 'Manage labels') paint(); });
+  }
   function editPerson(p) {
     const sheet = overlay(p.identities.every(i => i.kind === 'person') ? 'Contact' : 'Group'); const form = node('form');
-    const hero = node('div', 'u-hero'); hero.append(avatar(p.display_name, 'large'), node('strong', '', p.display_name), node('span', '', networksOf(p).map(cap).join(' · '))); sheet.append(hero);
+    const hero = node('div', 'u-hero'); hero.append(avatar(p.display_name, 'large'), node('strong', '', p.display_name), node('span', '', networksOf(p).map(netLabel).join(' · '))); sheet.append(hero);
     const name = node('input'); name.value = p.display_name; name.maxLength = 160;
     const nameLabel = node('label', '', 'Name'); nameLabel.append(name);
     const lang = node('select'); for (const [value, label] of [['','Off'],['th','Thai'],['en','English'],['ja','Japanese'],['zh','Chinese'],['es','Spanish'],['fr','French'],['de','German']]) { const o = node('option', '', label); o.value = value; lang.append(o); } lang.value = p.language;
     const langLabel = node('label', '', 'Auto-translate'); langLabel.append(lang);
     const preferred = node('select'); const auto = node('option', '', 'Their last-used channel'); auto.value = ''; preferred.append(auto);
-    for (const i of p.identities) { const o = node('option', '', cap(i.network) + ' · ' + i.label); o.value = i.id; preferred.append(o); } preferred.value = p.preferred_identity || '';
+    for (const i of p.identities) { const o = node('option', '', netLabel(i.network) + ' · ' + i.label); o.value = i.id; preferred.append(o); } preferred.value = p.preferred_identity || '';
     const preferredLabel = node('label', '', 'Reply on'); preferredLabel.append(preferred);
     form.append(nameLabel, langLabel); if (p.identities.length > 1) form.append(preferredLabel);
     const save = () => action(async () => { await call('people/' + p.id, {display_name: name.value, language: lang.value, preferred_identity: preferred.value}); closeOverlay(); delete store.threads[p.id]; store.lists = {people: null, groups: null}; await openPerson(p.id); });
     form.append(button('Save', save, 'primary wide'));
+    const linkBox = contactsRow(p); if (linkBox) sheet.append(linkBox);
     form.onsubmit = e => { e.preventDefault(); save(); }; sheet.append(form);
+    if (!p.native) sheet.append(node('h3', '', 'Labels'), labelPicker(p));
+    if (p.id && !p.native) sheet.append(catchUpInfo(p));
     if (p.identities.every(i => i.kind === 'person')) {
       const others = s.people.filter(x => x.id !== p.id);
       if (others.length) {
@@ -1179,49 +3735,500 @@
         const mergeLabel = node('label', '', 'Same person on another network'); mergeLabel.append(select);
         sheet.append(node('h3', '', 'Merge'), mergeLabel, button('Merge', () => action(async () => { await call('people/' + p.id + '/merge', {source_id: select.value}); closeOverlay(); delete store.threads[p.id]; store.lists = {people: null, groups: null}; await openPerson(p.id); }), 'secondary wide'));
       }
-      if (p.identities.length > 1) for (const i of p.identities) sheet.append(button('Separate ' + cap(i.network) + ' · ' + i.label, () => action(async () => { await call('people/' + p.id + '/unmerge', {identity_id: i.id}); closeOverlay(); delete store.threads[p.id]; store.lists = {people: null, groups: null}; await openPerson(p.id); }), 'secondary wide'));
-    } else {
-      const labels = node('input'); labels.placeholder = 'Family, Friends'; labels.value = (p.labels || []).join(', ');
-      const labelsLabel = node('label', '', 'Labels'); labelsLabel.append(labels);
-      sheet.append(labelsLabel, button('Save labels', () => action(async () => { await call('groups/' + p.identities[0].id + '/labels', {labels: labels.value.split(',').map(x => x.trim()).filter(Boolean)}); closeOverlay(); }), 'secondary wide'));
+      if (p.identities.length > 1) for (const i of p.identities) sheet.append(button('Separate ' + netLabel(i.network) + ' · ' + i.label, () => action(async () => { await call('people/' + p.id + '/unmerge', {identity_id: i.id}); closeOverlay(); delete store.threads[p.id]; store.lists = {people: null, groups: null}; await openPerson(p.id); }), 'secondary wide'));
     }
   }
-  async function accounts() {
-    const sheet = overlay('Settings'); sheet.append(node('h3', '', 'Telegram'));
+  // My QR codes: the owner's own Telegram, WhatsApp, Signal… as big scannable codes, one tap from Chats.
+  const QR_NETS = {
+    telegram: {name: 'Telegram', hint: 'Username or phone', link: v => /^\+?\d[\d\s-]{5,}$/.test(v) ? 'https://t.me/+' + v.replace(/\D/g, '') : 'https://t.me/' + v.replace(/^@/, '')},
+    whatsapp: {name: 'WhatsApp', hint: 'Phone with country code', link: v => 'https://wa.me/' + v.replace(/\D/g, '')},
+    signal: {name: 'Signal', hint: 'Phone, or paste your username link', link: v => 'https://signal.me/#p/+' + v.replace(/\D/g, '')},
+    messenger: {name: 'Wizard Messenger', hint: 'npub contact code', link: v => v},
+    instagram: {name: 'Instagram', hint: 'Username', link: v => 'https://instagram.com/' + v.replace(/^@/, '')},
+    linkedin: {name: 'LinkedIn', hint: 'Profile name from your link', link: v => 'https://www.linkedin.com/in/' + v.replace(/^@/, '')},
+    x: {name: 'X', hint: 'Username', link: v => 'https://x.com/' + v.replace(/^@/, '')},
+    line: {name: 'LINE', hint: 'LINE ID', link: v => 'https://line.me/ti/p/~' + v.replace(/^@/, '')},
+    wechat: {name: 'WeChat', hint: 'Paste your WeChat QR link', link: v => v},
+    facebook: {name: 'Facebook Messenger', hint: 'Username', link: v => 'https://m.me/' + v.replace(/^@/, '')},
+    email: {name: 'Email', hint: 'Email address', link: v => 'mailto:' + v},
+    phone: {name: 'Phone', hint: 'Phone with country code', link: v => 'tel:+' + v.replace(/\D/g, '')},
+    link: {name: 'Link', hint: 'Any link', link: v => v},
+  };
+  const qrLink = c => /^[a-z][a-z0-9+.-]*:/i.test(c.value) ? c.value : (QR_NETS[c.network] || QR_NETS.link).link(c.value.trim());
+  const qrTitle = c => c.label || (QR_NETS[c.network] || QR_NETS.link).name;
+  function qrCanvas(data) {
+    const canvas = window.MessengerConnectors.qrCanvas(data); canvas.classList.add('u-myqr');
+    canvas.setAttribute('aria-label', 'QR code for ' + data); return canvas;
+  }
+  async function myCodes(pick) {
+    const sheet = overlay('My QR codes'); sheet.classList.add('tall', 'u-myqr-sheet');
+    const body = node('div', 'u-myqr-body'); body.append(skeleton(1, 'list')); sheet.append(body);
+    let data; try { data = await call('qr-codes'); } catch (e) { body.replaceChildren(); return error(e); }
+    if (s.overlay !== 'My QR codes') return;
+    const codes = data.codes || []; body.replaceChildren(); shareToContacts(data);
+    // The Wizard Messenger address lives here, beside the codes people scan to add you (it left Settings).
+    const address = addressRow(data);
+    if (!codes.length) { body.append(node('p', 'helper', 'Connect an account in Settings and its code appears here automatically. You can also add others, like an email or a link.'), ...(address ? [address] : []), button('Add a code', () => editCodes(data), 'primary wide')); return; }
+    let current = Math.min(pick | 0, codes.length - 1);
+    // Edit sits in the sheet header so the code, its link and the actions fit one phone screen.
+    sheet.querySelector('header').insertBefore(iconButton('compose', 'Edit codes', () => editCodes(data)), sheet.querySelector('header .icon-button'));
+    const chips = node('div', 'u-chips u-myqr-chips'), card = node('div', 'u-myqr-card');
+    const draw = () => {
+      const c = codes[current], link = qrLink(c);
+      for (const [i, el] of [...chips.children].entries()) el.setAttribute('aria-pressed', String(i === current));
+      const actions = node('div', 'u-myqr-actions');
+      actions.append(button('Copy link', async () => { try { await navigator.clipboard.writeText(link); toast('Link copied'); } catch { toast('Could not copy'); } }, 'secondary'));
+      if (window.WizardApp?.share?.text && /^https?:/.test(link)) actions.append(button('Share', () => Promise.resolve(WizardApp.share.text({text: link, title: qrTitle(c)})).catch(() => {}), 'secondary'));
+      // On the Wizard Messenger code itself the address is already the code, so the extra row hides.
+      if (address) address.hidden = c.network === 'messenger';
+      card.replaceChildren(...(codes.length > 1 ? [] : [node('h3', 'u-myqr-name', qrTitle(c))]), qrCanvas(link), node('p', 'u-myqr-value', c.value), actions, ...(address ? [address] : []));
+    };
+    codes.forEach((c, i) => { const chip = button(qrTitle(c), () => { current = i; draw(); }, 'u-chip'); chips.append(chip); });
+    // Swipe between codes, like flipping cards.
+    let x0 = null; card.ontouchstart = e => { x0 = e.touches[0].clientX; };
+    card.ontouchend = e => { if (x0 == null) return; const dx = e.changedTouches[0].clientX - x0; x0 = null; if (Math.abs(dx) < 50) return; current = (current + (dx < 0 ? 1 : -1) + codes.length) % codes.length; draw(); };
+    body.append(...(codes.length > 1 ? [chips] : []), card);
+    draw();
+  }
+  // One quiet line: the owner's Wizard Messenger address (what another Wizard pastes to message him) and Copy.
+  function addressRow(data) {
+    const value = native?.address?.() || (data.connected || []).find(c => c.network === 'messenger')?.value || '';
+    if (!value) return null;
+    const row = node('div', 'u-myqr-address'), text = node('span', 'u-myqr-address-text');
+    const code = node('code', 'u-myqr-address-value', value.length > 24 ? value.slice(0, 12) + '…' + value.slice(-8) : value); code.title = value;
+    text.append(node('small', '', 'Wizard Messenger address'), code);
+    const copy = button('Copy', async () => { try { await navigator.clipboard.writeText(value); toast('Address copied'); } catch { toast('Could not copy'); } }, 'secondary u-myqr-copy');
+    copy.setAttribute('aria-label', 'Copy Wizard Messenger address');
+    row.append(text, copy); return row;
+  }
+  function editCodes(data) {
+    const codes = data.extras || [], hidden = new Set(data.hidden || []);
+    const sheet = overlay('Edit QR codes'); sheet.classList.add('tall');
+    // Connected accounts make their own codes; here they can only be shown or hidden.
+    const keyOf = c => c.network + ':' + String(c.value).replace(/\s+/g, '').toLowerCase().replace(/^[@+]+/, '');
+    const auto = node('div', 'u-myqr-auto');
+    if ((data.connected || []).length) {
+      auto.append(node('h3', 'u-myqr-sub', 'From your connected accounts'));
+      for (const c of data.connected) {
+        const row = node('label', 'u-myqr-autorow'); const box = node('input'); box.type = 'checkbox'; box.checked = !hidden.has(keyOf(c)); box.dataset.key = keyOf(c);
+        const text = node('span', 'u-myqr-autotext'); text.append(node('b', '', qrTitle(c)), node('small', '', c.value)); row.append(text, box); auto.append(row);
+      }
+      sheet.append(auto, node('h3', 'u-myqr-sub', 'Other codes'));
+    }
+    const rows = node('div', 'u-myqr-edit'); sheet.append(rows);
+    const addRow = (c = {network: 'whatsapp', value: '', label: ''}) => {
+      const row = node('div', 'u-myqr-row');
+      const net = node('select'); net.setAttribute('aria-label', 'Network');
+      for (const [id, n] of Object.entries(QR_NETS)) { const o = node('option', '', n.name); o.value = id; net.append(o); }
+      net.value = c.network;
+      const value = node('input'); value.value = c.value; value.setAttribute('aria-label', 'Username, number or link'); value.autocomplete = 'off'; value.spellcheck = false;
+      const label = node('input'); label.value = c.label || ''; label.placeholder = 'Name on the card (optional)'; label.setAttribute('aria-label', 'Name on the card');
+      const hint = () => { value.placeholder = QR_NETS[net.value].hint; value.inputMode = /phone|whatsapp/.test(net.value) ? 'tel' : net.value === 'email' ? 'email' : 'text'; };
+      net.onchange = hint; hint();
+      const move = d => { const to = d < 0 ? row.previousElementSibling : row.nextElementSibling?.nextElementSibling; if (d < 0 && !to) return; rows.insertBefore(row, to || null); arrows(); row.querySelector(d < 0 ? '.u-myqr-up' : '.u-myqr-down')?.focus(); };
+      row.append(net, iconButton('up', 'Move up', () => move(-1), 'u-myqr-up'), iconButton('down', 'Move down', () => move(1), 'u-myqr-down'), iconButton('trash', 'Remove', () => { row.remove(); arrows(); }, 'u-myqr-remove'), value, label); rows.append(row); arrows();
+      return value;
+    };
+    // First can't go up, last can't go down.
+    const arrows = () => [...rows.children].forEach((r, i, all) => { r.querySelector('.u-myqr-up').disabled = i === 0; r.querySelector('.u-myqr-down').disabled = i === all.length - 1; });
+    for (const c of codes) addRow(c);
+    sheet.append(button('Add another', () => addRow().focus(), 'secondary wide'), button('Save', () => action(async () => {
+      const list = [...rows.children].map(r => { const [net, value, label] = r.querySelectorAll('select,input'); return {network: net.value, value: value.value.trim(), label: label.value.trim()}; }).filter(c => c.value);
+      const hide = [...auto.querySelectorAll('input[type=checkbox]')].filter(b => !b.checked).map(b => b.dataset.key);
+      await call('qr-codes', {codes: list, hidden: hide}); myCodes();
+    }), 'primary wide'));
+    if (!codes.length && !(data.connected || []).length) requestAnimationFrame(() => addRow().focus());
+  }
+  // Same person on two networks, offered never applied: Merge joins them into one chat, Not the same hides the pair.
+  // Manual merge: pick anyone from your one-on-one chats; the chosen chat joins this one.
+  async function mergePicker(p) {
+    const sheet = overlay('Merge with…');
+    sheet.append(node('p', 'helper', 'Pick the same person on another network. Their chats join ' + p.display_name + '; you can separate them again from Contact info.'));
+    const search = node('input'); search.type = 'search'; search.placeholder = 'Search people'; search.setAttribute('aria-label', 'Search people'); sheet.append(search);
+    const list = node('div', 'u-pick-list'); sheet.append(list);
+    let people = store.lists.people;
+    if (!people) { try { people = (await call('people')).people || []; } catch (e) { error(e); return; } }
+    const mine = new Set(networksOf(p));
+    const paint = () => {
+      const q = search.value.trim().toLowerCase();
+      const rows = people.filter(x => x.id !== p.id && !String(x.id).startsWith('private:') && (!q || (x.display_name || '').toLowerCase().includes(q)))
+        .sort((a, b) => ((a.display_name || '').toLowerCase() === (p.display_name || '').toLowerCase() ? -1 : 0) - ((b.display_name || '').toLowerCase() === (p.display_name || '').toLowerCase() ? -1 : 0) || (b.last?.timestamp || 0) - (a.last?.timestamp || 0)).slice(0, 60);
+      list.replaceChildren();
+      for (const x of rows) {
+        const row = button('', () => action(async () => {
+          if (!await ask({title: 'Merge contacts?', body: 'Merge ' + x.display_name + ' into ' + p.display_name + '?', yes: 'Merge', no: 'Cancel'})) { mergePicker(p); return; }
+          await call('people/' + encodeURIComponent(p.id) + '/merge', {source_id: x.id});
+          closeOverlay(); delete store.threads[p.id]; store.lists = {people: null, groups: null}; toast('Merged into one chat'); await openPerson(p.id);
+        }), 'u-pick-row');
+        const t = node('span', 'u-pick-text'); t.append(node('strong', '', x.display_name), node('small', '', networksOf(x).map(netLabel).join(', ') + (networksOf(x).some(n => mine.has(n)) ? ' · same network' : '')));
+        row.append(netAvatar(x, 'small'), t); list.append(row);
+      }
+      if (!rows.length) list.append(node('p', 'u-empty', 'No one matches'));
+    };
+    search.oninput = paint; paint(); search.focus();
+  }
+  async function mergeSuggestions() {
+    const sheet = overlay('Suggested merges');
+    sheet.append(node('p', 'helper', 'These look like the same person on different networks. Merging makes one chat; you choose where each reply goes, and you can separate them again from the chat.'));
+    const list = node('div', 'u-merge-list'); sheet.append(list);
+    let rows = [];
+    try { rows = (await call('merge-suggestions')).suggestions || []; } catch (e) { error(e); return; }
+    // Two chats saved under one person in Contacts: the strongest hint, listed first.
+    if (contacts.ok) {
+      const by = new Map(); for (const x of store.lists.people || []) if (x.contact) { if (!by.has(x.contact.id)) by.set(x.contact.id, []); by.get(x.contact.id).push(x); }
+      const extra = [...by.values()].filter(g => g.length > 1).map(g => ({id: g.map(x => x.id).sort().join('|'), name: g[0].contact.name, why: 'Same person in Contacts',
+        people: g.map(x => ({id: x.id, display_name: x.messenger_name || x.display_name, avatar: x.avatar, networks: networksOf(x), last: x.last}))}));
+      rows = [...extra, ...rows.filter(r => !extra.some(e => e.id === r.id))];
+    }
+    if (s.overlay !== 'Suggested merges') return;
+    const empty = () => { if (!list.children.length) list.append(node('p', 'u-empty', 'No suggestions right now.')); };
+    for (const sg of rows) {
+      const card = node('section', 'u-merge-card'), pair = node('div', 'u-merge-pair');
+      if (sg.why) card.append(node('small', 'u-merge-why', sg.why));
+      sg.people.forEach((x, i) => {
+        if (i) pair.append(node('span', 'u-merge-plus', '+'));
+        const who = node('div', 'u-merge-who'), txt = node('span');
+        txt.append(node('strong', '', x.display_name), node('small', '', x.networks.map(netLabel).join(', ') + (x.last ? ' · ' + when(x.last.timestamp) : '')));
+        who.append(netAvatar({id: x.id, display_name: x.display_name, avatar: x.avatar, identities: x.networks.map(n => ({network: n}))}, 'small'), txt);
+        pair.append(who);
+      });
+      const acts = node('div', 'u-merge-actions');
+      acts.append(button('Not the same', () => action(async () => { await call('merge-suggestions/dismiss', {id: sg.id}); card.remove(); empty(); toast('Hidden'); }), 'secondary'),
+        button('Merge', () => action(async () => {
+          const [target, ...rest] = sg.people; for (const x of rest) await call('people/' + encodeURIComponent(target.id) + '/merge', {source_id: x.id});
+          card.remove(); empty(); toast('Merged into one chat'); store.lists = {people: null, groups: null}; refresh();
+        }), 'primary'));
+      card.append(pair, acts); list.append(card);
+    }
+    empty();
+  }
+  async function accounts(focus) {
+    // Accounts first: linking is the main job of this sheet. Agent access and the rest sit below.
+    const sheet = overlay(focus === 'accounts' ? 'Accounts' : 'Settings');
+    sheet.classList.add('u-settings'); refreshAccounts();
+    if (window.MessengerConnectors) {
+      const networks = node('section', 'u-connected-networks'); sheet.append(networks);
+      let whatsappNumber = '';
+      call('qr-codes').then(r => { const w = (r.codes || []).find(c => c.network === 'whatsapp'); if (w && /^\+?[\d\s().-]{6,}$/.test(w.value)) whatsappNumber = w.value.replace(/[^\d+]/g, ''); }).catch(() => {});
+      connectorController = window.MessengerConnectors(networks, (path, method, body) => api(path.replace(/^\//, ''), {method, ...(body === undefined ? {} : {body})}), {
+        // Country picker + national number on every network's phone step; the WhatsApp number saved on My QR codes fills it (12.11).
+        phoneField, phoneFor: network => network === 'whatsapp' ? whatsappNumber : '',
+        onChange: () => { refresh(); refreshAccounts(); },
+        onPending: (network, pending) => { if (network === 'telegram') { if (pending) localStorage.setItem(LOGIN_FLAG, '1'); else localStorage.removeItem(LOGIN_FLAG); } },
+      });
+      try {
+        await connectorController.show();
+        if (focus === 'accounts') { sheet.append(button('More settings', () => accounts(), 'c-link')); return; }
+        moreSettings(sheet);
+        return;
+      } catch (e) {
+        // Older/dormant installations retain the existing Telegram settings.
+        networks.remove(); connectorController = null;
+        if (!['not_found', 'unified_not_found'].includes(e.code)) {
+          error(e); moreSettings(sheet); return;
+        }
+      }
+    }
+    sheet.append(node('h3', '', 'Telegram'));
     try {
-      const status = await call('telegram/status'); if (s.overlay !== 'Settings') return;
+      const status = await call('telegram/status'); if (!['Settings', 'Accounts'].includes(s.overlay)) return;
       if (status.pending_login) { localStorage.setItem(LOGIN_FLAG, '1'); return loginStep(status.pending_login, true); }
       const line = node('p', 'u-status ' + (status.logins?.length ? 'on' : 'off'), status.message + (status.state === 'disconnected' ? ' · Not connected' : '')); sheet.append(line);
       if (status.state === 'not_configured') sheet.append(node('p', 'helper', 'Add TELEGRAM_API_ID and TELEGRAM_API_HASH in the app’s installation settings. Your phone number and login code stay inside this private Messenger.'));
       if (!status.logins?.length) for (const [flow, label] of [['qr','Connect with QR'],['phone','Connect with phone']]) { const b = button(label, () => action(async () => loginStep(await call('telegram/start', {flow}))), flow === 'qr' ? 'primary wide' : 'secondary wide'); b.disabled = status.state === 'not_configured' || status.state === 'unavailable'; sheet.append(b); }
       if (status.logins?.length) sheet.append(button('Disconnect Telegram', () => action(async () => { await call('telegram/disconnect', {}); await accounts(); }), 'secondary wide danger'));
     } catch (e) { error(e); }
-    agentAccess(sheet);
+    moreSettings(sheet);
   }
-  async function agentAccess(sheet) {
-    const box = node('section', 'u-agent-access'); sheet.append(box);
-    const paint = st => {
-      box.replaceChildren(node('h3', '', 'Agent access'));
-      box.append(node('p', 'u-status ' + (st.enabled ? 'warn' : 'on'), st.enabled
-        ? 'Agents can read and send your messages until ' + new Date(st.until).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'}) + '.'
-        : 'Off. Agents see Messenger status only, never your messages.'));
-      const set = minutes => action(async () => paint(await api('api/view/agent-access', {method: 'POST', body: {minutes}})));
-      if (st.enabled) box.append(button('Turn off now', () => set(0), 'primary wide'));
-      else { const pair = node('div', 'u-pair'); pair.append(button('Allow 1 hour', () => set(60), 'secondary'), button('Allow 24 hours', () => set(1440), 'secondary')); box.append(pair); }
-      if (st.log.length) {
-        const details = node('details', 'u-log'); details.append(node('summary', '', 'Recent agent requests'));
-        const list = node('ul', 'u-access-log');
-        for (const e of st.log.slice(0, 20)) list.append(node('li', e.outcome === 'blocked' ? 'blocked' : '', new Date(e.t).toLocaleString([], {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'}) + ' · ' + e.outcome + ' · ' + e.method + ' ' + e.route));
-        details.append(list); box.append(details);
+  // Agents: what each of the Wizard's agents may do in Messenger. Draft-only is the recommended level:
+  // the agent reads and writes drafts, and only this signed-in screen can send them.
+  const LEVEL_TEXT = {no_access: 'Can\'t read your chats.', read_only: 'Reads chats. Can\'t draft.',
+    draft_only: 'Reads and drafts. Only you send.', draft_and_send: 'Reads and sends without your review.'};
+  // One agent row (Miguel): the agent's name and its level picker, nothing under it. The recommended level says so
+  // inside the picker's options (Settings only; Advanced's older keys keep short labels). A change saves at once.
+  function levelRow(agent, name, levels, save, {recommend = false} = {}) {
+    const row = node('div', 'u-more-row u-more-agent');
+    const choice = node('select', 'u-more-level'); choice.setAttribute('aria-label', 'What ' + name + ' may do');
+    const shown = levels.filter(l => l.id !== 'draft_and_send' || agent.level === 'draft_and_send');
+    for (const l of shown) {
+      const opt = node('option', '', l.label + (recommend && l.recommended ? ' (recommended)' : '')); opt.value = l.id;
+      if (LEVEL_TEXT[l.id]) opt.title = LEVEL_TEXT[l.id];
+      choice.append(opt);
+    }
+    choice.value = agent.level; choice.title = LEVEL_TEXT[agent.level] || '';
+    choice.onchange = () => action(async () => {
+      const level = choice.value;
+      await save(level); toast(name + ': ' + shown.find(l => l.id === level).label);
+    });
+    row.append(node('strong', 'u-agent-name', name), choice);
+    return row;
+  }
+  // Inbox view (James, 6 Nov 2026): "Chats" is the default, the way Messenger has always read: picture, name, last message
+  // (a group names its sender), time and unread badge. "Compact" is the denser 16.x row (name, time, badge; no last line).
+  // One row renderer in drawList() draws both; this only flips the flag. Saves at once and is remembered on this device.
+  const VIEW_KEY = 'messenger.inboxView';
+  const VIEWS = [['chats', 'Chats', 'Last message under each name'], ['compact', 'Compact', 'Names only, more chats on screen']];
+  function inboxView() { try { const v = localStorage.getItem(VIEW_KEY); if (v === 'chats' || v === 'compact') return v; } catch { /* default */ } return 'chats'; }
+  const previewsOn = () => inboxView() === 'chats';
+  function setInboxView(view) {
+    try { localStorage.setItem(VIEW_KEY, view); } catch { /* this visit only */ }
+    $('messenger')?.classList.toggle('u-compact', view === 'compact'); drawList();
+  }
+  function inboxViewRow() {
+    const row = node('div', 'u-more-row u-more-view'), group = node('div', 'u-view-choice'); group.setAttribute('role', 'radiogroup'); group.setAttribute('aria-label', 'Inbox view');
+    row.append(node('span', 'u-more-label', 'Inbox view'), group);
+    const paint = () => { for (const b of group.children) { const on = b.dataset.view === inboxView(); b.setAttribute('aria-checked', String(on)); b.classList.toggle('on', on); } };
+    for (const [id, label, hint] of VIEWS) {
+      const b = button(label, () => { setInboxView(id); paint(); }, 'u-view-btn'); b.dataset.view = id; b.title = hint;
+      b.setAttribute('role', 'radio'); group.append(b);
+    }
+    paint(); return row;
+  }
+  // A quiet list row that opens another page.
+  function moreLink(label, fn, cls = '') {
+    const row = button('', fn, 'u-more-row u-more-link' + (cls ? ' ' + cls : ''));
+    row.append(node('span', 'u-more-label', label), node('span', 'u-more-value'), node('span', 'u-row-caret', '›'));
+    return row;
+  }
+  // Miguel: under the accounts, "Agent access" lists the Wizard's agents (one picker each). Suggested merges and
+  // Notifications follow in their own short list, only when there are any. Drafts live in their chats; Advanced is
+  // hidden (#advanced).
+  function moreSettings(sheet) {
+    const head = node('h3', 'u-more-head', 'Agent access'), agents = node('div', 'u-settings-group u-more u-more-agents');
+    const group = node('div', 'u-settings-group u-more u-more-other');
+    group.append(inboxViewRow());
+    sheet.append(head, agents, group);
+    catchUpSettings(sheet);
+    // Each part stays away while it has nothing to show.
+    const sync = () => {
+      head.hidden = agents.hidden = !agents.children.length;
+      group.hidden = ![...group.children].some(c => !c.hidden);
+    };
+    const paintAgents = st => {
+      agents.replaceChildren();
+      for (const agent of st.wizard_agents || []) {
+        agents.append(levelRow(agent, agent.label || 'Your Wizard agent', st.wizard_levels || [], async level => {
+          await api('api/view/agents/wizard/' + encodeURIComponent(agent.id), {method: 'POST', body: {level}});
+          const next = await api('api/view/agents'); if (agents.isConnected) paintAgents(next);
+        }, {recommend: true}));
+      }
+      sync();
+    };
+    api('api/view/agents').then(st => { if (agents.isConnected) paintAgents(st); }).catch(e => error(e));
+    // Saved drafts stay in their chats (above the composer); Settings has no list of them.
+    const merges = moreLink('Suggested merges', () => mergeSuggestions(), 'u-settings-row'); merges.hidden = true; group.append(merges);
+    call('merge-suggestions').then(r => { const n = (r.suggestions || []).length; if (!n || !sheet.isConnected) return; merges.hidden = false; sync(); merges.querySelector('.u-more-value').textContent = String(n); merges.setAttribute('aria-label', 'Suggested merges, ' + n); }).catch(() => {});
+    // Notifications show only where this Wizard offers them: one row that turns them on or off.
+    const notify = node('div', 'u-more-row u-more-notify'); notify.hidden = true; group.append(notify);
+    notificationSettings(notify, api).then(() => { if (notify.querySelector('button')) { notify.hidden = false; sync(); } });
+    sync();
+    // Advanced has no row: support opens it with #advanced (see openFromHash).
+  }
+  // Support only, no visible row: open the view with #advanced (or set it while open) to reach Advanced.
+  function openFromHash() {
+    if (location.hash !== '#advanced' || !s.ready) return;
+    history.replaceState(history.state, '', location.pathname + location.search);
+    advancedSettings();
+  }
+  addEventListener('hashchange', openFromHash);
+  // Rarely needed: the Wizard-to-Wizard address, keys made for agents outside this Wizard, and what agents asked for.
+  async function advancedSettings() {
+    const sheet = overlay('Advanced'); sheet.classList.add('u-settings', 'u-advanced');
+    const group = node('div', 'u-settings-group u-more'); sheet.append(group);
+    group.append(moreLink('Wizard Messenger address', () => { closeOverlay(); showNative(); native?.settings(); }, 'u-more-address'));
+    let st;
+    try { st = await api('api/view/agents'); } catch (e) { error(e); return; }
+    if (s.overlay !== 'Advanced') return;
+    const reload = () => advancedSettings();
+    // Keys made before Wizard agents (and the shared app key) keep working; they only show while one exists.
+    const app = st.app_key;
+    if ((st.agents || []).length || (app && app.level !== 'no_access')) {
+      sheet.append(node('p', 'u-more-title', 'Older agent keys'), node('p', 'helper', 'For agents outside this Wizard. Your Wizard\'s agents don\'t need them.'));
+      const keys = node('div', 'u-settings-group u-more u-older-keys'); sheet.append(keys);
+      for (const agent of st.agents || []) {
+        const row = levelRow(agent, agent.name, st.levels, async level => { await api('api/view/agents/' + agent.id, {method: 'POST', body: {level}}); await reload(); });
+        row.append(button('Remove', () => action(async () => {
+          await api('api/view/agents/' + agent.id, {method: 'DELETE', body: {}}); await reload(); toast(agent.name + ' removed');
+        }), 'u-more-remove'));
+        keys.append(row);
+      }
+      if (app && app.level !== 'no_access') keys.append(levelRow(app, 'Wizard app key', st.levels, async level => { await api('api/view/agents/app-key', {method: 'POST', body: {level}}); await reload(); }));
+    }
+    const at = t => new Date(t).toLocaleString([], {month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'});
+    sheet.append(node('p', 'u-more-title', 'Recent agent requests'));
+    if (!(st.log || []).length) sheet.append(node('p', 'helper', 'None yet.'));
+    else {
+      const list = node('ul', 'u-access-log');
+      for (const e of st.log.slice(0, 20)) list.append(node('li', e.outcome === 'blocked' ? 'blocked' : '', at(e.t) + ' · ' + (e.agent ? e.agent + ' · ' : '') + e.outcome + ' · ' + e.method + ' ' + e.route));
+      sheet.append(list);
+    }
+    sheet.append(node('p', 'helper u-more-foot', 'These are app permissions. An agent with admin access to this server can bypass them.'));
+  }
+  // Drafts an agent saved for this chat appear above the composer. The owner edits, sends or discards them; agents never send.
+  function agentDraftStrip(id, active = () => s.person === id) {
+    const box = node('div', 'u-agent-drafts'); box.hidden = true;
+    const paint = async () => {
+      let list;
+      try { list = ((await api('api/drafts')).drafts || []).filter(d => d.person_id === id && d.state === 'draft'); } catch { return; }
+      if (!active()) return;
+      box.replaceChildren(); box.hidden = !list.length;
+      for (const d of list) {
+        const card = node('div', 'u-agent-draft');
+        card.append(node('p', 'u-agent-draft-who', 'Draft from ' + (d.created_by?.name || 'an agent') + ' · not sent'), node('p', 'u-agent-draft-text', d.text));
+        const actions = node('div', 'u-pair');
+        actions.append(
+          button('Discard', () => action(async () => {
+            if (!await ask({title: 'Discard this draft?', body: 'Nothing is sent.', yes: 'Discard', no: 'Keep'})) return;
+            await api('api/drafts/' + d.id, {method: 'DELETE', body: {revision: d.revision}}); toast('Draft discarded'); await paint();
+          }), 'secondary'),
+          button('Edit', () => reviewAgentDraft(d), 'secondary'),
+          button('Send draft', () => action(async () => sendAgentDraft(d, paint)), 'primary'));
+        card.append(actions); box.append(card);
       }
     };
-    try { const st = await api('api/view/agent-access'); if (s.overlay === 'Settings') paint(st); } catch (e) { error(e); }
+    Object.assign(view, {paintAgentDrafts: paint, agentStripActive: active}); paint();
+    const tick = setInterval(() => { if (!active() || !box.isConnected) clearInterval(tick); else paint(); }, 30000);
+    return box;
+  }
+  // Wizard-to-Wizard chats open in the native thread: show the same agent drafts there, matched by the chat's group.
+  async function nativeAgentDrafts(group) {
+    document.getElementById('native-agent-drafts')?.remove();
+    let person;
+    try { const dir = await call('directory'); person = [...(dir.people || []), ...(dir.groups || [])].find(p => (p.identities || []).some(i => i.network === 'messenger' && i.address === group)); } catch { return; }
+    const bar = $('compose-bar');
+    if (!person || s.nativeGroup !== group || !bar) return;
+    const strip = agentDraftStrip(person.id, () => s.nativeGroup === group); strip.id = 'native-agent-drafts';
+    bar.before(strip);
+  }
+  async function sendAgentDraft(d, done) {
+    const reviewed = (await api('api/drafts/' + d.id + '/preview', {method: 'POST', body: {revision: d.revision}})).draft;
+    const exact = reviewed.preview;
+    // A translated or untranslatable draft opens the review sheet so the exact outgoing text is seen first.
+    if (exact.error || exact.translated !== exact.original) return reviewAgentDraft(reviewed);
+    await api('api/drafts/' + d.id + '/send', {method: 'POST', body: {revision: reviewed.revision}});
+    toast('Sent'); await done();
+  }
+  async function agentDrafts() {
+    const sheet = overlay('Agent drafts');
+    try {
+      const result = await api('api/drafts');
+      if (s.overlay !== 'Agent drafts') return;
+      if (!result.drafts.length) sheet.append(node('p', 'helper', 'No saved drafts. Nothing has been sent.'));
+      for (const draft of result.drafts) {
+        const row = node('div', 'u-account');
+        row.append(node('p', '', draft.text), node('p', 'helper', (draft.created_by?.name ? 'From ' + draft.created_by.name + ' · ' : '') + (draft.state === 'draft' ? 'Not sent' : draft.state)), draft.state === 'draft' && !draft.export ? button('Open in chat', () => { closeOverlay(); s.bindDraft = draft.id; openPerson(draft.person_id); }, 'secondary') : button('Review draft', () => reviewAgentDraft(draft), 'secondary'));
+        sheet.append(row);
+      }
+    } catch (e) { sheet.append(node('p', 'error', e.message)); }
+  }
+  // Finishing a draft opened from a chat returns to that chat; from Settings, to the drafts list.
+  async function afterAgentDraft() { if (view.paintAgentDrafts && view.agentStripActive?.()) { closeOverlay(); await view.paintAgentDrafts(); } else await agentDrafts(); }
+  async function reviewAgentDraft(initial) {
+    const sheet = overlay('Review agent draft'); let draft = initial;
+    const problem = node('p', 'error'); problem.setAttribute('role', 'status');
+    const recipient = node('select', 'u-channel'); recipient.setAttribute('aria-label', 'Draft recipient and channel');
+    const body = node('textarea'); body.rows = 5; body.maxLength = 16384; body.value = draft.text; body.setAttribute('aria-label', 'Draft message');
+    const preview = node('div', 'u-preview');
+    const invalidate = () => { preview.replaceChildren(); };
+    recipient.onchange = body.oninput = invalidate;
+    sheet.append(node('p', 'helper', 'Check the recipient, channel and exact message before sending.'), recipient, body, problem, preview);
+    try {
+      const directory = await call('directory');
+      if (s.overlay !== 'Review agent draft') return;
+      for (const person of [...directory.people, ...directory.groups]) for (const identity of person.identities || []) {
+        const opt = node('option', '', person.display_name + ' · ' + cap(identity.network) + ' · ' + identity.label);
+        opt.value = JSON.stringify([person.id, identity.id]); recipient.append(opt);
+      }
+      recipient.value = JSON.stringify([draft.person_id, draft.identity_id]);
+      const authority = await api('api/view/authority');
+      // Missing/old metadata fails closed. Local review is explicitly advertised by the server.
+      if (authority.required === false && !draft.export && !draft.authority_receipt) {
+        const review = button('Review message', () => action(async () => {
+          problem.textContent = ''; review.disabled = body.disabled = recipient.disabled = true;
+          try {
+            const [person_id, identity_id] = JSON.parse(recipient.value);
+            draft = (await api('api/drafts/' + draft.id, {method:'POST', body:{revision:draft.revision, person_id, identity_id, text:body.value}})).draft;
+            draft = (await api('api/drafts/' + draft.id + '/preview', {method:'POST', body:{revision:draft.revision}})).draft;
+            if (s.overlay !== 'Review agent draft') return;
+            const exact = draft.preview;
+            const send = button(exact.error ? 'Send original' : 'Send', () => action(async () => {
+              send.disabled = true;
+              try {
+                await api('api/drafts/' + draft.id + '/send', {method:'POST', body:{revision:draft.revision, send_original:!!exact.error}});
+                await afterAgentDraft();
+              } catch (e) { problem.textContent = e.message; }
+            }), 'primary wide');
+            preview.replaceChildren(node('p', 'helper', 'Revision ' + draft.revision + ' · ' + Array.from(recipient.children).find(o => o.value === recipient.value)?.textContent),
+              node('p', '', exact.error ? exact.original : exact.translated),
+              node('p', 'helper', exact.error ? 'Translation unavailable. Send original only if this exact text is what you want.' : ''), send);
+            body.oninput = recipient.onchange = () => { send.disabled = true; invalidate(); };
+          } catch (e) { problem.textContent = e.message; }
+          finally { review.disabled = body.disabled = recipient.disabled = draft.state !== 'draft'; }
+        }), 'secondary wide');
+        review.disabled = body.disabled = recipient.disabled = draft.state !== 'draft';
+        if (draft.state === 'sending') sheet.append(node('p', 'helper', 'Delivery is uncertain. Check the conversation before creating a replacement. Editing is locked.'));
+        if (draft.state !== 'sending') sheet.append(button('Delete draft', () => action(async () => {
+          if (!await ask({title: 'Delete this local draft?', body: 'Nothing is sent.', yes: 'Delete', no: 'Keep'})) { await agentDrafts(); return; }
+          try { await api('api/drafts/' + draft.id, {method:'DELETE', body:{revision:draft.revision}}); await afterAgentDraft(); }
+          catch (e) { problem.textContent = e.message; }
+        }), 'secondary wide'));
+        sheet.append(node('p', 'helper', 'Review the recipient and text, then click Send. Nothing is sent by reviewing.'), review,
+          button('Back to drafts', agentDrafts, 'secondary wide'));
+        return;
+      }
+      const reason = node('p', 'helper', authority.reason); sheet.append(reason);
+      const link = origin => {
+        const a = node('a', 'primary wide', 'Open independent review');
+        a.href = origin; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.referrerPolicy = 'no-referrer';
+        preview.replaceChildren(node('p', 'helper', 'Frozen revision ' + draft.revision + '. Independently unlock, inspect account, room and exact text, then approve with your passkey.'), a);
+      };
+      if (authority.ready && draft.export?.review_origin === authority.review_origin) link(authority.review_origin);
+      const review = button(draft.state === 'exported' ? 'Retry secure export' : 'Review securely', () => action(async () => {
+        problem.textContent = ''; review.disabled = body.disabled = recipient.disabled = true;
+        try {
+          if (draft.state === 'draft') {
+            const [person_id, identity_id] = JSON.parse(recipient.value);
+            draft = (await api('api/drafts/' + draft.id, {method: 'POST', body: {revision: draft.revision, person_id, identity_id, text: body.value}})).draft;
+          }
+          const result = await api('api/drafts/' + draft.id + '/export', {method: 'POST', body: {revision: draft.revision}});
+          draft = result.draft; link(result.review_origin);
+          await reviewAgentDraft(draft); // Repaint frozen controls/status, removing stale local Delete.
+        } catch (e) {
+          problem.textContent = e.message || 'Independent review unavailable. No local fallback.';
+          // An uncertain export is frozen server-side. Reload before any edit/retry.
+          try { draft = (await api('api/drafts/' + draft.id)).draft; } catch { /* leave disabled */ }
+        } finally {
+          body.disabled = recipient.disabled = draft.state !== 'draft';
+          review.disabled = !authority.ready || !['draft', 'exported'].includes(draft.state);
+        }
+      }), 'primary wide');
+      review.disabled = !authority.ready || !['draft', 'exported'].includes(draft.state);
+      body.disabled = recipient.disabled = draft.state !== 'draft';
+      if (draft.state === 'exported') sheet.append(button('Refresh independent status', () => action(async () => {
+        try { await api('api/drafts/' + draft.id + '/authority-status', {method: 'POST', body: {revision: draft.revision}}); await agentDrafts(); }
+        catch (e) { problem.textContent = e.message; }
+      }), 'secondary wide'));
+      if (!draft.export && draft.state !== 'sending') sheet.append(button('Delete draft', () => action(async () => {
+        if (!await ask({title: 'Delete this local draft?', body: 'Nothing is sent.', yes: 'Delete', no: 'Keep'})) { await agentDrafts(); return; }
+        try { await api('api/drafts/' + draft.id, {method: 'DELETE', body: {revision: draft.revision}}); await agentDrafts(); }
+        catch (e) { problem.textContent = e.message; }
+      }), 'secondary wide'));
+      sheet.append(review, button('Back to drafts', agentDrafts, 'secondary wide'));
+    } catch (e) { problem.textContent = e.message; }
   }
   const LOGIN_FLAG = 'messenger-telegram-login';
+  async function resumeLogin() {
+    if (!s.ready || s.overlay || s.busy || !localStorage.getItem(LOGIN_FLAG)) return;
+    try {
+      const status = await call('telegram/status');
+      if (status.pending_login) accounts();
+      else localStorage.removeItem(LOGIN_FLAG);
+    } catch { /* Only the owner's authenticated session can resume. */ }
+  }
   // Region code, dialling code, name. Built from libphonenumber + ISO 3166 names.
   const COUNTRIES = 'AF93,Afghanistan|AL355,Albania|DZ213,Algeria|AD376,Andorra|AO244,Angola|AI1,Anguilla|AG1,Antigua & Barbuda|AR54,Argentina|AM374,Armenia|AW297,Aruba|AU61,Australia|AT43,Austria|AZ994,Azerbaijan|BS1,Bahamas|BH973,Bahrain|BD880,Bangladesh|BB1,Barbados|BY375,Belarus|BE32,Belgium|BZ501,Belize|BJ229,Benin|BM1,Bermuda|BT975,Bhutan|BO591,Bolivia|BA387,Bosnia & Herzegovina|BW267,Botswana|BR55,Brazil|GB44,Britain (UK)|IO246,British Indian Ocean Territory|BN673,Brunei|BG359,Bulgaria|BF226,Burkina Faso|BI257,Burundi|KH855,Cambodia|CM237,Cameroon|CA1,Canada|CV238,Cape Verde|BQ599,Caribbean NL|KY1,Cayman Islands|CF236,Central African Rep.|TD235,Chad|CL56,Chile|CN86,China|CX61,Christmas Island|CC61,Cocos (Keeling) Islands|CO57,Colombia|KM269,Comoros|CD243,Congo (Dem. Rep.)|CG242,Congo (Rep.)|CK682,Cook Islands|CR506,Costa Rica|HR385,Croatia|CU53,Cuba|CW599,Curaçao|CY357,Cyprus|CZ420,Czech Republic|CI225,Côte d’Ivoire|DK45,Denmark|DJ253,Djibouti|DM1,Dominica|DO1,Dominican Republic|TL670,East Timor|EC593,Ecuador|EG20,Egypt|SV503,El Salvador|GQ240,Equatorial Guinea|ER291,Eritrea|EE372,Estonia|SZ268,Eswatini (Swaziland)|ET251,Ethiopia|FK500,Falkland Islands|FO298,Faroe Islands|FJ679,Fiji|FI358,Finland|FR33,France|GF594,French Guiana|PF689,French Polynesia|GA241,Gabon|GM220,Gambia|GE995,Georgia|DE49,Germany|GH233,Ghana|GI350,Gibraltar|GR30,Greece|GL299,Greenland|GD1,Grenada|GP590,Guadeloupe|GU1,Guam|GT502,Guatemala|GG44,Guernsey|GN224,Guinea|GW245,Guinea-Bissau|GY592,Guyana|HT509,Haiti|HN504,Honduras|HK852,Hong Kong|HU36,Hungary|IS354,Iceland|IN91,India|ID62,Indonesia|IR98,Iran|IQ964,Iraq|IE353,Ireland|IM44,Isle of Man|IL972,Israel|IT39,Italy|JM1,Jamaica|JP81,Japan|JE44,Jersey|JO962,Jordan|KZ7,Kazakhstan|KE254,Kenya|KI686,Kiribati|KP850,Korea (North)|KR82,Korea (South)|KW965,Kuwait|KG996,Kyrgyzstan|LA856,Laos|LV371,Latvia|LB961,Lebanon|LS266,Lesotho|LR231,Liberia|LY218,Libya|LI423,Liechtenstein|LT370,Lithuania|LU352,Luxembourg|MO853,Macau|MG261,Madagascar|MW265,Malawi|MY60,Malaysia|MV960,Maldives|ML223,Mali|MT356,Malta|MH692,Marshall Islands|MQ596,Martinique|MR222,Mauritania|MU230,Mauritius|YT262,Mayotte|MX52,Mexico|FM691,Micronesia|MD373,Moldova|MC377,Monaco|MN976,Mongolia|ME382,Montenegro|MS1,Montserrat|MA212,Morocco|MZ258,Mozambique|MM95,Myanmar (Burma)|NA264,Namibia|NR674,Nauru|NP977,Nepal|NL31,Netherlands|NC687,New Caledonia|NZ64,New Zealand|NI505,Nicaragua|NE227,Niger|NG234,Nigeria|NU683,Niue|NF672,Norfolk Island|MK389,North Macedonia|MP1,Northern Mariana Islands|NO47,Norway|OM968,Oman|PK92,Pakistan|PW680,Palau|PS970,Palestine|PA507,Panama|PG675,Papua New Guinea|PY595,Paraguay|PE51,Peru|PH63,Philippines|PL48,Poland|PT351,Portugal|PR1,Puerto Rico|QA974,Qatar|RO40,Romania|RU7,Russia|RW250,Rwanda|RE262,Réunion|AS1,Samoa (American)|WS685,Samoa (western)|SM378,San Marino|ST239,Sao Tome & Principe|SA966,Saudi Arabia|SN221,Senegal|RS381,Serbia|SC248,Seychelles|SL232,Sierra Leone|SG65,Singapore|SK421,Slovakia|SI386,Slovenia|SB677,Solomon Islands|SO252,Somalia|ZA27,South Africa|SS211,South Sudan|ES34,Spain|LK94,Sri Lanka|BL590,St Barthelemy|SH290,St Helena|KN1,St Kitts & Nevis|LC1,St Lucia|SX1,St Maarten (Dutch)|MF590,St Martin (French)|PM508,St Pierre & Miquelon|VC1,St Vincent|SD249,Sudan|SR597,Suriname|SJ47,Svalbard & Jan Mayen|SE46,Sweden|CH41,Switzerland|SY963,Syria|TW886,Taiwan|TJ992,Tajikistan|TZ255,Tanzania|TH66,Thailand|TG228,Togo|TK690,Tokelau|TO676,Tonga|TT1,Trinidad & Tobago|TN216,Tunisia|TR90,Turkey|TM993,Turkmenistan|TC1,Turks & Caicos Is|TV688,Tuvalu|UG256,Uganda|UA380,Ukraine|AE971,United Arab Emirates|US1,United States|UY598,Uruguay|UZ998,Uzbekistan|VU678,Vanuatu|VA39,Vatican City|VE58,Venezuela|VN84,Vietnam|VG1,Virgin Islands (UK)|VI1,Virgin Islands (US)|WF681,Wallis & Futuna|EH212,Western Sahara|YE967,Yemen|ZM260,Zambia|ZW263,Zimbabwe|AX358,Åland Islands'.split('|').map(x => { const [, r, c, n] = x.match(/^([A-Z]{2})(\d+),(.*)$/); return {r, c, n}; });
   const flag = r => String.fromCodePoint(...[...r].map(ch => 0x1f1e6 + ch.charCodeAt(0) - 65));
-  function phoneField(form) {
+  function phoneField(form, preset = '') {
     // Country picker + national number, like Telegram's own login; the bridge still receives one +E.164 value.
     const pick = node('select', 'u-country'); pick.setAttribute('aria-label', 'Country');
     for (const k of COUNTRIES) { const o = node('option', '', flag(k.r) + '  ' + k.n + '  +' + k.c); o.value = k.r; pick.append(o); }
@@ -1242,6 +4249,8 @@
       if (match && code() !== match.c) { pick.value = match.r; paint(); }
     };
     paint();
+    // A saved full number (+66…) picks its country and fills the rest.
+    if (/^\+\d{6,}$/.test(preset)) { number.value = preset; number.oninput(); number.value = preset.slice(1 + code().length); }
     const countryLabel = node('label', '', 'Country'); countryLabel.append(pick);
     const numberLabel = node('label', '', 'Phone number'); const row = node('div', 'u-phone'); row.append(prefix, number); numberLabel.append(row);
     form.append(countryLabel, numberLabel);
@@ -1252,85 +4261,93 @@
         if (pick.value !== 'IT') digits = digits.replace(/^0+/, ''); // drop the national trunk 0 (Thai 08… → +66 8…)
         return '+' + code() + digits;
       },
+      clear: () => { number.value = ''; },
       focus: () => number.focus(),
     };
   }
-  async function resumeLogin() {
-    // The owner leaves the app to read the Telegram code; bring the waiting step back on return.
-    if (!s.ready || s.overlay || s.busy || !localStorage.getItem(LOGIN_FLAG)) return;
-    try {
-      const status = await call('telegram/status');
-      if (status.pending_login && !s.overlay) loginStep(status.pending_login, true);
-      else if (!status.pending_login) localStorage.removeItem(LOGIN_FLAG);
-    } catch { /* status is retried on the next return */ }
-  }
-  function loginStep(result, resumed = false) {
-    // bridgev2 embeds the LoginStep fields alongside login_id.
-    s.login = null; const sheet = overlay('Connect Telegram'); s.login = result;
-    const step = result.step || result;
-    if (step.type === 'complete') localStorage.removeItem(LOGIN_FLAG); else localStorage.setItem(LOGIN_FLAG, '1');
-    if (resumed) sheet.append(node('p', 'helper', 'Picking up where you left off.'));
-    sheet.append(node('p', 'helper', step.instructions || 'Continue on Telegram'));
-    const problem = node('p', 'error'); problem.setAttribute('role', 'alert');
-    const advance = fields => action(async () => {
-      const current = s.login; problem.textContent = '';
-      try {
-        const next = await call('telegram/step', {login_id: result.login_id, step_id: step.step_id, type: step.type, fields});
-        if (s.login === current) loginStep(next);
-      } catch (e) { problem.textContent = e.message || 'Telegram did not accept that. Try again.'; }
-    });
-    if (step.type === 'user_input') {
-      const form = node('form'); form.autocomplete = 'off'; const inputs = {};
-      for (const field of step.user_input.fields) {
-        if (/phone/.test(field.type) || field.id === 'phone_number') { inputs[field.id] = phoneField(form); continue; }
-        const label = node('label', '', field.name); const input = node('input');
-        input.type = /password/.test(field.type) ? 'password' : /phone/.test(field.type) ? 'tel' : 'text';
-        if (/code/.test(field.type) || /code/i.test(field.id)) { input.inputMode = 'numeric'; input.autocomplete = 'one-time-code'; }
-        else input.autocomplete = /password/.test(field.type) ? 'current-password' : 'off';
-        if (field.description) label.append(node('span', 'helper', field.description));
-        input.required = !field.optional; label.append(input); form.append(label); inputs[field.id] = input;
-      }
-      form.append(problem, button('Continue', () => form.requestSubmit(), 'primary wide'));
-      form.onsubmit = e => { e.preventDefault(); const fields = Object.fromEntries(Object.entries(inputs).map(([id, input]) => [id, input.value])); advance(fields); };
-      sheet.append(form);
-      requestAnimationFrame(() => Object.values(inputs)[0]?.focus());
-    } else if (step.type === 'display_and_wait') {
-      const display = step.display_and_wait;
-      if (display.type === 'qr' && window.qrcode) {
-        const qr = window.qrcode(0, 'M'); qr.addData(display.data); qr.make();
-        const canvas = node('canvas', 'u-qr'); const count = qr.getModuleCount(), scale = 6; canvas.width = canvas.height = (count + 8) * scale;
-        const ctx = canvas.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.fillStyle = '#000';
-        for (let y=0;y<count;y++) for (let x=0;x<count;x++) if (qr.isDark(y,x)) ctx.fillRect((x+4)*scale,(y+4)*scale,scale,scale); sheet.append(canvas);
-      } else sheet.append(node('p', 'u-preview', display.data || 'Waiting for Telegram approval'));
-      sheet.append(problem, button('I scanned it', () => advance({}), 'primary wide'));
-    } else if (step.type === 'complete') { s.login = null; sheet.append(node('p', '', 'Telegram connected. Your chats appear in Chats and Groups shortly.'), button('Done', () => { closeOverlay(); refresh(); }, 'primary wide')); return; }
-    else sheet.append(node('p', 'error', 'This Telegram login step is not supported yet. Cancel and try again.'));
-    sheet.append(button('Cancel', () => action(async () => {
-      localStorage.removeItem(LOGIN_FLAG);
-      await call('telegram/cancel', {login_id: result.login_id}).catch(() => {});
-      closeOverlay();
-    }), 'secondary wide'));
-  }
   function switchTab(tab) { view.selection?.clear(); if (s.overlay) closeOverlay(); s.tab = tab; s.person = null; view.id = null; s.search = null; s.epoch++; inChat(false); document.documentElement.dataset.inboxTab = tab; $('unified-inbox').hidden = tab === 'messenger'; delete $('unified-inbox').dataset.label; for (const el of $('inbox-tabs').querySelectorAll('[data-tab]')) el.setAttribute('aria-selected', String(el.dataset.tab === tab)); if (tab !== 'messenger') renderList(); }
-  function refresh() { store.lists = {people: null, groups: null}; if (!s.person && s.tab !== 'messenger') renderList(); }
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { resumeLogin(); markRead(); } });
+  function refresh() { store.lists = {people: null, groups: null}; if ((!s.person || split.on) && s.tab !== 'messenger') renderList(); }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { markRead(); wake(); loadContacts(); } });
+  // Coming back (phone unlocked, app reopened, network back): drop whatever poll was in flight and catch up now.
+  // An open chat re-fetches itself when shown, so it looked instant while the list waited for the feed to catch up
+  // (James, 27 Oct 2026). The list now does the same: one direct fetch on return, at most every 2 s.
+  let woke = 0;
+  function wake() {
+    if (!s.ready || Date.now() - woke < 2000) return; woke = Date.now();
+    if (store.seq) feed();
+    if ((!s.person || split.on) && s.tab !== 'messenger') freshen(s.tab === 'groups' ? 'groups' : 'people', s.epoch);
+  }
+  addEventListener('online', wake); addEventListener('focus', wake); addEventListener('pageshow', e => { if (e.persisted) wake(); });
+  // Title-bar tools follow the view and the window width (see syncBar).
+  if (window.MutationObserver) { const inbox = $('unified-inbox'), mo = new MutationObserver(syncBar);
+    if (inbox) mo.observe(inbox, {attributes: true, attributeFilter: ['hidden', 'data-view']});
+    mo.observe(document.documentElement, {attributes: true, attributeFilter: ['data-private-view']});
+    if ($('messenger') && window.ResizeObserver) new ResizeObserver(() => { relayout(); syncBar(); }).observe($('messenger')); }
+  addEventListener('resize', relayout);
   // Keyboard open/close: keep the newest message glued above the composer.
   window.visualViewport?.addEventListener('resize', () => { if (s.person && view.scroll && view.bottom !== false) view.scroll.scrollTop = view.scroll.scrollHeight; });
   // After a reload, come back to the same tab and chat (saved on pagehide).
   // Any reload (a Wizard update, the Reload strip) comes back on the same tab and chat.
-  window.addEventListener('pagehide', () => { try { if (s.ready || s.tab) sessionStorage.setItem('messenger.resume', JSON.stringify({tab: s.tab, person: s.person})); } catch { /* fresh start */ } });
+  window.addEventListener('pagehide', () => { try { if (s.ready || s.tab) sessionStorage.setItem('messenger.resume', JSON.stringify({tab: s.tab, person: s.person, nativeGroup: s.nativeGroup})); } catch { /* fresh start */ } });
+  // Wizard inbox "Open" (api/inbox item `open`): `#chat=<chat id>` opens that chat, now or once Messenger is ready.
+  // The fragment is dropped at once so Back/reload never reopens it.
+  let linkedChat = null;
+  function takeChatLink() {
+    const m = /^#chat=([A-Za-z0-9_-]{1,64})$/.exec(location.hash); if (!m) return false;
+    linkedChat = m[1];
+    try { history.replaceState(history.state, '', location.pathname + location.search); } catch { /* keep the fragment */ }
+    return true;
+  }
+  function openLinkedChat() {
+    if (!linkedChat || !s.ready) return false;
+    const id = linkedChat; linkedChat = null;
+    if (s.native) returnNative();
+    if (s.low || s.seg === 'medium') setSeg('all');
+    switchTab('people'); openPerson(id); return true;
+  }
+  takeChatLink();
+  addEventListener('hashchange', () => { if (takeChatLink()) openLinkedChat(); });
   function resume() {
     let at = null; try { at = JSON.parse(sessionStorage.getItem('messenger.resume') || 'null'); sessionStorage.removeItem('messenger.resume'); } catch { /* none */ }
-    switchTab(['groups', 'messenger'].includes(at?.tab) ? at.tab : 'people');
-    if (at?.person && at.tab !== 'messenger') openPerson(at.person);
+    if (openLinkedChat()) return;
+    switchTab('people');
+    if (at?.nativeGroup) s.resumeNative = at.nativeGroup;
+    else if (at?.person && at.tab !== 'messenger') openPerson(at.person);
+  }
+  function showNative(group) {
+    if (!s.ready) return;
+    if (group) s.nativeGroup = group;
+    s.native = true; s.person = null; view.id = null; s.epoch++;
+    document.documentElement.dataset.privateView = '';
+    // Desktop split: the native Wizard thread takes the right side and the list stays on the left.
+    if (split.on) { if (!hasListPane()) renderList(); closePane(); markSelected(); inChat(true); return; }
+    $('unified-inbox').hidden = true; inChat(true);
+  }
+  function openNative(group, card) {
+    if (!s.ready) return;
+    // A Wizard chat that already has its mirrored chat opens there (attachments, drafts); Back returns to the Inbox.
+    const twin = nativeRows.find(n => n.group_id === group), m = twin?.invite ? null : mirrorOf(group);
+    if (m) { if (s.native) returnNative(); return openPerson(m.id, m); }
+    if (!native) return;
+    nativeFocus = card; s.nativeGroup = group; showNative(); native.open(group); nativeAgentDrafts(group);
+  }
+  function returnNative() {
+    if (!s.native) return;
+    s.native = false; s.nativeGroup = null; document.getElementById('native-agent-drafts')?.remove();
+    delete document.documentElement.dataset.privateView;
+    $('unified-inbox').hidden = false; inChat(false);
+    if (split.on && hasListPane()) { if (!s.person) closePane(); drawList(); } else renderList();
+    // List rendering is synchronous when cached; focus the same row after Back.
+    const group = nativeFocus?.dataset.nativeGroup;
+    if (group) [...document.querySelectorAll('.u-person')].find(el => el.dataset.nativeGroup === group)?.focus();
   }
   // ---------- Wizard share sheet: recent chats are direct targets; a share lands in the composer, never auto-sent ----------
   const SHARE_TARGETS = 12;
   let sharedTargetsKey = '';
   function shareTargetRows() {
-    return [...(store.lists.people || []), ...(store.lists.groups || []).map(g => ({...g, group: true}))]
-      .filter(p => p.id && p.display_name).sort((a, b) => (b.last?.timestamp || 0) - (a.last?.timestamp || 0)).slice(0, SHARE_TARGETS)
-      .map(p => ({id: p.id, name: p.display_name, detail: p.group || listKey(p) === 'groups' ? 'Group' : networksOf(p).map(cap).join(' · ')}));
+    return recentSharePeople([...(store.lists.people || []), ...(store.lists.groups || []).map(g => ({...g, group: true}))])
+      .filter(p => p.id && p.display_name).slice(0, SHARE_TARGETS)
+      .map(p => ({id: p.id, name: p.display_name, lastActivity: p.last?.timestamp || 0, detail: p.group || listKey(p) === 'groups' ? 'Group' : networksOf(p).map(cap).join(' · ')}));
   }
   function shareTargets() {
     const share = window.WizardApp?.share; if (!share?.targets) return;
@@ -1344,20 +4361,21 @@
     s.drafts[id] = had ? had + '\n\n' + text : text; saveDrafts(); hold();
   }
   async function receiveShare(item) {
-    const text = sharedText(item), image = item.kind === 'image' && item.file && item.file.type?.startsWith('image/');
+    const text = sharedText(item), image = item.kind === 'image' && item.file?.type?.startsWith('image/');
     if (!s.ready || (!text && !image) || item.kind === 'file') return false; // stays pending in Wizard; check() runs again once unlocked
     if (s.overlay) closeOverlay();
     if (s.tab === 'messenger' || s.search != null) switchTab('people');
     if (image) {
+      // A shared photo is staged in the chat's photo tray (the same path as the + picker); the owner reviews and sends.
       const place = async id => {
         if (s.person !== id || view.id !== id || !store.threads[id]) await openPerson(id);
-        if (!s.ready || s.person !== id || view.id !== id || !await view.stagePhotos?.([item.file])) return false;
+        if (!s.ready || s.person !== id || view.id !== id || !await view.stageFiles?.([item.file])) return false;
         if (text) { placeShared(id, text); view.draft.value = s.drafts[id]; view.grow(); }
-        return true; // stagePhotos painted the existing multi-photo tray; never sends
+        return true;
       };
       return item.target ? place(item.target) : newChat('', place);
     }
-    if (item.target) { placeShared(item.target, text); await openPerson(item.target); return true; }
+    if (item.target) { placeShared(item.target, text); openPerson(item.target); return true; }
     if (s.person) { s.person = null; view.id = null; inChat(false); renderList(); }
     return newChat(text); // settles once the owner picks someone (text in that composer) or closes the picker
   }
@@ -1365,27 +4383,30 @@
     try { window.WizardApp?.share?.receive?.({accepts: ['text', 'url', 'image'], receive: receiveShare}); } catch { /* standalone or an older Wizard: no share sheet */ }
   }
   window.MessengerUnified = {
+    settings: accounts, showNative, returnNative, reactionChip, reactorList,
+    setNativeRows(rows) { nativeRows = rows; nativeUnread = rows.reduce((n, p) => n + (p.muted || p.low_priority || p.medium_priority || !(p.unread > 0) ? 0 : 1), 0); syncBadge(); if ((!s.native && !s.person) || split.on) drawList(); if (s.resumeNative && rows.some(p => p.group_id === s.resumeNative)) { const group = s.resumeNative; s.resumeNative = null; openNative(group); } },
     receiveShare, shareTargetRows,
     ask, toast, holdToMenu, actionMenu, muteAction, icon, messageGestures, messageSelection,
-    // The Messenger tab's own conversations (invites + unread chats) count on its tab and the desk badge.
+    // Compatibility hook; adapter rows normally supply private unread to the one Inbox badge.
     setNativeUnread(n) { n = Math.max(0, n | 0); if (n !== nativeUnread) { nativeUnread = n; syncBadge(); } },
-    mount(options) { api = options.api; if (options.csrf) csrf = options.csrf; try { s.drafts = JSON.parse(sessionStorage.getItem('messenger-unified-drafts') || '{}'); } catch { s.drafts = {}; } for (const el of $('inbox-tabs').querySelectorAll('[data-tab]')) el.onclick = () => (el.getAttribute('aria-selected') === 'true' && !s.person && s.search == null && !s.overlay) ? null : switchTab(el.dataset.tab); listenForShares(); },
-    // Saved chats paint at once; the session handshake and the server's copy follow behind.
+    mount(options) { api = options.api; native = options.native; if (options.csrf) csrf = options.csrf; s.drafts = loadDrafts(); saveDrafts(); s.draftIndex = {}; setTimeout(refreshDraftIndex, 1500); setInterval(refreshDraftIndex, 20000); document.addEventListener('visibilitychange', () => { if (!document.hidden) { refreshDraftIndex(); view.sd?.check?.(false); } }); for (const el of $('inbox-tabs').querySelectorAll('[data-tab]')) el.onclick = () => (el.getAttribute('aria-selected') === 'true' && !s.person && s.search == null && !s.overlay) ? null : switchTab(el.dataset.tab); listenForShares(); },
+    // Cached chats are restored only after ready account status, never over enrollment/unlock.
     paintSaved() {
-      if (s.ready || !restore()) return false; $('inbox-tabs').hidden = false;
+      if (!s.ready || !restore()) return false;
       resume(); return true;
     },
     authenticated() {
-      if (s.ready) return; s.ready = true; $('inbox-tabs').hidden = false;
+      if (s.ready) return; s.ready = true; restore(); loadContacts(); loadLabelCatalog();
       const painted = document.documentElement.dataset.inboxTab;
       if (!painted) resume();
+      else if (openLinkedChat()) { /* Wizard inbox deep link */ }
       else if (s.tab !== 'messenger') { if (s.person) openPerson(s.person); else freshen(s.tab === 'groups' ? 'groups' : 'people', s.epoch); }
-      resumeLogin(); if (store.seq) feed();
+      resumeLogin(); if (store.seq) feed(); openFromHash();
       shareTargets(); Promise.resolve(window.WizardApp?.share?.check?.()).catch(() => {}); // a share that waited for unlock
       // Groups count toward the badge before the Groups tab is ever opened.
       if (!store.lists.groups) call('groups').then(r => { if (s.ready && !store.lists.groups) { store.lists.groups = r.groups || []; persist(); } }).catch(() => {});
     },
-    active: () => s.ready && (s.tab !== 'messenger' || !!s.overlay), canGoBack: () => !!(s.overlay || s.person || s.search != null), back,
-    signout(wipe = false) { nativeUnread = 0; if (wipe) wipeCache(); sharedTargetsKey = ''; Promise.resolve(window.WizardApp?.share?.targets?.([])).catch(() => {}); feedCtl?.abort(); closeOverlay(); s.ready = false; s.epoch++; inChat(false); Object.assign(store, {seq: 0, lists: {people: null, groups: null}, threads: {}, typing: {}}); for (const k in unreadById) delete unreadById[k]; syncBadge(); $('inbox-tabs').hidden = true; $('unified-inbox').hidden = true; $('unified-inbox').replaceChildren(); delete document.documentElement.dataset.inboxTab; }
+    active: () => s.ready && (!s.native || !!s.overlay), canGoBack: () => !!(s.overlay || s.person || s.search != null || s.low || s.seg === 'medium' || detailOpen()), back,
+    signout(wipe = false) { clearTimeout(searchTimer); searchGeneration++; s.search = null; Object.assign(searchView, {query: null, rows: [], cursor: null, loading: false}); nativeUnread = 0; nativeRows = []; sharedTargetsKey = ''; Promise.resolve(window.WizardApp?.share?.targets?.([])).catch(() => {}); s.native = false; s.nativeGroup = null; s.resumeNative = null; delete document.documentElement.dataset.privateView; if (wipe) wipeCache(); feedCtl?.abort(); closeOverlay(); s.ready = false; s.epoch++; inChat(false); Object.assign(store, {seq: 0, lists: {people: null, groups: null}, threads: {}, typing: {}}); for (const k in unreadById) delete unreadById[k]; syncBadge(); $('inbox-tabs').hidden = true; split.threadGen++; split.listGen++; $('unified-inbox').hidden = true; $('unified-inbox').replaceChildren(); delete document.documentElement.dataset.inboxTab; }
   };
 })();

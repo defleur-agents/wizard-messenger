@@ -1,0 +1,196 @@
+{
+  "frozen": {
+    "config_digest": "sha256:14f0f9454b11cb334dc165abe55c6ac30af896abd2ddb5c2e1ed137a8027f6ba",
+    "manifest_digest": "sha256:b4b77ccefa1bc1647336f6aa8fc8d675359d311080ecbd7421d805e4066775bb",
+    "raw_config": {
+      "architecture": "amd64",
+      "config": {
+        "ArgsEscaped": true,
+        "Cmd": [
+          "/docker-run.sh"
+        ],
+        "Env": [
+          "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "UID=1337",
+          "GID=1337",
+          "BRIDGEV2=1"
+        ],
+        "Labels": {
+          "org.opencontainers.image.licenses": "AGPL-3.0-or-later",
+          "org.opencontainers.image.revision": "a23fd8e26a7205f861a409681de4437f7394a386",
+          "org.opencontainers.image.source": "https://github.com/humanitylabs-org/wizard-messenger",
+          "org.wizard.signal.patch": "native-albums1",
+          "org.wizard.signal.upstream": "d129f0ecc6bd29cfb5e54b18e025bd0c8a20a4bf"
+        },
+        "Volumes": {
+          "/data": {}
+        },
+        "WorkingDir": "/data"
+      },
+      "created": "2026-11-05T06:32:24.758881527Z",
+      "history": [
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-09-17T20:37:20.889221879Z",
+          "created_by": "ADD alpine-minirootfs-3.24.2-x86_64.tar.gz / # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-09-17T20:37:20.889221879Z",
+          "created_by": "CMD [\"/bin/sh\"]",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-09-18T04:07:00.458319809+03:00",
+          "created_by": "ENV UID=1337 GID=1337",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-09-18T04:07:00.458319809+03:00",
+          "created_by": "RUN /bin/sh -c apk add --no-cache ffmpeg su-exec ca-certificates bash jq curl yq-go # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-09-18T04:07:00.458319809+03:00",
+          "created_by": "ARG EXECUTABLE=./mautrix-signal",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-16T18:23:44.30358168+03:00",
+          "created_by": "COPY ./mautrix-signal /usr/bin/mautrix-signal # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-16T18:23:44.526045108+03:00",
+          "created_by": "COPY ./docker-run.sh /docker-run.sh # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-16T18:23:44.526045108+03:00",
+          "created_by": "ENV BRIDGEV2=1",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-16T18:23:44.526045108+03:00",
+          "created_by": "VOLUME [/data]",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-16T18:23:45.306446649+03:00",
+          "created_by": "WORKDIR /data"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-10-16T18:23:45.306446649+03:00",
+          "created_by": "CMD [\"/docker-run.sh\"]",
+          "empty_layer": true
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-11-05T06:32:24.485778066Z",
+          "created_by": "RUN /bin/sh -c apk add --no-cache olm=3.2.16-r2 # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-11-05T06:32:24.577828502Z",
+          "created_by": "COPY /build/mautrix-signal /usr/bin/mautrix-signal # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-11-05T06:32:24.59130981Z",
+          "created_by": "COPY /proof /usr/share/wizard-signal-albums # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-11-05T06:32:24.758881527Z",
+          "created_by": "RUN /bin/sh -c ldd /usr/bin/mautrix-signal && /usr/bin/mautrix-signal --version # buildkit"
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-11-05T06:32:24.758881527Z",
+          "created_by": "LABEL org.opencontainers.image.source=https://github.com/humanitylabs-org/wizard-messenger org.opencontainers.image.licenses=AGPL-3.0-or-later org.wizard.signal.upstream=d129f0ecc6bd29cfb5e54b18e025bd0c8a20a4bf org.wizard.signal.patch=native-albums1",
+          "empty_layer": true
+        }
+      ],
+      "os": "linux",
+      "rootfs": {
+        "diff_ids": [
+          "sha256:74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711",
+          "sha256:8a1f9b8ed1a6ccf57b6552d6870b943143f115e6991783c08af54f45fd98c99b",
+          "sha256:2bb1428bddca033df9d06fa1178a8d48a105490495540dc09bfb4e08570ed806",
+          "sha256:59966832961d060bd3ae0f518bc8cdcc98ae0333550a31d50885feb3f6f53495",
+          "sha256:447c253f20532d807d18efb02ad512e815ed5d9ae6ea55d064cb1bc4bada8655",
+          "sha256:7b9d14c6cdee850d63ba1ca9d88afe4d58752c1a9d1be489d75ee376c2d1eb7e",
+          "sha256:8f33066fefd657dccd9ae1d6c49b8ebfab51615532eb000468cbca6059ded1cb",
+          "sha256:0e094c2b3caf0363551228b8ab4766450f66d10c1fdfceaf30fa03439a0bb0b7",
+          "sha256:d0ef0946312bed30407d25abfd20da9f5c196387ef17b5f7390238b79de78277"
+        ],
+        "type": "layers"
+      }
+    }
+  },
+  "loaded": {
+    "Architecture": "amd64",
+    "Config": {
+      "ArgsEscaped": true,
+      "AttachStderr": false,
+      "AttachStdin": false,
+      "AttachStdout": false,
+      "Cmd": [
+        "/docker-run.sh"
+      ],
+      "Domainname": "",
+      "Entrypoint": null,
+      "Env": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "UID=1337",
+        "GID=1337",
+        "BRIDGEV2=1"
+      ],
+      "Hostname": "",
+      "Image": "",
+      "Labels": {
+        "org.opencontainers.image.licenses": "AGPL-3.0-or-later",
+        "org.opencontainers.image.revision": "a23fd8e26a7205f861a409681de4437f7394a386",
+        "org.opencontainers.image.source": "https://github.com/humanitylabs-org/wizard-messenger",
+        "org.wizard.signal.patch": "native-albums1",
+        "org.wizard.signal.upstream": "d129f0ecc6bd29cfb5e54b18e025bd0c8a20a4bf"
+      },
+      "OnBuild": null,
+      "OpenStdin": false,
+      "StdinOnce": false,
+      "Tty": false,
+      "User": "",
+      "Volumes": {
+        "/data": {}
+      },
+      "WorkingDir": "/data"
+    },
+    "Id": "sha256:14f0f9454b11cb334dc165abe55c6ac30af896abd2ddb5c2e1ed137a8027f6ba",
+    "Os": "linux",
+    "RootFS": {
+      "Layers": [
+        "sha256:74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711",
+        "sha256:8a1f9b8ed1a6ccf57b6552d6870b943143f115e6991783c08af54f45fd98c99b",
+        "sha256:2bb1428bddca033df9d06fa1178a8d48a105490495540dc09bfb4e08570ed806",
+        "sha256:59966832961d060bd3ae0f518bc8cdcc98ae0333550a31d50885feb3f6f53495",
+        "sha256:447c253f20532d807d18efb02ad512e815ed5d9ae6ea55d064cb1bc4bada8655",
+        "sha256:7b9d14c6cdee850d63ba1ca9d88afe4d58752c1a9d1be489d75ee376c2d1eb7e",
+        "sha256:8f33066fefd657dccd9ae1d6c49b8ebfab51615532eb000468cbca6059ded1cb",
+        "sha256:0e094c2b3caf0363551228b8ab4766450f66d10c1fdfceaf30fa03439a0bb0b7",
+        "sha256:d0ef0946312bed30407d25abfd20da9f5c196387ef17b5f7390238b79de78277"
+      ],
+      "Type": "layers"
+    }
+  },
+  "provenance": {
+    "archive_sha256": "556ccc992151093869d7d16493ee81a2478415278de9bbbe162be2676cde3312",
+    "legacy_layer_paths_equal": true,
+    "observation": "forum read-only exact imported base; no load/build/test"
+  }
+}

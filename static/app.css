@@ -1,15 +1,21 @@
 /* Messenger look: Signal-inspired, dark, flat and quiet. Layout stays local. */
 :root {
-  --bg: #121214; --surface: #1b1b1e; --raised: #26262a; --raised-2: #313136;
-  --ink: #ececee; --ink-2: #a4a5ab; --ink-3: #76777d;
-  --line: rgba(255,255,255,.07); --line-2: rgba(255,255,255,.12);
-  --accent: #2c6bed; --accent-press: #2559c8; --accent-soft: rgba(44,107,237,.16); --on-accent: #fff;
+  --bg: var(--wz-canvas, #121214); --surface: var(--wz-surface, #1b1b1e); --raised: var(--wz-surface-raised, #26262a); --raised-2: var(--wz-surface-raised, #313136);
+  --ink: var(--wz-text, #ececee); --ink-2: var(--wz-text-secondary, #a4a5ab); --ink-3: var(--wz-text-muted, #76777d);
+  --line: var(--wz-border, rgba(255,255,255,.07)); --line-2: var(--wz-border, rgba(255,255,255,.12));
+  --accent: var(--wz-accent, #2c6bed); --accent-press: #2559c8; --accent-soft: rgba(44,107,237,.16); --on-accent: var(--wz-on-accent, #fff);
   --bubble-in: #2a2a2e; --bubble-out: #2c6bed;
   --ok: #4fc28a; --warn: #f2b74b; --err: #ff6b6b;
   --ease: cubic-bezier(.2,.9,.25,1);
   /* Legacy names still used by older rules. */
   --glass: var(--surface); --glass-2: var(--raised); --violet: var(--accent); --violet-2: #7ea4f6;
   --msg-bubble-out: var(--bubble-out); --msg-bubble-in: var(--bubble-in); --msg-unread: var(--accent); --msg-ok: var(--ok); --msg-warn: var(--warn); --msg-err: var(--err); --cyan: #7ea4f6;
+  /* Anything that floats over content and carries text (sheets, menus, toasts, sticky labels) is fully opaque,
+     never see-through: James, 28 Oct 2026. --wz-surface/--wz-overlay are translucent inside the shell, so the
+     panel uses the shared opaque role, or the skin tint mixed into its opaque base. */
+  --panel-solid: var(--wz-panel, var(--wz-base, var(--bg)));
+  --panel-tint: color-mix(in srgb, var(--ink) 7%, var(--panel-solid));
+  --panel-raised-tint: var(--wz-panel-raised, color-mix(in srgb, var(--ink) 12%, var(--panel-solid)));
   color-scheme: dark;
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -52,6 +58,8 @@ h2 { font-size: 17px; font-weight: 600; }
 #gate-description { color: var(--ink-2); margin-top: 8px; }
 .password-field { position: relative; }
 .password-field input { padding-right: 72px; }
+#remember-wizard-label:not([hidden]) { display: flex; align-items: flex-start; gap: 10px; min-height: 44px; line-height: 1.5; }
+#remember-wizard { width: 20px; height: 20px; min-height: 20px; padding: 0; margin: 0; flex: 0 0 20px; }
 .password-field button { position: absolute; right: 2px; top: 2px; font-size: 13px; color: var(--ink-2); }
 .privacy { text-align: center; margin-top: 16px; }
 #setup-error { margin-top: 12px; }
@@ -130,7 +138,7 @@ button.pending::before { content: ''; display: inline-block; width: 12px; height
 
 /* Sheets */
 .sheet-layer { position: absolute; inset: 0; z-index: 5; display: flex; align-items: flex-end; justify-content: center; background: rgba(0,0,0,.82); animation: sheet-in 140ms var(--ease); }
-.sheet { width: 100%; max-width: 480px; max-height: 92%; overflow-y: auto; padding: 8px 20px max(24px,env(safe-area-inset-bottom)); border-radius: 20px 20px 0 0; background: var(--surface); animation: sheet-up 200ms var(--ease); }
+.sheet { width: 100%; max-width: 480px; max-height: 92%; overflow-y: auto; padding: 8px 20px max(24px,env(safe-area-inset-bottom)); border-radius: 20px 20px 0 0; background: linear-gradient(var(--panel-tint), var(--panel-tint)) var(--panel-solid); animation: sheet-up 200ms var(--ease); }
 .grabber { display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--raised-2); margin: 2px auto 6px; }
 .sheet-header { display: flex; align-items: center; justify-content: space-between; margin: 0 -8px 4px 0; }
 .address-card { display: block; font: 13px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; background: var(--raised); border-radius: 12px; padding: 14px; margin-top: 16px; overflow-wrap: anywhere; white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
@@ -159,3 +167,17 @@ button.pending::before { content: ''; display: inline-block; width: 12px; height
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* Message actions: reply quote, tombstone, reactions and the reply/edit bar above the composer. */
+.bubble .u-quote { cursor: pointer; }
+.bubble.deleted { font-style: italic; opacity: .7; }
+.message .u-reactions { margin: -4px 6px 2px; }
+.message.sent .u-reactions { justify-content: flex-end; }
+.compose-bar { padding: 6px 12px 0; }
+.compose-bar .compose-cancel { flex: none; }
+.message.flash .bubble { outline: 2px solid var(--accent); outline-offset: 2px; }
+.bubble-edited { margin-left: 8px; font-size: 11px; font-style: italic; opacity: .7; white-space: nowrap; }
+/* Opaque overlay material (served with the pinned view, so it also covers unified.css until the image catches up). */
+.u-overlay > .u-sheet, .sheet-layer > .sheet { background: linear-gradient(var(--panel-tint), var(--panel-tint)) var(--panel-solid); }
+#messenger .u-toast { background: linear-gradient(var(--panel-raised-tint), var(--panel-raised-tint)) var(--panel-solid); }
+#messenger .u-day { background: linear-gradient(var(--panel-tint), var(--panel-tint)) var(--panel-solid); }

@@ -26,7 +26,8 @@ class PeopleTests(unittest.TestCase):
         self.store.add_message('$2', new, 'me', True, 'fresh', 200)
         chats = self.store.people()
         self.assertEqual([p['display_name'] for p in chats], ['Amy', 'Zed'])
-        self.assertEqual(chats[0]['last'], {'text': 'fresh', 'outgoing': True, 'sender': 'me', 'timestamp': 200})
+        # Outgoing lines never expose the owner's stored name/ghost as the sender.
+        self.assertEqual(chats[0]['last'], {'text': 'fresh', 'outgoing': True, 'sender': 'You', 'timestamp': 200})
         self.assertEqual([p['display_name'] for p in self.store.people(chats=False)], ['Amy', 'Bob', 'Zed'])
 
     def test_all_deleted_chats_disappear_and_new_messages_restore_them(self):
@@ -58,6 +59,110 @@ class PeopleTests(unittest.TestCase):
         with self.assertRaises(Exception):
             self.store.update(a['person_id'], {'muted': 'yes'})
 
+    def test_low_priority_persists_keeps_unread_and_never_notifies(self):
+        a = self.store.identity('telegram', '!deals', 'Deals', 'group')
+        b = self.store.identity('telegram', '!amy', 'Amy')
+        self.store.push_enabled = True
+        self.store.add_message('$d1', a, 'shop', False, 'sale', int(time.time() * 1000), push_live=True)
+        before = self.store.seq
+        self.store.update(a['person_id'], {'low_priority': True})
+        self.assertGreater(self.store.seq, before)  # the change feed carries it to every open view
+        p = self.store.people('group')[0]
+        self.assertEqual((p['low_priority'], p['unread']), (1, 1))
+        # A new message keeps it in Low priority (no un-archiving) and queues no notification.
+        self.store.add_message('$d2', a, 'shop', False, 'another sale', int(time.time() * 1000), push_live=True)
+        self.store.add_message('$b1', b, 'amy', False, 'hi', int(time.time() * 1000), push_live=True)
+        self.store.update(b['person_id'], {'muted': True})
+        self.store.add_message('$b2', b, 'amy', False, 'muted too', int(time.time() * 1000), push_live=True)
+        self.assertEqual(self.store.people('group')[0]['low_priority'], 1)
+        with self.store.db() as db:
+            queued = sorted(r[0] for r in db.execute('SELECT message FROM push_intent'))
+        self.assertEqual(queued, ['matrix:$b1', 'matrix:$d1'])
+        self.store.update(a['person_id'], {'low_priority': False})
+        self.assertEqual(self.store.people('group')[0]['low_priority'], 0)
+        with self.assertRaises(Exception):
+            self.store.update(a['person_id'], {'low_priority': 1})
+
+    def test_medium_priority_stays_listed_never_notifies_and_excludes_low(self):
+        a = self.store.identity('telegram', '!news', 'News', 'group')
+        b = self.store.identity('telegram', '!amy', 'Amy')
+        self.store.push_enabled = True
+        before = self.store.seq
+        self.store.update(a['person_id'], {'medium_priority': True})
+        self.assertGreater(self.store.seq, before)
+        self.store.add_message('$n1', a, 'news', False, 'headline', int(time.time() * 1000), push_live=True)
+        self.store.add_message('$a1', b, 'amy', False, 'hi', int(time.time() * 1000), push_live=True)
+        p = self.store.people('group')[0]
+        # Still in the list with its unread count, but no push intent was queued for it.
+        self.assertEqual((p['medium_priority'], p['low_priority'], p['unread']), (1, 0, 1))
+        with self.store.db() as db:
+            queued = sorted(r[0] for r in db.execute('SELECT message FROM push_intent'))
+        self.assertEqual(queued, ['matrix:$a1'])
+        # One priority at a time: Low clears Medium, Medium clears Low.
+        self.store.update(a['person_id'], {'low_priority': True})
+        p = self.store.people('group')[0]
+        self.assertEqual((p['medium_priority'], p['low_priority']), (0, 1))
+        self.store.update(a['person_id'], {'medium_priority': True})
+        p = self.store.people('group')[0]
+        self.assertEqual((p['medium_priority'], p['low_priority']), (1, 0))
+        self.store.update(a['person_id'], {'medium_priority': False, 'low_priority': False})
+        p = self.store.people('group')[0]
+        self.assertEqual((p['medium_priority'], p['low_priority']), (0, 0))
+        with self.assertRaises(Exception):
+            self.store.update(a['person_id'], {'medium_priority': 'yes'})
+        with self.assertRaises(Exception):
+            self.store.update(a['person_id'], {'medium_priority': True, 'low_priority': True})
+
+    def test_link_previews_kept_without_mxc_leaving(self):
+        from unified import link_previews
+        got = link_previews({'com.beeper.linkpreviews': [{'matched_url': 'https://ex.com/a', 'og:title': 'T', 'og:image': 'mxc://s/abc'}, {'matched_url': 'javascript:x', 'og:title': 'bad'}]})
+        self.assertEqual(len(got['links']), 1)
+        self.assertEqual(got['links'][0]['mxc'], 'mxc://s/abc')
+        a = self.store.identity('whatsapp', '!l', 'Lia')
+        self.store.add_message('$l', a, 'x', False, 'see https://ex.com/a', 5, media=got)
+        row = self.store.messages(a['person_id'])[0] if hasattr(self.store, 'messages') else None
+        if row is not None:
+            self.assertNotIn('mxc', json.dumps(row.get('links')))
+            self.assertTrue(row['links'][0]['image'])
+
+    def test_mark_unread_makes_newest_incoming_unread(self):
+        a = self.store.identity('whatsapp', '!u', 'Uma')
+        self.store.add_message('$1', a, 'x', False, 'hi', 10)
+        self.store.add_message('$2', a, 'me', True, 'yo', 20)
+        with self.store.db() as db:
+            db.execute('UPDATE identity SET last_read_ts=20 WHERE id=?', (a['id'],))
+        unread = lambda: next(p for p in self.store.people('person') if p['id'] == a['person_id'])['unread']
+        self.assertEqual(unread(), 0)
+        self.store.mark_unread(a['person_id'])
+        self.assertEqual(unread(), 1)
+
+    def test_merge_suggestions_cross_network_only_and_dismissable(self):
+        a = self.store.identity('whatsapp', '!a', 'Ana Souza')
+        b = self.store.identity('instagram', '!b', 'ana souza')
+        self.store.identity('whatsapp', '!c', 'Ana Souza')  # same network twice: never paired with the first
+        for ident, ts in ((a, 1), (b, 2)):
+            self.store.add_message('$' + ident['address'], ident, 'x', False, 'hi', ts)
+        rows = self.store.merge_suggestions()['suggestions']
+        self.assertEqual(len(rows), 1)
+        nets = [p['networks'] for p in rows[0]['people']]
+        self.assertEqual(sorted(n[0] for n in nets), ['instagram', 'whatsapp'])
+        self.store.dismiss_merge(rows[0]['id'])
+        self.assertEqual(self.store.merge_suggestions()['suggestions'], [])
+
+    def test_group_kind_upgrade_and_network_tags_dropped(self):
+        a = self.store.identity('whatsapp', '!g', 'Book club (WA)')
+        self.assertEqual(a['label'], 'Book club')
+        self.assertEqual(self.store.identity('whatsapp', '!g', 'Book club', 'group')['kind'], 'group')
+        b = self.store.identity('whatsapp', '!p', 'Ana')
+        self.store.refresh_label(b, 'Ana Souza (WA)')
+        self.assertEqual(self.store.person(b['person_id'])['display_name'], 'Ana Souza')
+        with self.store.db() as db:
+            db.execute("UPDATE person SET display_name='Kim (WA)' WHERE id=?", (b['person_id'],))
+            db.execute("INSERT OR REPLACE INTO room_meta(room,json) VALUES('!p', ?)", (json.dumps({'kind': 'group'}),))
+        self.store.migrate()
+        self.assertEqual(self.store.person(b['person_id'])['display_name'], 'Kim')
+        self.assertEqual(self.store.person(b['person_id'])['identities'][0]['kind'], 'group')
+
     def test_auto_create_deduplicates_and_preserves_rename(self):
         a = self.store.identity('telegram', '!one', 'Alice')
         self.store.update(a['person_id'], {'display_name': 'Alice Thai', 'language': 'th'})
@@ -86,7 +191,80 @@ class PeopleTests(unittest.TestCase):
         self.store.labels(group['id'], ['Family', 'Family', 'Friends'])
         self.assertEqual(self.store.people('group', chats=False)[0]['labels'], ['Family', 'Friends'])
         with self.assertRaises(EngineError): self.store.merge(person['person_id'], group['person_id'])
-        with self.assertRaises(EngineError): self.store.labels(person['id'], ['Family'])
+        self.assertEqual(self.store.labels(person['id'], ['Family'])['labels'], ['Family'])  # people carry labels too
+        with self.assertRaises(EngineError): self.store.labels('missing', ['Family'])
+
+    def test_label_catalogue_seeds_once_and_lists_empty_labels(self):
+        names = lambda: [x['name'] for x in self.store.label_catalog()['labels']]
+        self.assertEqual(names(), ['WizardOS'])  # one-time seed, empty and catalogued
+        self.assertEqual(self.store.label_catalog()['labels'][0]['chats'], 0)
+        self.store.delete_label('wizardos')  # case-insensitive
+        self.assertEqual(names(), [])
+        self.assertEqual(PeopleStore(self.store.path).label_catalog()['labels'], [])  # a deleted seed never returns on restart
+
+    def test_label_create_rename_delete_and_validation(self):
+        made = self.store.create_label('  Family   trip ')
+        self.assertEqual(made['label'], 'Family trip')
+        self.assertEqual(self.store.create_label('family TRIP')['label'], 'Family trip')  # no duplicates
+        self.assertEqual(sorted(x['name'] for x in made['labels']), ['Family trip', 'WizardOS'])
+        for bad in ('', '   ', 'x' * 65, 5, None, 'a\x01b'):
+            with self.assertRaises(EngineError): self.store.create_label(bad)
+        with self.assertRaises(EngineError): self.store.rename_label('Nope', 'X')
+        with self.assertRaises(EngineError): self.store.delete_label('Nope')
+        renamed = self.store.rename_label('Family trip', 'Trip')
+        self.assertEqual(sorted(x['name'] for x in renamed['labels']), ['Trip', 'WizardOS'])
+
+    def test_any_chat_incl_people_carries_labels_and_merged_person_applies_to_every_identity(self):
+        group = self.store.identity('telegram', '!g', 'Team', 'group')
+        a = self.store.identity('telegram', '!one', 'Alice')
+        b = self.store.identity('messenger', 'abc', 'Alice 2')
+        solo = self.store.identity('signal', '+1', 'Bob')
+        for i, ident in enumerate((group, a, b, solo)): self.store.add_message('$%d' % i, ident, 'x', False, 'hi', 100 + i)
+        merged = self.store.merge(a['person_id'], b['person_id'])
+        before = self.store.seq
+        out = self.store.person_labels(merged['id'], ['WizardOS', 'wizardos', 'Ideas'])
+        self.assertEqual(out['labels'], ['Ideas', 'WizardOS'])
+        self.assertGreater(self.store.seq, before)  # open views are told
+        self.assertEqual([x['name'] for x in out['catalog']], ['Ideas', 'WizardOS'])  # the catalogue rides along
+        self.store.person_labels(group['person_id'], ['WizardOS'])
+        self.store.person_labels(solo['person_id'], ['WizardOS'])
+        by_name = {p['display_name']: p for p in self.store.people() + self.store.people('group')}
+        self.assertEqual(by_name['Alice 2']['labels'] if 'Alice 2' in by_name else by_name['Alice']['labels'], ['Ideas', 'WizardOS'])
+        self.assertEqual(by_name['Team']['labels'], ['WizardOS'])
+        self.assertEqual(by_name['Bob']['labels'], ['WizardOS'])
+        with self.store.db() as db:  # every identity of the merged person
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM room_label WHERE label=?', ('Ideas',)).fetchone()[0], 2)
+        counts = {x['name']: x['chats'] for x in self.store.label_catalog()['labels']}
+        self.assertEqual(counts, {'Ideas': 1, 'WizardOS': 3})  # merged person counts once
+        with self.assertRaises(EngineError): self.store.person_labels('nobody', ['A'])
+        with self.assertRaises(EngineError): self.store.person_labels(solo['person_id'], ['L%d' % n for n in range(21)])
+        self.assertEqual(self.store.person_labels(solo['person_id'], [])['labels'], [])  # clearing keeps the label itself
+        self.assertIn('WizardOS', [x['name'] for x in self.store.label_catalog()['labels']])
+
+    def test_rename_moves_chats_merge_on_collision_and_delete_keeps_chats(self):
+        a = self.store.identity('telegram', '!a', 'A'); b = self.store.identity('telegram', '!b', 'B')
+        for i, ident in enumerate((a, b)): self.store.add_message('$%d' % i, ident, 'x', False, 'hi', 100 + i)
+        self.store.person_labels(a['person_id'], ['Old']); self.store.person_labels(b['person_id'], ['Other'])
+        self.store.rename_label('Old', 'New')
+        labels = lambda pid: next(p for p in self.store.people() if p['id'] == pid)['labels']
+        self.assertEqual(labels(a['person_id']), ['New'])
+        out = self.store.rename_label('New', 'other')  # onto an existing label: merged into it
+        self.assertEqual(out['label'], 'Other')
+        self.assertEqual((labels(a['person_id']), labels(b['person_id'])), (['Other'], ['Other']))
+        self.assertEqual({x['name']: x['chats'] for x in out['labels']}['Other'], 2)
+        self.store.delete_label('Other')
+        self.assertEqual((labels(a['person_id']), labels(b['person_id'])), ([], []))
+        self.assertEqual(len(self.store.people()), 2)  # chats and messages untouched
+        self.assertEqual(len(self.store.messages(a['person_id'])), 1)
+
+    def test_migration_keeps_existing_labels_and_data(self):
+        group = self.store.identity('telegram', '!old', 'Old group', 'group')
+        with self.store.db() as db:  # an install from before the catalogue: legacy room_label rows, no catalogue
+            db.execute('DROP TABLE label_catalog'); db.execute("DELETE FROM kv WHERE key='label_seed_v1'")
+            db.execute('INSERT INTO room_label VALUES (?,?)', (group['id'], 'Legacy'))
+        again = PeopleStore(self.store.path)
+        self.assertEqual(sorted(x['name'] for x in again.label_catalog()['labels']), ['Legacy', 'WizardOS'])
+        self.assertEqual(again.people('group', chats=False)[0]['labels'], ['Legacy'])
 
     def test_identity_cannot_be_assigned_to_unrelated_person(self):
         a = self.store.identity('telegram', '!a', 'A')
@@ -143,6 +321,28 @@ class UnifiedTests(unittest.TestCase):
         self.inbox.store.add_message('$voice', self.a, 'alice', False, '', 101, msgtype='m.audio', media={'voice': True})
         for ident, value in [('$missing', 'x'), ('$text', 'x'), ('$voice', ''), ('$voice', 'x' * 100001), ('$voice', None)]:
             with self.assertRaises(EngineError): self.inbox.dispatch('POST', '/api/unified/messages/' + ident + '/transcript', {'text': value})
+
+    def test_my_qr_codes_follow_connected_accounts_and_keep_extras(self):
+        self.inbox.own_profiles = lambda: [
+            ('telegram', {'id': '1', 'state': {'state_event': 'CONNECTED'}, 'profile': {'username': 'JamesDeFleur', 'name': 'James'}}),
+            ('whatsapp', {'id': '15550100', 'state': {'state_event': 'CONNECTED'}, 'profile': {}}),
+            ('instagram', {'id': '9', 'state': {'state_event': 'CONNECTED'}, 'profile': {'username': 'james.df'}}),
+            ('line', {'id': 'u1', 'state': {'state_event': 'CONNECTED'}, 'profile': {}}),
+            ('twitter', {'id': '7', 'state': {'state_event': 'BAD_CREDENTIALS'}, 'profile': {'username': 'gone'}})]
+        first = self.inbox.dispatch('GET', '/api/unified/qr-codes', {})
+        self.assertEqual([(c['network'], c['value']) for c in first['codes']], [('telegram', 'JamesDeFleur'), ('whatsapp', '+15550100'), ('instagram', 'james.df')])
+        self.assertTrue(all(c['auto'] for c in first['codes']))
+        self.assertEqual(first['name'], 'James')
+        # Extras persist; a duplicate of a connected account and auto rows are never stored.
+        codes = first['codes'] + [{'network': 'telegram', 'value': ' @JamesDeFleur ', 'label': ''}, {'network': 'email', 'value': 'j@x.io', 'label': 'Work'}]
+        out = self.inbox.dispatch('POST', '/api/unified/qr-codes', {'codes': codes, 'hidden': ['instagram:james.df']})
+        self.assertEqual([(c['network'], c['value']) for c in out['codes']], [('telegram', 'JamesDeFleur'), ('whatsapp', '+15550100'), ('email', 'j@x.io')])
+        self.assertEqual(out['hidden'], ['instagram:james.df'])
+        again = UnifiedInbox(self.tmp.name, self.engine)
+        again.own_profiles = lambda: []
+        self.assertEqual(again.dispatch('GET', '/api/unified/qr-codes', {})['codes'], [{'network': 'email', 'value': 'j@x.io', 'label': 'Work'}])
+        for bad in [None, [{'network': 'myspace', 'value': 'x'}], [{'network': 'x', 'value': ''}], [{'network': 'x', 'value': 'a', 'label': 'l' * 81}], [{'network': 'x', 'value': 'a'}] * 25]:
+            with self.assertRaises(EngineError): self.inbox.dispatch('POST', '/api/unified/qr-codes', {'codes': bad})
 
     def test_dormant_status_does_not_contact_telegram(self):
         with patch('unified.http') as request:
@@ -282,7 +482,8 @@ class UnifiedTests(unittest.TestCase):
         with patch.dict('os.environ', {'TELEGRAM_API_ID': '12345', 'TELEGRAM_API_HASH': 'a' * 32}):
             unified_setup.setup(self.tmp.name)
         config = yaml.safe_load((Path(self.tmp.name) / 'telegram' / 'config.yaml').read_text())
-        self.assertEqual((config['backfill']['enabled'], config['backfill']['max_initial_messages']), (True, 50))
+        self.assertEqual((config['backfill']['enabled'], config['backfill']['max_initial_messages']), (True, 200))
+        self.assertFalse(config['backfill']['queue']['enabled'])
         self.assertEqual(config['network']['sync']['login_sync_limit'], 50)
         self.assertFalse(config['backfill']['queue']['enabled'])
         self.assertTrue(config['double_puppet']['secrets']['messenger.internal'].startswith('as_token:'))
@@ -425,7 +626,7 @@ class SignalMvpTests(unittest.TestCase):
         rows = {m['id']: m for m in self.inbox.timeline(self.pid)['messages']}
         self.assertEqual(rows['$r']['original'], 'answer')
         self.assertEqual(rows['$r']['reply']['text'], 'question!')
-        self.assertEqual(rows['$q']['reactions'], [{'key': '👍', 'count': 1, 'mine': False}])
+        self.assertEqual(rows['$q']['reactions'], [{'key': '👍', 'count': 1, 'mine': False, 'reactors': [], 'identities_complete': False}])
         self.assertTrue(rows['$q']['edited'])
         self.ingest(self.event('$x', {}, etype='m.room.redaction', redacts='$re'))
         self.ingest(self.event('$y', {}, etype='m.room.redaction', redacts='$q'))
@@ -439,7 +640,7 @@ class SignalMvpTests(unittest.TestCase):
         self.inbox.mx = Mock(side_effect=[{'event_id': '$r1'}, {}, {'event_id': '$r2'}, {}])
         self.inbox.react('$q', {'key': '👍'})
         out = self.inbox.react('$q', {'key': '❤️'})
-        self.assertEqual(out['message']['reactions'], [{'key': '❤️', 'count': 1, 'mine': True}])
+        self.assertEqual(out['message']['reactions'], [{'key': '❤️', 'count': 1, 'mine': True, 'reactors': [{'id': '@owner:messenger.internal', 'name': 'You', 'mine': True, 'avatar': None}], 'identities_complete': True}])
         self.assertIn('/redact/%24r1/', self.inbox.mx.call_args_list[1].args[0])
         self.inbox.react('$q', {'key': '❤️'})  # tapping the same one again removes it
         self.assertEqual(self.inbox.row('$q')['reactions'], [])
@@ -514,6 +715,146 @@ class SignalMvpTests(unittest.TestCase):
         self.assertIn('org.matrix.msc3245.voice', content)
         self.assertEqual(content['info']['duration'], 3000)
         self.assertTrue(out['message']['media']['voice'])
+
+    def file_upload(self, data=b'%PDF-1.7\ncontent', name='report.pdf'):
+        with patch.object(self.inbox, 'matrix_upload', return_value={'content_uri': 'mxc://messenger.internal/file'}) as upload:
+            result = self.inbox.dispatch('PUT', '/api/unified/people/%s/upload' % self.pid, {},
+                                         {'kind': ['file'], 'name': [name]}, data)
+        upload.assert_called_once_with(data, 'attachment', result['mime'])
+        return result
+
+    def test_james_any_file_pdf_upload_and_send(self):
+        up = self.file_upload(name='../../private\\..\\... report\x00  final.pdf')
+        self.assertEqual(set(up), {'upload_id', 'mime', 'size', 'name'})
+        self.assertEqual((up['name'], up['mime']), ('report final.pdf', 'application/pdf'))
+        self.inbox.mx = Mock(return_value={'event_id': '$file'})
+        out = self.inbox.send(self.pid, {'upload_id': up['upload_id'], 'client_id': 'file-12345678', 'media': {'w': 500, 'duration': 100}})
+        self.assertEqual(self.inbox.mx.call_args.args[2], {
+            'msgtype': 'm.file', 'body': 'report final.pdf', 'filename': 'report final.pdf',
+            'url': 'mxc://messenger.internal/file', 'info': {'mimetype': 'application/pdf', 'size': up['size']}})
+        stored = self.inbox.store.message('$file')
+        self.assertEqual(stored['msgtype'], 'm.file')
+        self.assertEqual(json.loads(stored['media']), {'mxc': 'mxc://messenger.internal/file', 'mime': 'application/pdf', 'size': up['size'], 'filename': up['name']})
+        self.assertEqual(out['message']['media']['filename'], up['name'])
+        self.assertNotIn('mxc', out['message']['media'])
+        self.assertNotIn(up['upload_id'], self.inbox.uploads)
+
+    def test_james_file_names_strip_paths_controls_and_keep_extension(self):
+        for name, want in [('../../etc/passwd', 'passwd'), ('C:\\private\\.secret\r\n\x7f\x85.pdf', 'secret.pdf'),
+                           ('... .hidden   name.pdf', 'hidden name.pdf'), ('\u202eevil\ud800.pdf', 'evil.pdf'),
+                           ('', 'file'), ('...\x00 ', 'file'), ('/tmp/', 'file'),
+                           ('a' * 200 + '.pdf', 'a' * 116 + '.pdf')]:
+            with self.subTest(name=repr(name)):
+                self.assertEqual(self.file_upload(name=name)['name'], want)
+        self.assertLessEqual(len(self.file_upload(name='a.' + 'x' * 200)['name']), 120)
+
+    def test_james_unknown_bytes_are_octet_stream_regardless_of_name(self):
+        self.assertEqual(self.file_upload(b'not a real PDF', 'looks.pdf')['mime'], 'application/octet-stream')
+        self.assertEqual(self.file_upload(b'PK\x03\x04zip', 'archive.zip')['mime'], 'application/zip')
+        self.assertEqual(self.file_upload(b'\x89PNG\r\n\x1a\nimage', 'pic.bin')['mime'], 'image/png')
+        with patch.object(self.inbox, 'matrix_upload', return_value={'content_uri': 'mxc://messenger.internal/file'}):
+            up = self.inbox.upload(self.pid, 'file', b'unknown')
+        self.assertEqual(up['name'], 'file')
+
+    def test_james_files_cannot_be_sent_as_photo_album_even_with_image_bytes(self):
+        file = self.file_upload(b'\x89PNG\r\n\x1a\nimage', 'pic.png')
+        with patch.object(self.inbox, 'matrix_upload', return_value={'content_uri': 'mxc://messenger.internal/photo'}):
+            photo = self.inbox.upload(self.pid, 'image', b'\x89PNG\r\n\x1a\nimage')
+        self.assertEqual(set(photo), {'upload_id', 'mime', 'size'})
+        self.inbox.mx = Mock()
+        with self.assertRaises(EngineError) as err:
+            self.inbox.send(self.pid, {'upload_ids': [photo['upload_id'], file['upload_id']], 'client_id': 'album-12345678'})
+        self.assertEqual((err.exception.code, err.exception.status), ('invalid_album', 400))
+        self.inbox.mx.assert_not_called()
+
+    def test_james_file_caption_follows_filename_and_retries_without_duplicates(self):
+        up = self.file_upload()
+        payload = {'upload_id': up['upload_id'], 'client_id': 'caption-12345678', 'text': 'Here is the report'}
+        self.inbox.mx = Mock(side_effect=[{'event_id': '$file'}, {'event_id': '$caption'}])
+        out = self.inbox.send(self.pid, payload)
+        self.assertEqual(self.inbox.mx.call_args_list[0].args[2]['body'], 'report.pdf')
+        self.assertEqual(self.inbox.mx.call_args_list[1].args[2], {'msgtype': 'm.text', 'body': payload['text']})
+        self.assertTrue(self.inbox.mx.call_args_list[1].args[0].endswith('/caption-12345678.caption'))
+        self.assertEqual([r['msgtype'] for r in out['messages']], ['m.file', 'm.text'])
+        self.assertEqual(self.inbox.store.message('$caption')['original'], payload['text'])
+        again = self.inbox.send(self.pid, payload)
+        self.assertEqual(again, out)
+        self.assertEqual(self.inbox.mx.call_count, 2)
+
+    def test_james_file_caption_failure_can_retry_after_sync_wins_receipt(self):
+        up = self.file_upload()
+        payload = {'upload_id': up['upload_id'], 'client_id': 'retry-12345678', 'text': 'Report'}
+        paths = []
+        fail_caption = True
+        def send(path, method, content):
+            paths.append(path)
+            caption = path.endswith('.caption')
+            if caption and fail_caption:
+                raise EngineError('upstream_unavailable', 'Unavailable', 503)
+            event = '$caption' if caption else '$file'
+            self.ingest(self.event(event, content, sender=self.inbox.owner))
+            return {'event_id': event}
+        self.inbox.mx = send
+        with self.assertRaises(EngineError): self.inbox.send(self.pid, payload)
+        self.assertIn(up['upload_id'], self.inbox.uploads)
+        fail_caption = False
+        out = self.inbox.send(self.pid, payload)
+        self.assertEqual(paths[:2], paths[2:])
+        self.assertEqual(self.inbox.send(self.pid, payload), out)
+        self.assertEqual(len(paths), 4)
+        self.assertEqual(len(self.inbox.timeline(self.pid)['messages']), 2)
+
+    def test_james_file_upload_limit_person_binding_expiry_and_networks(self):
+        self.inbox.matrix_upload = Mock(return_value={'content_uri': 'mxc://messenger.internal/file'})
+        with patch('unified.UPLOAD_MAX', 5):
+            self.inbox.upload(self.pid, 'file', b'12345', 'limit.bin')
+            for data in (b'', b'123456'):
+                with self.assertRaises(EngineError) as err: self.inbox.upload(self.pid, 'file', data)
+                self.assertEqual((err.exception.code, err.exception.status), ('too_large', 413))
+        for network in ('whatsapp', 'signal'):
+            peer = self.inbox.store.identity(network, '!' + network, network)
+            up = self.inbox.upload(peer['person_id'], 'file', b'data', 'x.bin')
+            self.inbox.mx = Mock(return_value={'event_id': '$' + network})
+            self.assertEqual(self.inbox.send(peer['person_id'], {'upload_id': up['upload_id'], 'client_id': network + '-12345678'})['message']['msgtype'], 'm.file')
+        up = self.file_upload()
+        peer = self.inbox.store.identity('telegram', '!other', 'Other')
+        with self.assertRaises(EngineError) as err:
+            self.inbox.send(peer['person_id'], {'upload_id': up['upload_id'], 'client_id': 'other-12345678'})
+        self.assertEqual(err.exception.code, 'upload_expired')
+        self.inbox.uploads[up['upload_id']]['expires'] = time.time() - 1
+        with self.assertRaises(EngineError) as err:
+            self.inbox.send(self.pid, {'upload_id': up['upload_id'], 'client_id': 'expired-12345678'})
+        self.assertEqual((err.exception.code, err.exception.status), ('upload_expired', 409))
+        marmot = self.inbox.store.identity('messenger', 'abc', 'Marmot')
+        with self.assertRaises(EngineError) as err: self.inbox.upload(marmot['person_id'], 'voice', b'OggS' + b'\0' * 10)
+        self.assertEqual((err.exception.code, err.exception.status), ('media_unsupported', 409))
+        self.assertIn('Voice notes', str(err.exception))
+        # A bridge-only upload has no local copy for the Wizard engine: attach again instead of sending nothing.
+        up = self.file_upload()
+        with self.inbox.store.db() as db:
+            db.execute("UPDATE identity SET network='messenger' WHERE id=?", (self.a['id'],))
+        with self.assertRaises(EngineError) as err:
+            self.inbox.send(self.pid, {'upload_id': up['upload_id'], 'client_id': 'network-12345678'})
+        self.assertEqual(err.exception.code, 'upload_expired')
+
+    def test_james_uploaded_active_content_is_attachment_only(self):
+        import io
+        for n, (data, mime) in enumerate([(b'<html><script>alert(1)</script>', 'text/html'),
+                                         (b'<svg onload="alert(1)">', 'image/svg+xml'),
+                                         (b'alert(1)', 'application/javascript'), (b'%PDF-1.7\ndata', 'application/pdf')]):
+            with self.subTest(mime=mime):
+                up = self.file_upload(data, 'active.html')
+                # Different media per send avoids a previous iteration's cache.
+                self.inbox.uploads[up['upload_id']]['mxc'] += str(n)
+                self.inbox.mx = Mock(return_value={'event_id': '$file%d' % n})
+                out = self.inbox.send(self.pid, {'upload_id': up['upload_id'], 'client_id': 'active-12345678-%d' % n})
+                response = io.BytesIO(data)
+                response.headers = {'Content-Type': mime}
+                with patch('unified.urlopen', return_value=response):
+                    blob = self.inbox.media(out['event_id'], 'full')
+                # Active content stays an opaque download; real PDF bytes keep their type so phones save a .pdf, never .bin.
+                self.assertEqual((blob.mime, blob.inline), ('application/pdf' if data.startswith(b'%PDF') else 'application/octet-stream', False))
+                self.assertEqual(blob.path.read_bytes(), data)
 
     def test_read_marks_chat_read_and_posts_receipt(self):
         self.ingest(self.event('$1', {'msgtype': 'm.text', 'body': 'a'}, ts=10), self.event('$2', {'msgtype': 'm.text', 'body': 'b'}, ts=20))

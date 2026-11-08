@@ -11,9 +11,23 @@
     "browser_origins": "Exact comma-separated MESSENGER_ALLOWED_ORIGINS; no permissive CORS. Non-browser clients may omit Origin. Cross-site browser requests are rejected.",
     "secret_transport": "The owner passphrase travels only in an authenticated HTTPS JSON body and private provider stdin, never URLs, logs or browser storage. Private-key import is disabled.",
     "browser_session": "HttpOnly, Secure, SameSite=Strict app-path cookie; cookie writes also require exact Origin and X-Messenger-CSRF. Machine bearer never appears in the view.",
-    "initial_browser_access": "Trusted API caller issues a one-use ticket, exchanged via POST /api/view/session. Ticket belongs in the initial URL fragment only and is removed immediately. Empty-body exchanges never authenticate. Owner-bootstrap tickets can last seven days only before account setup.",
+    "initial_browser_access": "Machine-issued tickets are setup-only, never unlocked owner sessions. Exchanges are rejected after an account or owner verifier exists. Machine-issued launcher tickets cannot establish the first owner verifier. Initial enrollment requires an independently provisioned BrowserAuth.ticket(bootstrap=True); no machine-bearer HTTP route issues enrollment authority. Tickets belong only in the URL fragment. Existing accounts require owner passphrase/passkey proof. Bearer-authenticated HTML never sets an owner cookie. Pre-v2 sessions and tickets are invalidated on upgrade.",
     "existing_browser_access": "POST /api/view/unlock proves the dedicated passphrase against a salted scrypt verifier and unlocks the provider; it cannot create/import an account. Six failed guesses per minute are rate-limited. No anonymous initial-account creation.",
-    "stored_browser_auth": "Only ticket/session hashes and a salted passphrase verifier are stored; no plaintext passphrase, cookie capability or message body. Atomic 0600 app-data file."
+    "stored_browser_auth": "Browser-auth stores only ticket/session hashes and a salted passphrase verifier; no plaintext passphrase, cookie capability or message body. Atomic 0600 app-data file. Optional local trusted-owner unlock stores a separate AES-GCM envelope, never plaintext.",
+    "local_trusted_wizard_owner": "Disabled unless MESSENGER_TRUST_WIZARD_OWNER=1 with separate private proof/wrapping key files outside data. Every non-machine API call additionally requires a short-lived one-use HMAC proof from the authenticated owner gateway. All bearer modes remain agent-only. One verified passphrase unlock with explicit remember_wizard:true seals a remembered unlock; signed GET /api/view/session can reopen the original encrypted vault after restart. Lock durably forgets it. No account or enrollment reset. See TRUSTED-WIZARD-OWNER.md."
+  },
+  "agent_policy": {
+    "default": "no_access",
+    "modes": [
+      "no_access",
+      "read_only",
+      "draft_only",
+      "full_access"
+    ],
+    "authority": "Only an authenticated owner browser session with Origin and CSRF can change policy. Machine bearers cannot change policy, unlock sessions, or link/manage provider accounts in any mode.",
+    "compatibility": "Legacy until-only grants fail closed to no_access. Legacy minutes-only enabling requests are rejected; minutes:0 still revokes. Optional explicit-mode expiry is 1..1440 minutes; expiry returns to no_access.",
+    "semantics": "no_access permits health/status/public identity and setup-only launch tickets. read_only additionally permits explicitly allowlisted conversation reads. draft_only adds local draft create/update only, not previews, sends, reactions, read receipts, typing, edits, deletes, invites, logins, account links, translation calls, or provider writes. full_access enables explicitly allowlisted conversation mutations, never owner-control routes. Unknown routes fail closed.",
+    "boundary": "Application defense in depth only; not protection against host root. Independently administered sender enforcement is a separate integration."
   },
   "success": {
     "ok": true,
@@ -32,7 +46,235 @@
     "ready"
   ],
   "setup_semantics": "No identity is created automatically. A dedicated vault passphrase of at least 16 characters is needed to create/unlock. Keyring remains encrypted at rest. Restart always relocks. account_configured reports whether an identity exists; ready may have identity=null when a new vault has only been unlocked. The one messaging key is separate from Wizard root signing.",
+  "group_features": {
+    "timeline_person_members": "Joined group members with id (network identity, never guessed), name, disambiguated label, identity_id and opaque avatar tag; available only for audited mention-capable bridges.",
+    "outgoing_mentions": "Existing send/preview-confirm paths derive exact @member-label tokens from that channel's cached members. Serialize m.mentions.user_ids and escaped matrix.to links. Client-supplied identity lists are never authoritative.",
+    "message_mentions": "mentions: [{id,name,start,end}] uses UTF-16 offsets into original; mentioned:boolean means an explicit protocol mention targets owner/owner ghost. Plain-text owner names never imply a mention.",
+    "unread_mentions": "Existing people/groups rows include unread_mentions, following last_read_ts. Muted/low-priority push rules remain unchanged; no permission request is added.",
+    "reactions": "Existing reaction entries add reactors:[{id,name,mine,avatar}] and identities_complete:boolean. Missing senders/names produce counts only, never invented identities. Marmot list-valued by_emoji retains actual pubkeys; aggregate-only values stay unnamed.",
+    "network_limits": "See docs/group-mentions-reactions.md. Unsupported/unverified native tagging has no member picker; LINE setup repair does not assert native mention support. No new API authority or provider login."
+  },
   "routes": [
+    {
+      "method": "PUT",
+      "path": "/api/view/voice-original?take=<id>&duration=<ms>&mime=<reported>&size=<bytes>",
+      "auth": "owner cookie + allowed Origin + CSRF; trusted ingress proof when enabled; all bearers refused",
+      "body": "exact original raw bytes, 1..25 MiB; bounded metadata; aggregate private archive budget 250 MiB; never a send or capture ack",
+      "result": "opaque id, take, duration, mime, size, server-computed sha256 and first 32 bytes head_hex; unsupported audio retained unchanged"
+    },
+    {
+      "method": "GET",
+      "path": "/api/view/voice-original/<opaque-id>",
+      "auth": "owner cookie and trusted ingress proof when enabled; all bearers refused; no public or agent tool",
+      "result": "byte-exact application/octet-stream with no-store; opaque-id must be 64 lowercase hexadecimal characters, never a path"
+    },
+    {
+      "method": "GET",
+      "path": "/api/view/trusted-owner",
+      "auth": "explicit local opt-in + authenticated gateway HMAC proof, never a bearer",
+      "result": "enabled:true, remembered:boolean; no key, envelope or password readback"
+    },
+    {
+      "method": "GET",
+      "path": "/api/view/agents",
+      "auth": "owner cookie; every bearer refused",
+      "result": "agents (id, name, level, label, created, last_used, key_hint; never a key or hash), app_key level, levels with draft_only recommended, content-free log"
+    },
+    {
+      "method": "POST",
+      "path": "/api/view/agents",
+      "auth": "owner cookie + Origin + CSRF",
+      "body": {
+        "name": "1..60 characters"
+      },
+      "result": "agent (level no_access) and key, returned once only"
+    },
+    {
+      "method": "POST",
+      "path": "/api/view/agents/wizard/{agent_id}",
+      "auth": "owner cookie + Origin + CSRF; every bearer (including the Wizard gateway) refused",
+      "body": {
+        "level": "no_access|read_only|draft_only"
+      },
+      "result": "agents listing; draft_and_send is refused for Wizard agents"
+    },
+    {
+      "method": "POST",
+      "path": "/api/view/agents/{id|app-key}",
+      "auth": "owner cookie + Origin + CSRF",
+      "body": {
+        "level": "no_access|read_only|draft_only|draft_and_send"
+      },
+      "result": "agents listing"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/view/agents/{id}",
+      "auth": "owner cookie + Origin + CSRF",
+      "result": "agents listing; the key stops working at once"
+    },
+    {
+      "method": "GET",
+      "path": "/api/view/agent-access",
+      "auth": "owner cookie",
+      "result": "mode, enabled, until (milliseconds or null), content-free log, boundary"
+    },
+    {
+      "method": "POST",
+      "path": "/api/view/agent-access",
+      "auth": "owner cookie + Origin + CSRF",
+      "body": {
+        "mode": "no_access|read_only|draft_only|full_access",
+        "minutes": "optional expiry 1..1440"
+      },
+      "result": "persisted policy state"
+    },
+    {
+      "method": "GET",
+      "path": "/api/drafts",
+      "auth": "owner or read_only/draft_only/full_access bearer",
+      "result": "drafts array"
+    },
+    {
+      "method": "POST",
+      "path": "/api/drafts",
+      "auth": "owner or draft_only/full_access bearer",
+      "body": {
+        "person_id": "unified person ID",
+        "identity_id": "explicit unified channel ID",
+        "text": "text up to 16384 characters; owner may start an attachment-only draft"
+      },
+      "result": "draft with id, revision, state; one active draft per chat, otherwise 409 draft_exists; never sends"
+    },
+    {
+      "method": "GET",
+      "path": "/api/drafts/{id}",
+      "auth": "owner or read_only/draft_only/full_access bearer",
+      "result": "draft with attachments and last editor"
+    },
+    {
+      "method": "POST",
+      "path": "/api/drafts/{id}",
+      "auth": "owner or draft_only/full_access bearer",
+      "body": {
+        "revision": "required exact current integer",
+        "person_id": "recipient",
+        "identity_id": "channel",
+        "text": "body; may be empty while editing"
+      },
+      "result": "new revision; owner or creator agent may update, and agents may extend the owner's own draft; all previous previews invalidated"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/drafts/{id}/attachments?revision={revision}&name={name}&mime={mime}",
+      "auth": "owner or draft_only/full_access bearer",
+      "body": "raw file bytes; max 25 MB each, 10 per draft, 100 MB total; server sniffs images",
+      "result": "draft with attachment metadata and new revision; no send"
+    },
+    {
+      "method": "GET",
+      "path": "/api/drafts/{id}/attachments/{attachment_id}",
+      "auth": "owner or read_only/draft_only/full_access bearer",
+      "result": "private attachment bytes"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/drafts/{id}/attachments/{attachment_id}",
+      "auth": "owner or draft_only/full_access bearer",
+      "body": {
+        "revision": "required exact current integer"
+      },
+      "result": "draft with attachment removed and new revision"
+    },
+    {
+      "method": "POST",
+      "path": "/api/drafts/{id}/preview",
+      "auth": "owner cookie + Origin + CSRF only",
+      "body": {
+        "revision": "exact current integer"
+      },
+      "result": "draft with server-bound original/translated preview"
+    },
+    {
+      "method": "POST",
+      "path": "/api/drafts/{id}/send",
+      "auth": "owner cookie + Origin + CSRF only",
+      "body": {
+        "revision": "exact reviewed integer",
+        "send_original": "explicit true only for original fallback"
+      },
+      "result": "draft and delivery; idempotent server preview. Recipient/body overrides ignored. No send on create/update/preview. Ambiguous submissions retain sending state and cannot be edited."
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/drafts/{id}",
+      "auth": "owner cookie + Origin + CSRF only",
+      "body": {
+        "revision": "exact current integer"
+      },
+      "result": "deleted; in-flight drafts cannot be deleted"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/unified/people/{person_id}/upload",
+      "query": {
+        "kind": "image (default) | voice | file",
+        "name": "URL-encoded original filename, used only for kind=file; optional, defaults to file"
+      },
+      "body": "Raw bytes, 1..26214400 bytes (25 MiB); Content-Length required, no Transfer-Encoding",
+      "result_fields": [
+        "upload_id",
+        "mime",
+        "size"
+      ],
+      "file_result_fields": [
+        "upload_id",
+        "mime",
+        "size",
+        "name"
+      ],
+      "notes": "Any-file support requested by James, 26 Oct 2026. Files keep the basename after / or backslash, remove Unicode control/format/surrogate characters and leading spaces/dots, collapse whitespace, and cap the name at 120 characters while retaining the final extension (an extension alone over 119 characters is truncated). Empty names become file. MIME comes from magic bytes (including PDF and ZIP), never the client Content-Type or extension; unknown bytes use application/octet-stream. Synapse receives the fixed filename attachment. Telegram, WhatsApp and Signal only. Handles are person-bound, expire after one hour and are consumed on send. Existing image/voice results are unchanged.",
+      "errors": {
+        "invalid_upload": "400 for an unknown kind; 415 for unsupported image/voice bytes",
+        "too_large": "413 for an empty or oversized body",
+        "media_unsupported": "409 on a non-Matrix network",
+        "invalid_length": "400 for an invalid Content-Length or a truncated body",
+        "invalid_request": "400 for Transfer-Encoding"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/people/{person_id}/send",
+      "body": {
+        "client_id": "Required, 8..64 characters matching [A-Za-z0-9_-]",
+        "upload_id": "Single file, photo or voice upload handle",
+        "text": "Optional text; for files sent immediately after the file as a separate m.text, with deterministic transaction client_id + .caption",
+        "upload_ids": "Alternative to upload_id: 2..10 distinct still-photo handles only; files (even image bytes) and voice handles rejected",
+        "identity_id": "Optional channel in this person's identities",
+        "reply_to": "Optional message in this channel; files carry the reply relation"
+      },
+      "result_fields": [
+        "state",
+        "event_id",
+        "message"
+      ],
+      "file_result_fields": [
+        "state",
+        "event_id",
+        "message",
+        "messages"
+      ],
+      "notes": "Files send m.file with body=filename=name, url=mxc and info={mimetype,size}; stored file media has mxc,mime,size,filename. Public rows omit mxc. messages contains the file followed by any separate caption. Duplicate sends return the existing rows. Partial caption failures retain the upload handle for an idempotent retry. Non-inline types (HTML, SVG, JS, PDF, etc.) stay application/octet-stream attachment downloads with nosniff and sandbox CSP.",
+      "errors": {
+        "invalid_client_id": "400 for missing or invalid client_id",
+        "upload_expired": "409 for missing, expired or another person's handle",
+        "invalid_album": "400 for invalid album shape or any non-photo handle",
+        "media_unsupported": "409 on a non-Matrix network",
+        "invalid_reply": "400 for a reply in another channel",
+        "invalid_identity": "400 for another person's channel",
+        "invalid_input": "400 for invalid text"
+      }
+    },
     {
       "method": "GET",
       "path": "/healthz",
@@ -237,7 +479,7 @@
       "path": "/api/view/ticket",
       "auth": "machine bearer only",
       "body": {
-        "bootstrap": "optional boolean; longer lifetime allowed only with no configured account"
+        "bootstrap": "ignored by machine HTTP issuance; returned tickets are launcher-only, not owner enrollment or unlock authority"
       },
       "result": {
         "ticket": "single-use opaque capability",
@@ -336,7 +578,25 @@
       "method": "GET",
       "path": "/api/unified/people/{id}",
       "auth": true,
-      "result": "person, messages (original/translated/network), history_warning"
+      "result": "person, messages (original/translated/network), history_warning, has_more, next_cursor (person-bound timestamp+id position; send as cursor for older pages)",
+      "query": {
+        "limit": "1..2000",
+        "cursor": "optional opaque next_cursor",
+        "before": "optional legacy timestamp cutoff, not tie-safe paging"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/unified/search",
+      "auth": "authenticated owner browser; bearer access remains denied by current policy allowlist",
+      "query": {
+        "q": "1..512 characters, 1..32 literal AND words",
+        "network": "optional exact network",
+        "thread": "optional exact identity ID",
+        "limit": "1..100, default 50",
+        "cursor": "optional scoped next_cursor"
+      },
+      "result": "messages (account, network, thread, message_id, timestamp, original, translated, person_id, display_name), has_more, next_cursor; server-derived owner account; plaintext stored-history only"
     },
     {
       "method": "POST",
@@ -385,6 +645,99 @@
       "body": {
         "preview_id": "server preview ID",
         "send_original": "explicit boolean"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/unified/people/{id}/catch-up",
+      "auth": true,
+      "result": "owner session only (machine/agent keys get 403 in every mode): {grant:{mode,until}|null, cached:{bullets:[{kind,text,refs}],count,parts,model,basis,created}|null, job:{state,done,total,count}|null, model, models, default}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/people/{id}/catch-up",
+      "auth": true,
+      "result": "owner session only: starts a Tinfoil summary of ALL unread messages (no cap; long chats are read in parts and merged); 403 catchup_not_allowed without a grant; returns {job}",
+      "body": {
+        "since": "optional ms timestamp to start from"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/people/{id}/catch-up/grant",
+      "auth": true,
+      "result": "owner session only: records the owner's choice for this chat; Tinfoil summarization only, never agent access",
+      "body": {
+        "mode": "once | day | always"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/people/{id}/catch-up/revoke",
+      "auth": true,
+      "result": "owner session only: removes the grant; clear:true also deletes the cached summary",
+      "body": {
+        "clear": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/unified/catch-up/settings",
+      "auth": true,
+      "result": "owner session only: {model, models:[glm-5-3, deepseek-v4-1-flash], default, grants:[{person_id,name,mode,until}]}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/catch-up/settings",
+      "auth": true,
+      "result": "owner session only: sets the summary model (Tinfoil models only)",
+      "body": {
+        "model": "glm-5-3"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/unified/labels",
+      "auth": true,
+      "result": "owner session only (machine/agent keys get 403): {labels:[{name,chats}], rev}; includes empty labels"
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/labels",
+      "auth": true,
+      "result": "owner session only: creates a label (no duplicates, case-insensitive); returns the catalogue plus label",
+      "body": {
+        "name": "WizardOS"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/labels/rename",
+      "auth": true,
+      "result": "owner session only: renames a label everywhere; onto an existing name it merges",
+      "body": {
+        "from": "WizardOS",
+        "to": "Wizard OS"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/labels/delete",
+      "auth": true,
+      "result": "owner session only: deletes the label; chats are never deleted",
+      "body": {
+        "name": "WizardOS"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/unified/people/{person_id}/labels",
+      "auth": true,
+      "result": "owner session only: sets the labels of any chat (person, group or merged person: every identity); returns labels, catalog, rev",
+      "body": {
+        "labels": [
+          "WizardOS"
+        ]
       }
     },
     {
@@ -474,8 +827,53 @@
     ],
     "test_only_loopback": "WN_ALLOW_LOOPBACK_RELAYS=1; never enable in production"
   },
+  "agent_keys": {
+    "format": "Authorization: Bearer wzak_<12 hex id>_<secret>",
+    "storage": "/data/agent-keys.json, mode 0600, SHA-256 of the secret only",
+    "levels": {
+      "no_access": "status/identity only",
+      "read_only": "read chats, threads and drafts",
+      "draft_only": "read + create/update/discard own unsent drafts; every provider write (send, retry, edit, delete, react, read receipts, typing, draft preview/send) refused",
+      "draft_and_send": "read, drafts and explicit message operations; never owner/admin routes"
+    },
+    "mcp_tools": [
+      "messenger_list_chats",
+      "messenger_read_thread",
+      "messenger_get_attachment",
+      "messenger_list_drafts",
+      "messenger_create_draft",
+      "messenger_update_draft",
+      "messenger_delete_draft",
+      "messenger_attach_to_draft",
+      "messenger_remove_draft_attachment"
+    ],
+    "mcp_media": {
+      "levels": "read_only and up (same capability as GET /api/unified/media/{id}, the view's own media route; No access refuses before any fetch)",
+      "reference": "messenger_read_thread messages with media carry attachment {index:0, kind: image|sticker|video|audio|voice|file, mime, name, size, w, h, duration, fetch:{tool:'messenger_get_attachment', chat_id, message_id, index}}; never an mxc URI or homeserver token",
+      "get_attachment": "messenger_get_attachment {chat_id, message_id, index?}: the message must belong to chat_id (otherwise not_found). Images use the view's media cache/fetch (full, else the homeserver 800 px preview; Pillow downscales to 1600 px when present) and return MCP content [text JSON metadata, {type:'image', data: base64, mimeType}] capped at 1.5 MiB; larger pictures return metadata with image:'not_returned'. Non-images return metadata only (no download), except text files up to 64 KiB, returned as text. Metadata carries the untrusted-content note."
+    },
+    "mcp_attachments": {
+      "levels": "draft_only and draft_and_send (same capability as PUT/DELETE /api/drafts/{id}/attachments)",
+      "tools": "messenger_create_draft and messenger_update_draft accept attachments, stored with the text in the same single revision (a viewer never sees a text-only or partly attached draft); messenger_attach_to_draft adds all its files in one revision; messenger_remove_draft_attachment removes by id. Every edit is revision-fenced.",
+      "item": "{\"path\": file inside the shared folder} or {\"base64\": bytes, \"name\": optional display name}; 1..10 per call, 10 per draft, 25 MiB each, 100 MiB across all drafts; type sniffed from bytes",
+      "shared_folder": "MESSENGER_AGENT_FILES_DIR (default /attachments, mounted read-only; Wizard: Files Messenger/Attachments). Relative paths, or absolute paths under MESSENGER_AGENT_FILES_HOST_DIR; .., other absolute paths, symlinks out and non-regular files are refused (invalid_attachment) before any draft write.",
+      "body_limit": "POST /mcp accepts up to 36 MiB only with a valid per-agent key or the gateway's grant; otherwise 64 KiB."
+    },
+    "mcp_auth": "Per-agent key in the Authorization header of POST /mcp. Without one (or with the shared Wizard app key) /mcp exposes only messenger_status and messenger_public_identity.",
+    "sending": "No MCP send tool for any key or Wizard agent. Only the owner's signed-in browser session sends a draft (preview then send, revision-fenced).",
+    "reuse": "agent_keys.py is app-agnostic (levels -> read/draft/send capabilities); another app supplies its own route/tool map."
+  },
   "parent_owned": [
     "Wizard app-manager and private proxy deployment; view, session bridge and API now ship inside the same Messenger image"
   ],
-  "unified_privacy": "Matrix and Telegram history and translations are plaintext in app-local SQLite. Telegram cloud chats are not end-to-end encrypted. Text selected for translation is sent only to Tinfoil. Existing Marmot keyring/history is unchanged."
+  "unified_privacy": "Matrix and Telegram history and translations are plaintext in app-local SQLite. Telegram cloud chats are not end-to-end encrypted. Text selected for translation is sent only to Tinfoil. Existing Marmot keyring/history is unchanged.",
+  "wizard_agents": {
+    "what": "The Wizard's own agents (Agent Service registry ids; main agent 'hermes'), each with one owner-picked level. No key to create or copy.",
+    "gateway_auth": "POST /mcp with X-Wizard-Grant: <the Agent Service gateway's app grant key> (wizard-os spec/PERMISSIONS.md layer 2). Messenger hashes it and accepts it only when it matches the from: host:agent-service row (outside the app-ID namespace) in the incoming list of its grants file ($WIZARD_GRANTS_FILE, written by the App Manager); Authorization is not used for it. Accepted on /mcp only; any other route refuses a request carrying it (401). A wrong or other app's grant names nobody. The grants file's enforce flag is ignored (Messenger is not enforce-ready).",
+    "agent_identity": "X-Wizard-Agent (^[a-z0-9][a-z0-9_-]{0,63}$) and URI-encoded X-Wizard-Agent-Label, trusted only together with the gateway's grant. The gateway authenticates each agent with that agent's own gateway token.",
+    "levels": "no_access (default, also for unknown agents), read_only, draft_only. Never draft_and_send.",
+    "tools_list": "The gateway gets the full message tool list (it caches one list for all agents); each tools/call is checked against the named agent's level. A gateway call naming no agent runs nothing.",
+    "storage": "/data/wizard-agents.json, mode 0600; corrupt store fails closed (every agent No access).",
+    "owner_listing": "GET /api/view/agents adds wizard_agents (main agent always listed), wizard_levels and gateway_connected."
+  }
 }
